@@ -112,10 +112,16 @@ jobs:
       - name: gitleaks pre-commit hook bootstraps without Go or a cache
         env:
           PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit-empty
+        # The runner image ships Go, sometimes next to git in /usr/bin, so dropping folders from
+        # PATH is not enough. The runner is thrown away after the job; renaming is safe here.
         run: |
-          PATH="$(printf '%s' "$PATH" | tr ':' '\n' | while read -r dir; do
-            [ -x "$dir/go" ] || printf '%s\n' "$dir"; done | paste -sd: -)"
-          export PATH
+          for _ in 1 2 3 4 5; do
+            go_bin="$(command -v go)" || break
+            echo "hiding $go_bin"
+            sudo mv "$(readlink -f "$go_bin")" "$(readlink -f "$go_bin").hidden"
+            [ -e "$go_bin" ] && sudo mv "$go_bin" "$go_bin.hidden"
+            hash -r
+          done
           if command -v go; then echo "::error::go is still on PATH"; exit 1; fi
           echo "go: not on PATH"
           if [ -e "$PRE_COMMIT_HOME" ]; then echo "::error::pre-commit cache exists"; exit 1; fi
