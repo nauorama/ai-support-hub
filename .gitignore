@@ -36,3 +36,6 @@ evals/runs/**/raw/
 .idea/
 .vscode/
 .DS_Store
+
+# import-linter
+.import_linter_cache/

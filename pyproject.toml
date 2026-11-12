@@ -10,7 +10,9 @@ dependencies = ["support-hub-api", "support-tools", "hub-evals"]
 
 [dependency-groups]
 dev = [
+    "import-linter==2.15",
     "mypy==2.4.1",
+    "pip-audit==2.10.1",
     "pre-commit==4.7.0",
     "pytest==9.2.0",
     "ruff==0.17.3",
@@ -43,15 +45,62 @@ known-first-party = ["hub", "support_tools", "hub_evals"]
 # Tests use assert and run local subprocesses (make) on purpose.
 "**/tests/**" = ["S101", "S603", "S607"]
 
-# A new tests folder (e.g. evals/tests) must be added to mypy `files` and pytest `testpaths`.
+# Module rules from docs/design.md §8. Each contract has an id: the unit tests check that every
+# rule of the document has its contract and plant a wrong import to prove each one fails.
+# The litellm rule ("only hub.llm.gateway imports litellm") is added with the gateway in P3-01.
+[tool.importlinter]
+root_packages = ["hub", "support_tools", "hub_evals"]
+
+[[tool.importlinter.contracts]]
+id = "domain-imports-nothing"
+name = "hub.domain imports nothing from the project"
+type = "forbidden"
+source_modules = ["hub.domain"]
+# hub.* also matches hub.domain itself; import-linter allows a package to import its own modules.
+forbidden_modules = ["hub.*", "support_tools", "hub_evals"]
+
+[[tool.importlinter.contracts]]
+id = "services-not-api-graph"
+name = "guardrails, kb, llm, tools, memory, audit do not import api or graph"
+type = "forbidden"
+source_modules = [
+    "hub.guardrails",
+    "hub.kb",
+    "hub.llm",
+    "hub.tools",
+    "hub.memory",
+    "hub.audit",
+]
+forbidden_modules = ["hub.api", "hub.graph"]
+
+[[tool.importlinter.contracts]]
+id = "api-mcp-independent"
+name = "apps/api (hub) and apps/mcp_server (support_tools) do not import each other"
+type = "independence"
+modules = ["hub", "support_tools"]
+
+[[tool.importlinter.contracts]]
+id = "evals-mcp-independent"
+name = "evals (hub_evals) and apps/mcp_server (support_tools) do not import each other"
+type = "independence"
+modules = ["hub_evals", "support_tools"]
+
+# A new tests folder must be added to mypy `files` and pytest `testpaths`.
 [tool.mypy]
 strict = true
 python_version = "3.13"
 # Several `tests` folders exist; explicit bases give each test file a unique module name.
 mypy_path = "apps/api/src:apps/mcp_server/src:evals/src"
 explicit_package_bases = true
-files = ["apps/api/src", "apps/api/tests", "apps/mcp_server/src", "apps/mcp_server/tests", "evals/src"]
+files = [
+    "apps/api/src",
+    "apps/api/tests",
+    "apps/mcp_server/src",
+    "apps/mcp_server/tests",
+    "evals/src",
+    "evals/tests",
+]
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
-testpaths = ["apps/api/tests/unit", "apps/mcp_server/tests"]
+testpaths = ["apps/api/tests/unit", "apps/mcp_server/tests", "evals/tests"]

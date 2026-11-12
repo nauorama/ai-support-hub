@@ -1,0 +1,142 @@
+# CI from docs/operations.md §5. Jobs added later: web (P10), e2e (P10), integration tests (P2),
+# pnpm audit and Dependabot (P8-06). Every check runs a make target where one exists, so CI and
+# a laptop run the same commands. Actions are pinned by commit SHA; the comment names the release.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.11.8"
+  # Tests never need a provider key (AGENTS.md): the fake model mode answers instead.
+  # Set empty for every job, so no step can pick a key up from the runner.
+  ANTHROPIC_API_KEY: ""
+  OPENAI_API_KEY: ""
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
+      - name: ruff, mypy, import-linter (eslint, tsc once apps/web exists)
+        run: make lint
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
+      - name: make version (test_repo_tooling.py reads make's database)
+        run: make --version | head -1
+      # The key check runs in the same shell as the tests, so a key set at any level
+      # (workflow, job or this step's env) fails here before a test can use it.
+      - name: Unit tests (no provider API keys)
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::a provider API key is set for the tests"
+            exit 1
+          fi
+          echo "ANTHROPIC_API_KEY and OPENAI_API_KEY are empty"
+          make test
+
+  data-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
+      - run: make data-check
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: "8.30.1" # keep equal to the gitleaks rev in .pre-commit-config.yaml
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans the whole history
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
+
+      # The pre-commit hook runs `gitleaks git --staged`, which scans nothing in CI, so the
+      # real scan uses the release binary, checked against its published SHA-256.
+      - name: gitleaks (whole git history)
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$archive"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --no-banner --verbose .
+
+      - name: pip-audit (locked dependencies, with hashes)
+        run: |
+          uv export --locked --all-packages --all-groups --no-emit-workspace \
+            --format requirements-txt -o "$RUNNER_TEMP/requirements.txt"
+          uv run pip-audit -r "$RUNNER_TEMP/requirements.txt" \
+            --require-hashes --disable-pip --strict --progress-spinner off
+
+  # Informational, NOT a required check: it downloads Go from go.dev, so an outage there must not
+  # block a merge. Shows that the gitleaks pre-commit hook (language: golang) installs on a
+  # machine with no Go and no pre-commit cache, as on a fresh laptop.
+  hook-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
+      - name: gitleaks pre-commit hook bootstraps without Go or a cache
+        env:
+          PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit-empty
+        # The runner image ships Go, sometimes next to git in /usr/bin, so dropping folders from
+        # PATH is not enough. The runner is thrown away after the job; renaming is safe here.
+        run: |
+          for _ in 1 2 3 4 5; do
+            go_bin="$(command -v go)" || break
+            echo "hiding $go_bin"
+            sudo mv "$(readlink -f "$go_bin")" "$(readlink -f "$go_bin").hidden"
+            [ -e "$go_bin" ] && sudo mv "$go_bin" "$go_bin.hidden"
+            hash -r
+          done
+          if command -v go; then echo "::error::go is still on PATH"; exit 1; fi
+          echo "go: not on PATH"
+          if [ -e "$PRE_COMMIT_HOME" ]; then echo "::error::pre-commit cache exists"; exit 1; fi
+          echo "pre-commit cache: none ($PRE_COMMIT_HOME)"
+          uv run pre-commit run gitleaks --all-files --verbose

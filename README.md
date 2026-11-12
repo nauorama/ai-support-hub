@@ -41,6 +41,18 @@ Python 3.13 · FastAPI · LangGraph · LiteLLM (Anthropic + OpenAI) · Qdrant (h
 
 The design package was written first. A coding agent builds the system phase by phase from [the build plan](docs/build-plan.md); the owner reviews each phase, checks all evaluation data by hand and makes the risk decisions (confidence threshold, auto-reply on or off). Each phase ends with a walkthrough in `docs/walkthrough/`.
 
+## CI and branch protection
+
+CI (`.github/workflows/ci.yml`, see [operations](docs/operations.md) §5) runs on every pull request and every push to `main`. It has four required jobs: `lint` (ruff, mypy strict, import-linter), `test` (unit tests, with no provider API keys), `data-check`, and `security` (gitleaks over the whole history, pip-audit). Each runs the same `make` target you run locally. A fifth job, `hook-bootstrap`, is **informational and not required**: it shows that the gitleaks pre-commit hook installs on a machine with no Go and no pre-commit cache. It downloads Go from go.dev, so an outage there must not block a merge.
+
+`main` is protected. The owner turns this on in GitHub (Settings → Rules → Rulesets, or Settings → Branches). The rule for `main`:
+
+- Changes reach `main` only through a pull request. Nobody pushes to `main` directly, admins included.
+- Required status checks: `lint`, `test`, `data-check`, `security` (not `hook-bootstrap`). The branch must be up to date with `main` before merging.
+- Every review conversation must be resolved before merging.
+- No force-pushes, and `main` cannot be deleted.
+- One task = one pull request (see [build process](docs/build-process.md)). The coding agent opens it; only the owner merges.
+
 ## Honest limits
 
 - Synthetic company, synthetic customers, synthetic tickets. Numbers show that the method works, not how a real support team would perform.
