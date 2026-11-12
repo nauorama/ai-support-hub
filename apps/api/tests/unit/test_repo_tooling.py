@@ -6,6 +6,7 @@ document fails this test until the repository catches up.
 
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -51,9 +52,34 @@ def _stub_targets() -> set[str]:
     return _makefile_list("NOT_IMPLEMENTED")
 
 
-def _makefile_targets() -> set[str]:
-    targets = set(re.findall(r"^([a-z][a-z0-9-]*):", MAKEFILE, flags=re.MULTILINE))
-    return targets | _makefile_list("BUILT") | _stub_targets()
+def _rule_targets() -> set[str]:
+    """Targets that have a rule of their own, e.g. `setup:` or `eval smoke:`.
+
+    Skips variable assignments (`X := ...`), special targets (`.PHONY:`), the shared stub rule
+    (`$(NOT_IMPLEMENTED):`), comments and recipe lines (they start with a tab).
+    """
+    targets: set[str] = set()
+    for match in re.finditer(r"^([^\s#.$][^:=]*?)\s*::?(?!=)", MAKEFILE, flags=re.MULTILINE):
+        targets |= set(match.group(1).split())
+    return targets
+
+
+STUB_RECIPE = ['\t@echo "make $@: not implemented"', "\t@exit 1"]
+
+
+def _shared_stub_recipe() -> list[str]:
+    match = re.search(r"^\$\(NOT_IMPLEMENTED\):\n((?:\t.*\n?)*)", MAKEFILE, flags=re.MULTILINE)
+    assert match is not None, "shared stub rule $(NOT_IMPLEMENTED): not found in Makefile"
+    return match.group(1).splitlines()
+
+
+def _assert_only_recipe_is_the_stub(target: str) -> None:
+    # Static check of the Makefile text, done before `make` is ever called. `make -n` is no
+    # protection on its own: GNU make still runs recipe lines that start with `+` or use $(MAKE).
+    assert target not in _rule_targets(), f"{target} is a stub but has a rule of its own"
+    assert _shared_stub_recipe() == STUB_RECIPE
+    assert not re.search(r"^-?include\b", MAKEFILE, flags=re.MULTILINE), "Makefile includes files"
+    assert "%" not in _rule_targets(), "pattern rules could add recipes to stub targets"
 
 
 def _env_example_names() -> set[str]:
@@ -68,11 +94,37 @@ def test_document_parsing_finds_something() -> None:
 
 
 def test_every_documented_command_is_a_make_target() -> None:
-    assert _documented_commands() - _makefile_targets() == set()
+    assert _documented_commands() - (_rule_targets() | _stub_targets()) == set()
 
 
 def test_built_and_stub_lists_do_not_overlap() -> None:
     assert _makefile_list("BUILT") & _stub_targets() == set()
+
+
+def test_every_built_target_has_its_own_rule() -> None:
+    # A name in BUILT (and .PHONY) without a rule would make `make <name>` exit 0 doing nothing.
+    assert _makefile_list("BUILT") - _rule_targets() == set()
+
+
+def test_no_stub_target_has_a_rule_of_its_own() -> None:
+    assert _stub_targets() & _rule_targets() == set()
+    assert _shared_stub_recipe() == STUB_RECIPE
+
+
+def test_every_tests_folder_is_type_checked_and_collected() -> None:
+    # A tests folder missing from these lists would silently never run (review note, P0-01).
+    config = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    mypy_files = set(config["tool"]["mypy"]["files"])
+    testpaths = config["tool"]["pytest"]["ini_options"]["testpaths"]
+    tests_folders = [p for p in ROOT.glob("*/tests") if p.is_dir()]
+    tests_folders += [p for p in ROOT.glob("apps/*/tests") if p.is_dir()]
+    assert tests_folders, "no tests folders found"
+    for folder in tests_folders:
+        relative = folder.relative_to(ROOT).as_posix()
+        assert relative in mypy_files, f"{relative} missing from [tool.mypy] files"
+        assert any(path.startswith(relative) for path in testpaths), (
+            f"{relative} missing from pytest testpaths"
+        )
 
 
 def test_every_documented_variable_is_in_env_example() -> None:
@@ -96,8 +148,9 @@ def test_env_example_urls_hold_credentials_only_for_localhost() -> None:
 
 @pytest.mark.parametrize("target", sorted(_stub_targets()))
 def test_unbuilt_target_says_not_implemented_and_fails(target: str) -> None:
-    # Dry run first (`make -n` executes nothing): only a target whose whole recipe is the stub
-    # may be run for real, so a mistake in the lists above can never start a real command.
+    _assert_only_recipe_is_the_stub(target)
+    # Safe only after the static check above: `make -n` still runs `+` and $(MAKE) lines, and the
+    # stub recipe has neither. The dry run confirms that make resolves the target to the stub.
     dry_run = subprocess.run(
         ["make", "--no-print-directory", "-n", "-C", str(ROOT), target],
         capture_output=True,
