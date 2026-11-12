@@ -1,0 +1,57 @@
+# Workspace root. Not a package itself: it only ties the members together,
+# holds the shared tool settings and the dev tools. One lock file: uv.lock.
+[project]
+name = "ai-support-hub"
+version = "0.0.0"
+description = "Enterprise AI Support Hub for Tallybridge (fictional payments company)"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+dependencies = ["support-hub-api", "support-tools", "hub-evals"]
+
+[dependency-groups]
+dev = [
+    "mypy==2.4.1",
+    "pre-commit==4.7.0",
+    "pytest==9.2.0",
+    "ruff==0.17.3",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["apps/api", "apps/mcp_server", "evals"]
+
+[tool.uv.sources]
+support-hub-api = { workspace = true }
+support-tools = { workspace = true }
+hub-evals = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# docs/ is the specification; its code blocks are illustrations, not code to lint.
+extend-exclude = ["apps/web", "evals/runs", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "ANN", "PT"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["hub", "support_tools", "hub_evals"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use assert and run local subprocesses (make) on purpose.
+"**/tests/**" = ["S101", "S603", "S607"]
+
+# A new tests folder (e.g. evals/tests) must be added to mypy `files` and pytest `testpaths`.
+[tool.mypy]
+strict = true
+python_version = "3.13"
+# Several `tests` folders exist; explicit bases give each test file a unique module name.
+mypy_path = "apps/api/src:apps/mcp_server/src:evals/src"
+explicit_package_bases = true
+files = ["apps/api/src", "apps/api/tests", "apps/mcp_server/src", "apps/mcp_server/tests", "evals/src"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
+testpaths = ["apps/api/tests/unit", "apps/mcp_server/tests"]

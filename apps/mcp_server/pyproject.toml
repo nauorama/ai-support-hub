@@ -1,0 +1,12 @@
+[project]
+name = "support-tools"
+version = "0.0.0"
+description = "MCP server with the support tools (core mock, Jira, Slack)"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+# Must never depend on `hub`: the two apps talk only over MCP (design §8).
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
