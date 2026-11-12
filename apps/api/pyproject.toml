@@ -1,5 +1,5 @@
 [project]
-name = "hub"
+name = "support-hub-api"
 version = "0.0.0"
 description = "Support Hub API, workflow and guardrails"
 requires-python = ">=3.13,<3.14"
@@ -9,3 +9,8 @@ dependencies = []
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14"]
 build-backend = "uv_build"
+
+# The import package stays `hub`; only the distribution name differs
+# (`hub` is taken on PyPI).
+[tool.uv.build-backend]
+module-name = "hub"

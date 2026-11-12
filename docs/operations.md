@@ -23,6 +23,7 @@ Requirements: Docker, Python 3.13 with `uv`, Node.js LTS with `pnpm`, `make`.
 | `make web-types` | generate TypeScript types from OpenAPI |
 | `make retention` | run the retention job once |
 | `make record-llm` | refresh recorded model responses for tests (real calls) |
+| `make eval-report RUN=<id> BASE=<id>` | compare two evaluation runs; see [eval plan](eval-plan.md) |
 | `make eval-judges` | measure the judges against the human-labelled validation set |
 | `make leak-scan` | scan database, logs and recorded model requests for card patterns and canary strings |
 | `make export-review-candidates` | export rejected and heavily edited drafts as candidates for new eval tickets |

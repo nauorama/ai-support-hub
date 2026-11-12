@@ -5,10 +5,10 @@ description = "Evaluation runner, metrics, judges and reports"
 requires-python = ">=3.13,<3.14"
 license = "MIT"
 # Imports hub.graph so evaluation runs the same code as production (design §8).
-dependencies = ["hub"]
+dependencies = ["support-hub-api"]
 
 [tool.uv.sources]
-hub = { workspace = true }
+support-hub-api = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.13.6,<0.14"]

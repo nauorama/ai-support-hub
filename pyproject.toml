@@ -6,7 +6,7 @@ version = "0.0.0"
 description = "Enterprise AI Support Hub for Tallybridge (fictional payments company)"
 requires-python = ">=3.13,<3.14"
 license = "MIT"
-dependencies = ["hub", "support-tools", "hub-evals"]
+dependencies = ["support-hub-api", "support-tools", "hub-evals"]
 
 [dependency-groups]
 dev = [
@@ -23,7 +23,7 @@ package = false
 members = ["apps/api", "apps/mcp_server", "evals"]
 
 [tool.uv.sources]
-hub = { workspace = true }
+support-hub-api = { workspace = true }
 support-tools = { workspace = true }
 hub-evals = { workspace = true }
 

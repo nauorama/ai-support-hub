@@ -72,7 +72,7 @@ Dependency notes: phases run in order. Exception: web tasks P10-01 to P10-04 nee
 
 | ID | Task | Size | Done when | Verify |
 |---|---|---|---|---|
-| P0-01 | **Repository skeleton.** Copy this design package into the new repository. Create the uv workspace (`apps/api`, `apps/mcp_server`, `evals`), the folder layout from [design](design.md) §8, `Makefile` with the commands from [operations](operations.md) §1 (not-yet-built commands print "not implemented" and exit 1), `.env.example`, `.gitignore`, MIT licence, pre-commit (ruff, gitleaks). | S | `make setup` works on a clean clone. `uv run python -c "import hub"` works. | `make setup && make lint` |
+| P0-01 | **Repository skeleton.** Copy this design package into the new repository. Create the uv workspace (`apps/api`, `apps/mcp_server`, `evals`), the folder layout from [design](design.md) §8, `Makefile` with the commands from [operations](operations.md) §1 (not-yet-built commands print "not implemented" and exit with an error), `.env.example`, `.gitignore`, MIT licence, pre-commit (ruff, gitleaks). | S | `make setup` works on a clean clone. `uv run python -c "import hub"` works. | `make setup && make lint` |
 | P0-02 | **CI skeleton.** `ci.yml` with lint, test, security, data-check jobs. ruff, mypy strict, import-linter contracts from design §8. Issue and pull-request templates. Branch protection described in the README. | S | CI is green on an empty project. A wrong import between modules fails CI (prove with a test commit, then remove it). | CI run link |
 
 **Gate 0:** clean clone → `make setup lint test` passes; CI green.
