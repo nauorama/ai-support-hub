@@ -206,6 +206,7 @@ Module rules (enforced by import-linter in CI):
 - `graph` is the only module that combines the others. `api` calls `graph` and repositories.
 - `apps/mcp_server` and `apps/api` do not import each other. They talk only over MCP.
 - `evals` imports `hub.graph` and runs the same code as production.
+- `evals` and `apps/mcp_server` do not import each other. Evaluation reaches the tools the way production does: through `hub.graph` and MCP.
 
 ## 9. Technology choices
 

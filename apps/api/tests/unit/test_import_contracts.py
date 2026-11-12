@@ -111,6 +111,23 @@ def test_api_and_mcp_server_rule_has_its_contract() -> None:
     assert set(contract["modules"]) == {"hub", "support_tools"}
 
 
+def test_evals_and_mcp_server_rule_has_its_contract() -> None:
+    assert "`evals` and `apps/mcp_server` do not import each other." in _module_rules()
+    contract = _contracts()["evals-mcp-independent"]
+    assert contract["type"] == "independence"
+    assert set(contract["modules"]) == {"hub_evals", "support_tools"}
+
+
+def test_every_contract_comes_from_a_design_rule() -> None:
+    # A contract without a rule in design §8 is a rule nobody agreed to.
+    assert set(_contracts()) == {
+        "domain-imports-nothing",
+        "services-not-api-graph",
+        "api-mcp-independent",
+        "evals-mcp-independent",
+    }
+
+
 def test_no_contract_is_weakened() -> None:
     # Ignored imports or allowed indirect imports would quietly switch a rule off (never-do 6).
     for contract_id, contract in _contracts().items():

@@ -196,7 +196,7 @@ References: [security](security.md) (all); eval plan §3 (attacks).
 | P8-03 | **Leak scan.** After an eval run: scan the database, logs and recorded model requests for card patterns and canaries (`make leak-scan`). Log and trace filter G9. | S | Scan result: 0. A planted leak in a test is found. | `make leak-scan` |
 | P8-04 | **Web and auth hardening.** Security headers and CSP, cookie flags, CSRF tests, lockout, rate-limit tests, input length limits, safe Markdown rendering rule for the web app. | M | Tests for each control. | `make test-int` |
 | P8-05 | **Privacy functions and scheduled jobs.** `POST /admin/jobs/{name}` with the job token: `retention`, `close-stale`, `recover-runs`, `ping`. Erasure endpoint with report, privacy text endpoint. | M | After erasure no row contains the customer's messages, memory or name; the audit chain still verifies. | `make test-int` |
-| P8-06 | **Supply chain and process.** pip-audit, pnpm audit, gitleaks, Dependabot; security checklist in the PR template; threat model table updated with the test that covers each threat. | S | CI jobs green; each threat T1–T15 names its test. | CI run link |
+| P8-06 | **Supply chain and process.** pip-audit, pnpm audit, gitleaks, Dependabot; pin the Go version that the gitleaks pre-commit hook downloads on machines without Go (`language_version` in `.pre-commit-config.yaml`; today pre-commit takes the latest Go from go.dev); security checklist in the PR template; threat model table updated with the test that covers each threat. | S | CI jobs green; each threat T1–T15 names its test. | CI run link |
 
 **Gate 8:** PAN leakage 0; internal leak 0; attack success ≤ 2% (or documented exceptions ≤ 5%).
 
