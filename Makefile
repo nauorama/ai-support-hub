@@ -7,8 +7,8 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test
-NOT_IMPLEMENTED := up down migrate seed kb-load dev test-int test-e2e data-check \
+BUILT := setup lint test data-check
+NOT_IMPLEMENTED := up down migrate seed kb-load dev test-int test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
 	record-llm leak-scan export-review-candidates rollback
 
@@ -28,11 +28,14 @@ lint:
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run mypy
-	@echo "import-linter: contracts are added in P0-02"
+	uv run lint-imports --no-logo
 	@if [ -f apps/web/package.json ]; then pnpm -C apps/web lint && pnpm -C apps/web typecheck; else echo "web: apps/web has no package.json yet, skipping eslint and tsc"; fi
 
 test:
 	uv run pytest
+
+data-check:
+	uv run python -m hub_evals.data_check data
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"
