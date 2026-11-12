@@ -1,7 +1,8 @@
 # Commands from docs/operations.md §1. Targets that are not built yet print
 # "not implemented" and exit with an error, so nobody mistakes a stub for a passing step.
-# When you implement a target, move it from NOT_IMPLEMENTED to BUILT: the unit tests run
-# every target in NOT_IMPLEMENTED.
+# When you implement a target, move it from NOT_IMPLEMENTED to BUILT: the unit tests check
+# (in make's database, without running anything) that every NOT_IMPLEMENTED target is the stub.
+# Do not use $(shell), $(eval) or include here: make runs them while reading the file.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
