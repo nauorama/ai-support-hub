@@ -10,6 +10,8 @@ import pytest
 
 import hub
 
+ROOT = Path(__file__).resolve().parents[4]
+
 HUB_MODULES = [
     "api",
     "auth",
@@ -37,6 +39,6 @@ def test_hub_module_is_a_package(module: str) -> None:
 
 
 def test_hub_is_installed_from_the_workspace() -> None:
-    # Guards against a same-named package from PyPI shadowing the workspace member.
+    # Guards against the unrelated `hub` package on PyPI shadowing the workspace member.
     assert hub.__file__ is not None
-    assert Path(hub.__file__).parent.parent.parent.name == "api"
+    assert Path(hub.__file__).resolve().parent == ROOT / "apps" / "api" / "src" / "hub"

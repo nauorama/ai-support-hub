@@ -43,6 +43,7 @@ known-first-party = ["hub", "support_tools", "hub_evals"]
 # Tests use assert and run local subprocesses (make) on purpose.
 "**/tests/**" = ["S101", "S603", "S607"]
 
+# A new tests folder (e.g. evals/tests) must be added to mypy `files` and pytest `testpaths`.
 [tool.mypy]
 strict = true
 python_version = "3.13"

@@ -13,7 +13,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[4]
 OPERATIONS = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
-BUILT_TARGETS = {"setup", "lint", "test"}
 
 
 def _section(text: str, heading: str) -> str:
@@ -39,12 +38,22 @@ def _documented_variables() -> set[str]:
     return names
 
 
+def _makefile_list(variable: str) -> set[str]:
+    # One logical line: the value plus any lines joined by a trailing backslash.
+    match = re.search(rf"^{variable} := ((?:.*\\\n)*.*)$", MAKEFILE, flags=re.MULTILINE)
+    assert match is not None, f"{variable} not found in Makefile"
+    return set(match.group(1).replace("\\", " ").split())
+
+
+def _stub_targets() -> set[str]:
+    # Taken from the Makefile, never from a hand-kept list: once a task implements a target and
+    # removes it from NOT_IMPLEMENTED, the test below stops running it (it may cost money).
+    return _makefile_list("NOT_IMPLEMENTED")
+
+
 def _makefile_targets() -> set[str]:
     targets = set(re.findall(r"^([a-z][a-z0-9-]*):", MAKEFILE, flags=re.MULTILINE))
-    stub_block = re.search(r"NOT_IMPLEMENTED := (.*?)\n\n", MAKEFILE, flags=re.DOTALL)
-    assert stub_block is not None
-    targets |= set(stub_block.group(1).replace("\\", " ").split())
-    return targets
+    return targets | _makefile_list("BUILT") | _stub_targets()
 
 
 def _env_example_names() -> set[str]:
@@ -62,6 +71,10 @@ def test_every_documented_command_is_a_make_target() -> None:
     assert _documented_commands() - _makefile_targets() == set()
 
 
+def test_built_and_stub_lists_do_not_overlap() -> None:
+    assert _makefile_list("BUILT") & _stub_targets() == set()
+
+
 def test_every_documented_variable_is_in_env_example() -> None:
     assert _documented_variables() - _env_example_names() == set()
 
@@ -74,8 +87,28 @@ def test_env_example_holds_no_secret_values() -> None:
             assert value == "", f"{name} must be empty in .env.example"
 
 
-@pytest.mark.parametrize("target", sorted(_documented_commands() - BUILT_TARGETS))
+def test_env_example_urls_hold_credentials_only_for_localhost() -> None:
+    # Local compose defaults like hub:hub@localhost are fine; anything else would be a secret.
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for host in re.findall(r"://[^/@\s:]+:[^/@\s]+@([^/:\s]+)", text):
+        assert host == "localhost", f"credentials for {host} in .env.example"
+
+
+@pytest.mark.parametrize("target", sorted(_stub_targets()))
 def test_unbuilt_target_says_not_implemented_and_fails(target: str) -> None:
+    # Dry run first (`make -n` executes nothing): only a target whose whole recipe is the stub
+    # may be run for real, so a mistake in the lists above can never start a real command.
+    dry_run = subprocess.run(
+        ["make", "--no-print-directory", "-n", "-C", str(ROOT), target],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert dry_run.stdout.split("\n") == [
+        f'echo "make {target}: not implemented"',
+        "exit 1",
+        "",
+    ]
     result = subprocess.run(
         ["make", "--no-print-directory", "-C", str(ROOT), target],
         capture_output=True,
