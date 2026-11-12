@@ -213,6 +213,10 @@ def test_imports_the_design_allows_keep_every_contract(tmp_path: Path) -> None:
         ("hub/api", "import hub.graph, hub.db"),
         ("hub/kb", "import hub.llm, hub.domain"),
         ("hub/guardrails", "import hub.domain"),
+        # domain is split into submodules (enums, models); `hub.*` in its contract must not
+        # forbid that. _planted_6.py is the plant on the next line.
+        ("hub/domain", "from hub.domain import _planted_6"),
+        ("hub/domain", "X = 1"),
     ]
     returncode, broken = _lint_copy(tmp_path, allowed)
     assert broken == set()

@@ -48,17 +48,18 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --all-packages --locked
-      - name: No provider API keys in the test job
+      - name: make version (test_repo_tooling.py reads make's database)
+        run: make --version | head -1
+      # The key check runs in the same shell as the tests, so a key set at any level
+      # (workflow, job or this step's env) fails here before a test can use it.
+      - name: Unit tests (no provider API keys)
         run: |
-          if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$OPENAI_API_KEY" ]; then
-            echo "::error::a provider API key is set in the test job"
+          if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::a provider API key is set for the tests"
             exit 1
           fi
           echo "ANTHROPIC_API_KEY and OPENAI_API_KEY are empty"
-      - name: make version (test_repo_tooling.py reads make's database)
-        run: make --version | head -1
-      - name: Unit tests
-        run: make test
+          make test
 
   data-check:
     runs-on: ubuntu-latest
@@ -107,8 +108,20 @@ jobs:
           uv run pip-audit -r "$RUNNER_TEMP/requirements.txt" \
             --require-hashes --disable-pip --strict --progress-spinner off
 
-      # Shows that the gitleaks pre-commit hook (language: golang) installs on a machine with
-      # no Go and no pre-commit cache, as on a fresh laptop: pre-commit must download Go itself.
+  # Informational, NOT a required check: it downloads Go from go.dev, so an outage there must not
+  # block a merge. Shows that the gitleaks pre-commit hook (language: golang) installs on a
+  # machine with no Go and no pre-commit cache, as on a fresh laptop.
+  hook-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
       - name: gitleaks pre-commit hook bootstraps without Go or a cache
         env:
           PRE_COMMIT_HOME: ${{ runner.temp }}/pre-commit-empty
