@@ -96,7 +96,7 @@ Trace attributes on every run: `ticket_id`, `intent`, `route`, `route_reasons`, 
 | `eval-full.yml` | weekly; manual | full dev run; opens a pull request with the report |
 | `deploy.yml` | push to main after `ci` is green; manual | build images → push → migrate → deploy → smoke check |
 
-Branch rule: `main` is protected; changes go through pull requests; CI must be green.
+Branch rule: changes reach `main` only through pull requests, and CI must be green. Until phase 12 the repository is private on the free GitHub plan, which has no branch protection, so the rule holds by process (only the owner merges). The owner turns branch protection on when the repository becomes public; the README section "CI and branch protection" lists the settings.
 
 ## 6. Deployment (demo, free tier)
 
