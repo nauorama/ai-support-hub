@@ -1,0 +1,15 @@
+[project]
+name = "hub-evals"
+version = "0.0.0"
+description = "Evaluation runner, metrics, judges and reports"
+requires-python = ">=3.13,<3.14"
+license = "MIT"
+# Imports hub.graph so evaluation runs the same code as production (design §8).
+dependencies = ["hub"]
+
+[tool.uv.sources]
+hub = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
