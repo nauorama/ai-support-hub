@@ -65,7 +65,7 @@ Run `make lint test` before you say a task is done. Run `make test-int` when you
 - Every new model call records tokens, cost, latency, model and prompt version. Every decision and action writes an audit record.
 - On any error or doubt at run time, the system hands the ticket to a human.
 - Keep the module rules (import-linter). `graph` combines modules; other modules do not import each other's internals.
-- At the end of a phase write `docs/walkthrough/phase-N.md` (format in the build plan).
+- At the end of a phase write `docs/walkthrough/phase-N.md` (format in the build plan). It is the owner's personal note: written locally, git-ignored, never committed, no pull request.
 
 ## Code style
 

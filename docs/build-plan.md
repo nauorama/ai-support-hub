@@ -20,7 +20,7 @@ How the sessions, agent roles and reviews are organised: [build process](build-p
 
 **Phase gate.** A phase is finished when all its tasks are done, the gate check passes, and `docs/walkthrough/phase-N.md` exists. Then stop and report to Viktoriia; do not start the next phase without her go-ahead.
 
-**Walkthrough file** (one per phase, max 2 pages) — this is how the owner learns the system after it is built:
+**Walkthrough file** (one per phase, max 2 pages) — this is how the owner learns the system after it is built. It is the owner's personal note: write it to `docs/walkthrough/phase-N.md` locally. The folder is git-ignored; never commit the file, and it needs no pull request.
 - what was built, with paths to the 5–10 most important files;
 - how a request flows through the new code (short diagram or numbered list);
 - how to run and see it;
@@ -40,7 +40,7 @@ How the sessions, agent roles and reviews are organised: [build process](build-p
 | H6. Review the attack set | P8-01 |
 | H7. Choose the confidence threshold; decide if auto-reply goes on | P9-03 |
 | H8. Accounts: Google Cloud (billing + budget alert), Neon, Qdrant Cloud, Langfuse; optional Jira and Slack | P9-01, P10-07 |
-| H9. Record the demo video; publish | P12 |
+| H9. Record the demo video; publish (make the repository public and turn on branch protection for `main`, see the README) | P12 |
 
 **Rules that never bend:** see `AGENTS.md` ("Never do").
 

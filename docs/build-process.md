@@ -16,7 +16,7 @@ For the owner. The [build plan](build-plan.md) says **what** is built and in whi
 |---|---|
 | Create the repository in a normal local folder, for example `~/Documents/projects/ai-support-hub`. **Not inside Google Drive.** | A synced folder breaks `.git`, `node_modules` and virtual environments. |
 | Copy the content of this `repo/` folder into it, `git init`, first commit, push to a new **private** GitHub repository. Make it public in phase 12. | Human gate H1. |
-| Protect `main`: changes only through pull requests, CI must be green. | The agent cannot push broken code to `main`. |
+| Protect `main`: changes only through pull requests, CI must be green. Branch protection is not available for a private repository on the free GitHub plan, so until the repository becomes public in phase 12 this holds by process: only the owner merges, after CI is green. See the README, "CI and branch protection". | The agent cannot push broken code to `main`. |
 | API keys go only into the local `.env` file and into GitHub repository secrets. Never paste a key into a chat with an agent. | Keys in a chat end up in transcripts. |
 | Set a monthly spending limit in the Anthropic and OpenAI consoles (for example $30). | The build makes real model calls from phase 3. |
 | Permissions of the coding agent: allow `make`, `uv`, `pnpm`, `git`, `gh`, `docker compose`; deny reading `.env`; do not use the mode that skips all permission prompts. | The agent can work without asking for every command, but cannot read secrets or do something unexpected. |
@@ -26,7 +26,7 @@ For the owner. The [build plan](build-plan.md) says **what** is built and in whi
 | Role | Who | Does | Does not |
 |---|---|---|---|
 | **Owner** | Viktoriia | Starts sessions, merges pull requests, does the human gates (H1–H9), reads the walkthrough, gives the go-ahead for the next phase, makes all risk decisions. | Write code during the build. |
-| **Builder** | Main session of the coding agent. Its rules are `AGENTS.md`. | Takes one task from the build plan, writes tests and code, opens a pull request, fixes review findings. Writes the phase walkthrough. | Merge. Start the next task or phase on its own. Review itself. |
+| **Builder** | Main session of the coding agent. Its rules are `AGENTS.md`. | Takes one task from the build plan, writes tests and code, opens a pull request, fixes review findings. Writes the phase walkthrough locally (`docs/walkthrough/`, git-ignored, no pull request). | Merge. Start the next task or phase on its own. Review itself. |
 | **Reviewer** | Subagent [`reviewer`](../.claude/agents/reviewer.md), read-only | Checks the pull request against the task, the documents and the never-do rules. Runs the checks again. Gives a verdict. | Edit files. |
 | **Content author** | Subagent [`content-author`](../.claude/agents/content-author.md) | Writes knowledge-base articles, seed data, draft evaluation tickets and attack cases from the world file. | Write application code. Invent facts. |
 | **Eval analyst** | Subagent [`eval-analyst`](../.claude/agents/eval-analyst.md), read-only | Reads evaluation results, sorts failures into categories, proposes the next experiment. | Change prompts, code or data. Run paid evaluations. |
@@ -75,7 +75,7 @@ flowchart LR
 5. Always read the full diff yourself when the change is in `guardrails/`, `config/policy.yaml`, `tools/permissions.py`, `auth/` or a prompt file. These files decide what the system is allowed to do.
 
 **Per phase (1–2 hours).**
-1. Read `docs/walkthrough/phase-N.md` and answer its five questions before you look at the answers.
+1. Read `docs/walkthrough/phase-N.md` (a local, git-ignored file, not in a pull request) and answer its five questions before you look at the answers.
 2. Run the phase gate check from the build plan yourself, by hand, in the running system.
 3. Write three lines into the dev log: what was built, what surprised you, what you do not understand yet.
 4. Only then tell the builder to start the next phase.

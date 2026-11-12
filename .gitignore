@@ -39,3 +39,6 @@ evals/runs/**/raw/
 
 # import-linter
 .import_linter_cache/
+
+# Phase walkthroughs: the owner's personal notes, never committed
+docs/walkthrough/
