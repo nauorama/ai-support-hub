@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import Row, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from hub.audit.chain import GENESIS_HASH, AuditRow, compute_hash, mask_details
+from hub.audit.chain import GENESIS_HASH, AuditRow, compute_hash, mask_details, mask_field
 from hub.db.models import AuditLog
 from hub.domain.enums import ActorType
 
@@ -45,15 +45,16 @@ async def record(
     entity_id: str,
     details: dict[str, Any] | None = None,
 ) -> AuditLog:
-    """Append one audit row. ``details`` are masked (G1) before they are hashed and stored."""
+    """Append one audit row. Every text field and ``details`` are masked (G1) before they are
+    hashed and stored; a value that is exactly a UUID is kept (``hub.audit.chain``)."""
     row = AuditRow(
         # Set here, not by the server default: the hash covers it and is computed before insert.
         ts=datetime.now(UTC),
         actor_type=actor_type,
-        actor_id=actor_id,
-        action=action,
-        entity_type=entity_type,
-        entity_id=entity_id,
+        actor_id=None if actor_id is None else mask_field(actor_id),
+        action=mask_field(action),
+        entity_type=mask_field(entity_type),
+        entity_id=mask_field(entity_id),
         details=mask_details(details or {}),
     )
     await session.execute(select(func.pg_advisory_xact_lock(AUDIT_LOCK_KEY)))

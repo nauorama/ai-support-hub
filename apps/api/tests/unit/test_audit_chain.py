@@ -4,22 +4,26 @@ import hashlib
 import json
 import re
 from datetime import UTC, datetime, timedelta, timezone
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from sqlalchemy import Row
 
 from hub.audit.chain import (
     GENESIS_HASH,
-    AuditDetailsError,
     AuditRow,
+    AuditValueError,
     canonical_json,
     compute_hash,
     mask_details,
+    mask_field,
 )
+from hub.audit.log import _stored_hash
 from hub.domain.enums import ActorType
-from hub.guardrails.masking import luhn_valid
+from hub.guardrails.masking import luhn_valid, mask_text
 
 VISA = "4111111111111111"  # public test card number
 TS = datetime(2026, 11, 13, 10, 0, 0, 123456, tzinfo=UTC)
@@ -68,6 +72,12 @@ def test_a_naive_timestamp_is_refused() -> None:
         # What json.loads gives for the text jsonb prints (numeric, no exponent notation).
         (1.0, 1.0),
         (1e20, 100000000000000000000),
+        # Not exactly representable: int(1e23) is 99999999999999991611392, but jsonb stores the
+        # decimal text "1e+23" (reviewer finding on P2-04).
+        (1e23, 100000000000000000000000),
+        (float(2**70), 1180591620717411300000),
+        (1e300, 10**300),
+        (123.0, 123.0),
         (0.1, 0.1),
         (1e-7, 0.0000001),
         (1.23e-5, 0.0000123),
@@ -153,14 +163,59 @@ def test_mask_details_does_not_change_its_input() -> None:
         ({"n": float("nan")}, "finite"),
         ({"n": float("inf")}, "finite"),
         ({"s": "a\x00b"}, "NUL"),
+        ({"s": "\ud800"}, "valid Unicode"),
+        ({"\ud800": 1}, "valid Unicode"),
+        ({VISA: 1, "4111 1111 1111 1111": 2}, "same after masking"),
         ({1: "x"}, "keys must be strings"),
         ({"s": {1, 2}}, "JSON types"),
         ({"d": TS}, "JSON types"),
     ],
 )
 def test_values_jsonb_cannot_store_are_refused(details: dict[Any, Any], message: str) -> None:
-    with pytest.raises(AuditDetailsError, match=message):
+    with pytest.raises(AuditValueError, match=message):
         mask_details(details)
+
+
+# Text masking finds a Luhn-valid run across its dashes: "0b74d[CARD ****8741]-e5b0ef08c44e".
+UUID_WITH_A_LUHN_RUN = "0b74d664-3640-4097-8741-e5b0ef08c44e"
+
+
+def test_text_masking_would_change_this_uuid() -> None:
+    """The reason for the UUID exception; if masking changes, this example must be replaced."""
+    assert mask_text(UUID_WITH_A_LUHN_RUN) != UUID_WITH_A_LUHN_RUN
+
+
+@pytest.mark.parametrize("uuid", [UUID_WITH_A_LUHN_RUN, UUID_WITH_A_LUHN_RUN.upper()])
+def test_a_value_that_is_exactly_a_uuid_is_kept(uuid: str) -> None:
+    assert mask_field(uuid) == uuid
+    assert mask_details({uuid: [uuid]}) == {uuid: [uuid]}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"ticket {UUID_WITH_A_LUHN_RUN}",  # only an exact UUID is kept
+        f"{UUID_WITH_A_LUHN_RUN}\n",
+        "0b74d664-3640-4097-8741-e5b0ef08c44",  # one hex digit short
+    ],
+)
+def test_text_around_or_shaped_almost_like_a_uuid_is_masked(text: str) -> None:
+    assert mask_field(text) == mask_text(text)
+    assert mask_field(text) != text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [(f"card {VISA}", "card [CARD ****1111]"), ("ticket.claimed", "ticket.claimed"), ("", "")],
+)
+def test_mask_field(text: str, expected: str) -> None:
+    assert mask_field(text) == expected
+
+
+@pytest.mark.parametrize(("text", "message"), [("a\x00b", "NUL"), ("\udfff", "valid Unicode")])
+def test_mask_field_refuses_what_postgres_cannot_store(text: str, message: str) -> None:
+    with pytest.raises(AuditValueError, match=message):
+        mask_field(text)
 
 
 def _luhn_check_digit(body: str) -> str:
@@ -202,3 +257,32 @@ def test_a_card_number_anywhere_in_details_never_reaches_the_hashed_row(
 
     assert card not in stored
     assert card not in json.dumps(mask_details(details))
+
+
+def test_a_stored_row_that_cannot_be_hashed_counts_as_broken() -> None:
+    """A row made by hand that does not fit the hashed form (here a naive timestamp, which
+    timestamptz never returns) must be reported, not crash the check."""
+    stored = SimpleNamespace(
+        ts=datetime(2026, 11, 13, 10, 0),
+        actor_type="system",
+        actor_id=None,
+        action="x",
+        entity_type="x",
+        entity_id="x",
+        details={},
+        prev_hash=GENESIS_HASH,
+    )
+    assert _stored_hash(cast("Row[Any]", stored)) is None
+    assert _stored_hash(cast("Row[Any]", SimpleNamespace(**(vars(stored) | {"ts": TS})))) == (
+        compute_hash(
+            GENESIS_HASH,
+            _row(
+                actor_type=ActorType.SYSTEM,
+                actor_id=None,
+                action="x",
+                entity_type="x",
+                entity_id="x",
+                details={},
+            ),
+        )
+    )

@@ -113,6 +113,57 @@ async def test_details_are_stored_masked(
     assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
 
 
+async def test_text_fields_are_stored_masked(
+    app_engine: AsyncEngine, audit_db: tuple[str, str]
+) -> None:
+    async with AsyncSession(app_engine) as session:
+        await record(
+            session,
+            actor_type=ActorType.CUSTOMER,
+            actor_id=f"ref {VISA}",
+            action=f"action {VISA}",
+            entity_type=f"type {VISA}",
+            entity_id=f"card {VISA}",
+        )
+        await session.commit()
+
+    with psycopg.connect(libpq_url(audit_db[0])) as connection:
+        row = connection.execute(
+            "SELECT actor_id, action, entity_type, entity_id FROM audit_log"
+        ).fetchone()
+    assert row == (
+        "ref [CARD ****1111]",
+        "action [CARD ****1111]",
+        "type [CARD ****1111]",
+        "card [CARD ****1111]",
+    )
+    assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
+
+
+async def test_an_exact_uuid_is_stored_unchanged(
+    app_engine: AsyncEngine, audit_db: tuple[str, str]
+) -> None:
+    """Text masking would turn this id into "0b74d[CARD ****8741]-e5b0ef08c44e"."""
+    uuid = "0b74d664-3640-4097-8741-e5b0ef08c44e"
+    async with AsyncSession(app_engine) as session:
+        await record(
+            session,
+            actor_type=ActorType.OPERATOR,
+            actor_id=uuid,
+            action="ticket.claimed",
+            entity_type="ticket",
+            entity_id=uuid,
+            details={"ticket_id": uuid},
+        )
+        await session.commit()
+
+    with psycopg.connect(libpq_url(audit_db[0])) as connection:
+        row = connection.execute(
+            "SELECT actor_id, entity_id, details ->> 'ticket_id' FROM audit_log"
+        ).fetchone()
+    assert row == (uuid, uuid, uuid)
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -121,9 +172,11 @@ async def test_details_are_stored_masked(
         "UPDATE audit_log SET action = 'ticket.closed' WHERE id = %s",
         "UPDATE audit_log SET actor_type = 'system' WHERE id = %s",
         "UPDATE audit_log SET actor_id = NULL WHERE id = %s",
+        "UPDATE audit_log SET entity_type = 'message' WHERE id = %s",
         "UPDATE audit_log SET entity_id = 't-x' WHERE id = %s",
         "UPDATE audit_log SET ts = ts + interval '1 microsecond' WHERE id = %s",
         "UPDATE audit_log SET hash = repeat('a', 64) WHERE id = %s",
+        "UPDATE audit_log SET prev_hash = repeat('a', 64) WHERE id = %s",
     ],
 )
 async def test_changing_one_stored_row_by_hand_is_reported_at_that_row(
@@ -224,7 +277,17 @@ async def test_values_read_back_from_postgres_verify(app_engine: AsyncEngine) ->
     time zone; neither may break the chain."""
     await _record(
         app_engine,
-        details={"big": 1e20, "whole": 1.0, "small": 1e-7, "sum": 0.1 + 0.2, "nested": [{"z": 2}]},
+        details={
+            "big": 1e20,
+            # Whole floats that are not exactly representable (reviewer finding on P2-04).
+            "not_exact": 1e23,
+            "power": float(2**70),
+            "huge": 1e300,
+            "whole": 1.0,
+            "small": 1e-7,
+            "sum": 0.1 + 0.2,
+            "nested": [{"z": 2}],
+        },
     )
     async with AsyncSession(app_engine) as session:
         await session.execute(text("SET TIME ZONE 'Asia/Tokyo'"))
