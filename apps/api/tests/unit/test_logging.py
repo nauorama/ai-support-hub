@@ -1,4 +1,4 @@
-"""Logs are JSON lines on stdout, and card-like numbers never reach them (temporary P2-01 mask)."""
+"""Logs are JSON lines on stdout, and card data never reaches them (the G1 mask, G9)."""
 
 import json
 import logging
@@ -15,39 +15,37 @@ TEST_CARD = "4111 1111 1111 1111"
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("text", "expected"),
     [
-        "4111111111111111",
-        "4111 1111 1111 1111",
-        "4111-1111-1111-1111",
-        "card4111111111111111end",
-        "378282246310005",  # 15 digits (public Amex test number)
-        "4222222222222",  # 13 digits
-        "6011 0009 9013 9424 123",  # 19 digits
-        "4111111111111112",  # fails Luhn: the temporary mask still masks it
-        "41111111111111111228",  # card and expiry typed together
-        "4111  1111  1111  1111",  # double spaces
-        "4111 - 1111 - 1111 - 1111",
-        "4111\u00a01111\u00a01111\u00a01111",  # no-break spaces
-        "4111+1111+1111+1111",  # URL form encoding
-        "4111%201111%201111%201111",
-        "4111%2D1111%2d1111%2D1111",
-        "4111.1111.1111.1111",
-        "4111 1111 1111 1111 1111",  # 20 digits: masked as a whole
+        ("4111111111111111", "[CARD ****1111]"),
+        ("4111 1111 1111 1111", "[CARD ****1111]"),
+        ("4111-1111-1111-1111", "[CARD ****1111]"),
+        ("card4111111111111111end", "card[CARD ****1111]end"),
+        ("378282246310005", "[CARD ****0005]"),  # 15 digits (public Amex test number)
+        ("4222222222222", "[CARD ****2222]"),  # 13 digits
+        ("41111111111111111228", "[CARD ****1111]"),  # card and expiry typed together
+        ("4111\u00a01111\u00a01111\u00a01111", "[CARD ****1111]"),  # no-break spaces
+        ("4111+1111+1111+1111", "[CARD ****1111]"),  # URL form encoding
+        ("4111%201111%201111%201111", "[CARD ****1111]"),
+        ("cvv 737", "cvv [REDACTED]"),
     ],
 )
-def test_card_like_numbers_are_masked(text: str) -> None:
+def test_card_data_is_masked_with_the_g1_mask(text: str, expected: str) -> None:
     masked = mask_processor(None, "info", {"event": f"paid with {text} today"})["event"]
-    expected = "card[REDACTED]end" if text.startswith("card") else "[REDACTED]"
     assert masked == f"paid with {expected} today"
-    assert not any(char.isdigit() for char in masked)
 
 
 @pytest.mark.parametrize(
     "text",
-    ["123456789012", "2026-11-13T10:00:00.123456Z", "41 11 11", "+49 30 1234 5678"],
+    [
+        "123456789012",
+        "2026-11-13T10:00:00.123456Z",
+        "41 11 11",
+        "+49 30 1234 5678",
+        "6011000990139425",  # fails Luhn, no valid part: logs follow G1 (owner decision, P2-03)
+    ],
 )
-def test_short_numbers_and_timestamps_are_kept(text: str) -> None:
+def test_other_numbers_and_timestamps_are_kept(text: str) -> None:
     assert mask_processor(None, "info", {"event": text})["event"] == text
 
 
@@ -62,8 +60,8 @@ def test_nested_values_and_ints_are_masked() -> None:
         "nothing": None,
     }
     masked = mask_processor(None, "info", event)
-    assert masked["details"] == {"note": ["card [REDACTED]", ["[REDACTED]"]]}
-    assert masked["card_as_int"] == "[REDACTED]"
+    assert masked["details"] == {"note": ["card [CARD ****1111]", ["[CARD ****1111]"]]}
+    assert masked["card_as_int"] == "[CARD ****1111]"
     assert (masked["count"], masked["flag"], masked["ratio"], masked["nothing"]) == (
         3,
         True,
@@ -77,7 +75,7 @@ def test_structlog_lines_are_masked_json(log_lines: LogLines) -> None:
     structlog.get_logger("test").info("payment.note", note=f"card {TEST_CARD}")
     (line,) = log_lines()
     assert line["event"] == "payment.note"
-    assert line["note"] == "card [REDACTED]"
+    assert line["note"] == "card [CARD ****1111]"
     assert line["level"] == "info"
     assert line["logger"] == "test"
     assert line["timestamp"].endswith("Z")
@@ -87,7 +85,7 @@ def test_standard_library_lines_are_masked_json(log_lines: LogLines) -> None:
     configure_logging("INFO")
     logging.getLogger("some.library").info("charged card %s", "4111111111111111")
     (line,) = log_lines()
-    assert line["event"] == "charged card [REDACTED]"
+    assert line["event"] == "charged card [CARD ****1111]"
     assert line["logger"] == "some.library"
 
 
@@ -99,7 +97,7 @@ def test_exception_tracebacks_are_masked(log_lines: LogLines) -> None:
         structlog.get_logger("test").exception("failed")
     (line,) = log_lines()
     assert "4111" not in str(line)
-    assert line["exception"][0]["exc_value"] == "bad card [REDACTED]"
+    assert line["exception"][0]["exc_value"] == "bad card [CARD ****1111]"
 
 
 def test_level_filter_applies(log_lines: LogLines) -> None:
@@ -129,7 +127,7 @@ def test_uvicorn_logs_after_uvicorn_configured_logging(
     lines = [json.loads(line) for line in captured.out.splitlines()]
     assert lines == [
         {
-            "event": "server card [REDACTED]",
+            "event": "server card [CARD ****1111]",
             "level": "info",
             "logger": "uvicorn.error",
             "timestamp": lines[0]["timestamp"],

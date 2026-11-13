@@ -31,8 +31,12 @@ lint:
 	uv run lint-imports --no-logo
 	@if [ -f apps/web/package.json ]; then pnpm -C apps/web lint && pnpm -C apps/web typecheck; else echo "web: apps/web has no package.json yet, skipping eslint and tsc"; fi
 
+# Coverage gate for deterministic safety code (AGENTS.md, security §3): >= 95% line coverage.
+# Add the other safety modules (tools/permissions, auth) here when they are built.
+SAFETY_COVERAGE := --cov=hub.guardrails --cov-report=term-missing:skip-covered --cov-fail-under=95
+
 test:
-	uv run pytest
+	uv run pytest $(SAFETY_COVERAGE)
 
 data-check:
 	uv run python -m hub_evals.data_check data
