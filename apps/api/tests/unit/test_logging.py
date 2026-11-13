@@ -42,7 +42,7 @@ def test_card_data_is_masked_with_the_g1_mask(text: str, expected: str) -> None:
         "2026-11-13T10:00:00.123456Z",
         "41 11 11",
         "+49 30 1234 5678",
-        "4111111111111112",  # fails Luhn: logs follow G1 (owner decision in P2-03)
+        "6011000990139425",  # fails Luhn, no valid part: logs follow G1 (owner decision, P2-03)
     ],
 )
 def test_other_numbers_and_timestamps_are_kept(text: str) -> None:

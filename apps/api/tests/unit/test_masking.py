@@ -30,6 +30,16 @@ ARABIC_INDIC_VISA = "\u0664" + "\u0661" * 15
         ("4111%201111%201111%201111", "[CARD ****1111]"),  # URL-encoded
         ("4111%2D1111%2d1111%2B1111", "[CARD ****1111]"),
         ("4111.1111.1111.1111", "[CARD ****1111]"),
+        ("4111\u200b1111\u200b1111\u200b1111", "[CARD ****1111]"),  # zero-width spaces
+        ("4111\u00ad1111\u00ad1111\u00ad1111", "[CARD ****1111]"),  # soft hyphens
+        ("4111\u22121111\u22121111\u22121111", "[CARD ****1111]"),  # minus signs
+        ("4111\uff0d1111\uff0d1111\uff0d1111", "[CARD ****1111]"),  # full-width hyphens
+        ("4111\u20131111\u20131111\u20131111", "[CARD ****1111]"),  # en dashes
+        ("4111,1111,1111,1111", "[CARD ****1111]"),
+        ("4111\u00b71111\u00b71111\u00b71111", "[CARD ****1111]"),  # middle dots
+        ("4111 -- 1111 -- 1111 -- 1111", "[CARD ****1111]"),  # gaps of 4 characters
+        ("4111     1111     1111     1111", "[CARD ****1111]"),  # gaps of 5 characters
+        ("(4111) 1111 1111 1111", "([CARD ****1111]"),
         ("card4111111111111111end", "card[CARD ****1111]end"),  # in the middle of a word
         ("4222222222222", "[CARD ****2222]"),  # 13 digits
         ("30569309025904", "[CARD ****5904]"),  # 14 digits
@@ -53,14 +63,16 @@ def test_several_numbers_in_one_text() -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        "4111111111111112",  # 16 digits, fails Luhn
-        "4111 1111 1111 1112",
-        "4222222222223",  # 13 digits, fails Luhn
+        # Fail Luhn, and no 13-19 digit part of them passes either.
+        "6011000990139425",  # 16 digits
+        "6011 0009 9013 9425",
+        "4222222222223",  # 13 digits
         "123456789012",  # 12 digits: too short
         "11111111111111111111",  # 20 digits, no Luhn-valid 13-19 digit part
         "2026-11-13T10:00:00.123456Z",
         "+49 30 1234 5678",
         "order 12345, ticket 678",
+        "4111 1111 1111      1111",  # gap of 6 characters: two numbers, not one
         "",
     ],
 )
@@ -69,18 +81,25 @@ def test_other_numbers_are_kept(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("text", "words_before"),
     [
-        # Card and expiry typed together: the whole run goes, last 4 of the card are shown.
-        ("41111111111111111228", "[CARD ****1111]"),
-        # A separate expiry or a number in front stays; only the card goes.
-        ("4111 1111 1111 1111 12/28", "[CARD ****1111] 12/28"),
-        ("option 2 - 4111 1111 1111 1111", "option 2 - [CARD ****1111]"),
+        ("41111111111111111228", ""),  # card and expiry typed together, 20 digits
+        ("4111 1111 1111 1111 12/28", ""),  # "/" is a separator: the expiry joins the run
+        ("4111 1111 1111 1111 12/28 737", ""),
+        ("3782822463100051228", ""),  # Amex + MMYY, 19 digits, fails Luhn as a whole
+        ("4111111111111111737", ""),  # card + CVV
+        ("4111111111111112", ""),  # fails Luhn, but its first 15 digits pass
+        ("6 4111 1111 1111 1111", ""),
+        ("ticket 6 - 4111 1111 1111 1111", "ticket "),
+        ("option 2 - 4111 1111 1111 1111", "option "),
+        ("112 3782 822463 10005", ""),
     ],
 )
-def test_card_next_to_other_digits(text: str, expected: str) -> None:
+def test_run_with_a_card_inside_is_masked_whole(text: str, words_before: str) -> None:
+    # A run of 14+ digits that holds a valid card is masked whole (owner decision, P2-03), so
+    # never more than 4 of the card's digits stay visible.
     result = mask(text)
-    assert result.text == expected
+    assert re.fullmatch(rf"{words_before}\[CARD \*{{4}}\d{{4}}\]", result.text), result.text
     assert result.counts == {"PAN": 1}
 
 
@@ -100,6 +119,13 @@ def test_card_next_to_other_digits(text: str, expected: str) -> None:
         ("verification code 4829", "verification code [REDACTED]", "2FA"),
         ("SMS code - 482913", "SMS code - [REDACTED]", "2FA"),
         ("authenticator code 482913", "authenticator code [REDACTED]", "2FA"),
+        ("and the code on the back is 737", "and the code on the back is [REDACTED]", "CVV"),
+        ("cvv737", "cvv[REDACTED]", "CVV"),
+        ("cvv **737**", "cvv **[REDACTED]**", "CVV"),
+        ("PIN: [4821]", "PIN: [[REDACTED]]", "PIN"),
+        ("OTP482913", "OTP[REDACTED]", "2FA"),
+        ("Card ending 1111, cvv 737", "Card ending 1111, cvv [REDACTED]", "CVV"),
+        ("last 4 digits: 1111 and pin 4821", "last 4 digits: 1111 and pin [REDACTED]", "PIN"),
     ],
 )
 def test_codes_next_to_trigger_words(text: str, expected: str, entity: str) -> None:
@@ -124,6 +150,45 @@ def test_codes_without_a_trigger_are_kept(text: str) -> None:
     assert mask(text) == MaskResult(text=text, counts={})
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("card 4111 1111 1111 1111 exp 12/28 737", "card [CARD ****1111] exp 12/28 [REDACTED]"),
+        ("[CARD ****1111], 737", "[CARD ****1111], [REDACTED]"),
+        ("737 [CARD ****1111]", "[REDACTED] [CARD ****1111]"),
+        ("valid until 12/2028 - 7373", "valid until 12/2028 - [REDACTED]"),
+        ("12 / 28 737", "12 / 28 [REDACTED]"),
+    ],
+)
+def test_cvv_directly_next_to_a_card_or_expiry(text: str, expected: str) -> None:
+    result = mask(text)
+    assert result.text == expected
+    assert result.counts.get("CVV") == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "card ****1111 was charged 250 EUR",
+        "[CARD ****1111] was charged 250 EUR",
+        "[CARD ****1111] 250 EUR",
+        "[CARD ****1111] 250EUR",
+        "[CARD ****1111] 250 euros",
+        "[CARD ****1111] \u20ac250",
+        "[CARD ****1111] \u20ac 250",
+        "exp 12/28, 250$",
+        "12/28 \u00a3120",
+        "USD 250 [CARD ****1111]",
+        "[CARD ****1111] was charged 250",  # not directly next to the card
+        "12/28 then 737",
+        "13/28 737",  # not an expiry date
+    ],
+)
+def test_amounts_and_far_numbers_are_kept(text: str) -> None:
+    assert mask(text).counts.get("CVV") is None
+    assert mask(text).text == text
+
+
 def test_card_and_cvv_together() -> None:
     result = mask("card 4111 1111 1111 1111 exp 12/28 cvv 737")
     assert result.text == "card [CARD ****1111] exp 12/28 cvv [REDACTED]"
@@ -133,6 +198,11 @@ def test_card_and_cvv_together() -> None:
 def test_last_four_of_a_masked_card_are_not_taken_for_a_code() -> None:
     for text in [f"cvv {VISA}", f"{VISA} cvv", f"PIN for {VISA}"]:
         assert "[CARD ****1111]" in mask(text).text
+
+
+def test_masking_twice_changes_nothing() -> None:
+    once = mask(f"card {VISA} exp 12/28, cvv 737, pin 4821, [CARD ****1111] 1234").text
+    assert mask(once) == MaskResult(text=once, counts={})
 
 
 def test_mask_text_returns_only_the_text() -> None:
@@ -169,7 +239,9 @@ def test_internal_error_masks_every_digit(monkeypatch: pytest.MonkeyPatch) -> No
         raise RuntimeError("bug")
 
     monkeypatch.setattr(masking, "_mask_cards", broken)
-    assert mask(f"card {VISA} ok") == MaskResult(text="card " + "#" * 16 + " ok", counts={})
+    assert mask(f"card {VISA} ok") == MaskResult(
+        text="card " + "#" * 16 + " ok", counts={}, failed=True
+    )
 
 
 def test_internal_error_on_non_string_input() -> None:
@@ -177,7 +249,8 @@ def test_internal_error_on_non_string_input() -> None:
         def __str__(self) -> str:
             raise ValueError("no")
 
-    assert mask(Unprintable()) == MaskResult(text="[REDACTED]", counts={})  # type: ignore[arg-type]
+    result = mask(Unprintable())  # type: ignore[arg-type]
+    assert result == MaskResult(text="[REDACTED]", counts={}, failed=True)
 
 
 @pytest.mark.parametrize(
@@ -198,13 +271,35 @@ def _luhn_check_digit(body: str) -> str:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
+# Common formats, including invisible and look-alike characters from copy and paste.
+SEPARATORS = [
+    "",
+    " ",
+    "-",
+    "  ",
+    " - ",
+    "\u00a0",
+    ".",
+    ",",
+    "\u200b",
+    "\u00ad",
+    "\u2013",
+    "\u2212",
+    "\uff0d",
+    "\u00b7",
+    " -- ",
+    "%20",
+    "+",
+]
+
+
 @st.composite
 def formatted_cards(draw: st.DrawFn) -> tuple[str, str]:
     """A Luhn-valid 13-19 digit number in a common format: (digits, formatted)."""
     length = draw(st.integers(min_value=13, max_value=19))
     body = draw(st.text(alphabet="0123456789", min_size=length - 1, max_size=length - 1))
     digits = body + _luhn_check_digit(body)
-    separator = draw(st.sampled_from(["", " ", "-", "  ", " - ", "\u00a0", "."]))
+    separator = draw(st.sampled_from(SEPARATORS))
     group = draw(st.sampled_from([4, 3, 5, 6]))
     formatted = separator.join(digits[i : i + group] for i in range(0, len(digits), group))
     return digits, formatted
@@ -226,3 +321,36 @@ def test_any_luhn_valid_number_in_random_text_is_masked(
     assert digits not in result.text
     assert formatted not in result.text
     assert result.counts.get("PAN", 0) >= 1
+
+
+# Digits right next to the card, with separators between: the whole run must go, so at most
+# the 4 digits inside the placeholder are visible (B1/B2 of the P2-03 review).
+words = st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", max_size=20)
+digit_groups = st.text(alphabet="0123456789", min_size=1, max_size=4)
+short_separators = st.sampled_from([" ", "-", " - ", ", ", "/", "\u00a0", "  "])
+
+
+@settings(max_examples=500)
+@given(
+    card=formatted_cards(),
+    before=digit_groups,
+    after=digit_groups,
+    sep_before=short_separators,
+    sep_after=short_separators,
+    head=words,
+    tail=words,
+)
+def test_card_with_digits_around_it_is_masked_whole(
+    card: tuple[str, str],
+    before: str,
+    after: str,
+    sep_before: str,
+    sep_after: str,
+    head: str,
+    tail: str,
+) -> None:
+    _digits, formatted = card
+    text = f"{head}x{before}{sep_before}{formatted}{sep_after}{after}x{tail}"
+    result = mask(text)
+    assert re.fullmatch(r"[a-z ]*x\[CARD \*{4}\d{4}\]x[a-z ]*", result.text), result.text
+    assert result.counts == {"PAN": 1}
