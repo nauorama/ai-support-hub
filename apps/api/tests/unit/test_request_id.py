@@ -1,6 +1,7 @@
 """Every response carries a request id, and every log line of the request names it."""
 
 import re
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -33,7 +34,19 @@ def test_valid_incoming_id_is_kept(make_client: MakeClient) -> None:
     assert response.headers["x-request-id"] == "lb-trace.42_a"
 
 
-@pytest.mark.parametrize("incoming", ["", "a" * 65, "has space", "semi;colon", "über"])
+@pytest.mark.parametrize(
+    "incoming",
+    [
+        "",
+        "a" * 65,
+        "has space",
+        "semi;colon",
+        "über",
+        "1731500000000",  # epoch ms: the log mask would redact it
+        "4111111111111111",  # a card number sent as the id: never logged, never kept
+        "req-4111-1111-1111-1111",
+    ],
+)
 def test_unsafe_incoming_id_is_replaced(incoming: str) -> None:
     assert re.fullmatch(r"[0-9a-f]{32}", request_id_for(incoming))
 
@@ -115,3 +128,25 @@ def test_error_after_the_response_started_is_logged_not_raised(
     assert any(line["event"] == "request.unhandled_error" for line in lines)
     completed = next(line for line in lines if line["event"] == "request.completed")
     assert (completed["status"], completed["outcome"]) == (200, "error")
+
+
+def test_generated_id_is_drawn_again_when_the_mask_would_change_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digit_heavy = uuid.UUID("12345678-9012-3456-7890-abcdefabcdef")  # 20 digits in a row
+    clean = uuid.UUID("abcdefab-cdef-4bcd-8fab-cdefabcdefab")
+    draws = iter([digit_heavy, clean])
+    monkeypatch.setattr(uuid, "uuid4", lambda: next(draws))
+    assert request_id_for(None) == clean.hex
+
+
+def test_ids_read_the_same_in_the_header_and_the_log(
+    make_client: MakeClient, log_lines: LogLines
+) -> None:
+    client = make_client()
+    for incoming in ["1731500000000", "4111111111111111", None]:
+        headers = {"X-Request-ID": incoming} if incoming else {}
+        response = client.get("/health", headers=headers)
+        logged = [line["request_id"] for line in log_lines() if "request_id" in line]
+        assert logged == [response.headers["x-request-id"]]
+        assert "[REDACTED]" not in logged[0]

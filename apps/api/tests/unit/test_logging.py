@@ -157,3 +157,32 @@ def test_http_client_info_lines_are_dropped(log_lines: LogLines) -> None:
     logging.getLogger("httpx2").info("HTTP Request: GET http://x/?q=secret")
     logging.getLogger("httpx2").warning("retrying")
     assert [line["event"] for line in log_lines()] == ["retrying"]
+
+
+def test_uvicorn_access_logger_is_switched_off() -> None:
+    # Without `disabled`, its WARNING records would reach logging's last-resort stderr handler,
+    # unmasked; without `propagate = False`, its request lines would reach our handler.
+    import logging.config
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    logging.config.dictConfig(LOGGING_CONFIG)
+    access = logging.getLogger("uvicorn.access")
+    # As if uvicorn ran with a log config that lets access records propagate.
+    access.propagate = True
+    configure_logging("INFO")
+    assert access.disabled
+    assert access.propagate is False
+    assert access.handlers == []
+
+
+def test_uvicorn_debug_lines_show_at_debug_level(capsys: pytest.CaptureFixture[str]) -> None:
+    import logging.config
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    logging.config.dictConfig(LOGGING_CONFIG)  # sets uvicorn's loggers to INFO
+    configure_logging("DEBUG")
+    logging.getLogger("uvicorn.error").debug("shown at debug")
+    events = [json.loads(line)["event"] for line in capsys.readouterr().out.splitlines()]
+    assert events == ["shown at debug"]

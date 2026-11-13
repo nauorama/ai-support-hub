@@ -24,19 +24,20 @@ _TEMPORARY_CARD_LIKE = re.compile(rf"\d(?:{_TEMPORARY_SEPARATOR}?\d){{12,}}")
 _TEMPORARY_REPLACEMENT = "[REDACTED]"
 
 
-def _temporary_mask(text: str) -> str:
+def mask_text(text: str) -> str:
+    """The log mask, for code that must know whether a value would change in the logs."""
     return _TEMPORARY_CARD_LIKE.sub(_TEMPORARY_REPLACEMENT, text)
 
 
 def _mask_value(value: object) -> object:
     if isinstance(value, str):
-        return _temporary_mask(value)
+        return mask_text(value)
     if isinstance(value, bool):
         return value
     if isinstance(value, int):
         # A card number logged as an int must not slip through.
         text = str(value)
-        masked = _temporary_mask(text)
+        masked = mask_text(text)
         return value if masked == text else masked
     if isinstance(value, dict):
         return {key: _mask_value(item) for key, item in value.items()}
@@ -85,12 +86,13 @@ def configure_logging(level: str) -> None:
     root.handlers = [handler]
     root.setLevel(level)
     # uvicorn installs its own unmasked handlers before it calls the app factory; send its
-    # records through the root handler instead. The handler's level also filters uvicorn's
-    # records, whose loggers uvicorn sets to INFO.
+    # records through the root handler instead.
     for name in ("uvicorn", "uvicorn.error"):
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers = []
         uvicorn_logger.propagate = True
+        # Inherit the root level, so LOG_LEVEL=DEBUG also shows uvicorn's DEBUG records.
+        uvicorn_logger.setLevel(logging.NOTSET)
     # The access log is off: its request line carries the raw query string, which may hold
     # URL-encoded card data. RequestContextMiddleware logs method, path and status instead.
     access_logger = logging.getLogger("uvicorn.access")

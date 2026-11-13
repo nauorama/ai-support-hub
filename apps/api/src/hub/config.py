@@ -80,7 +80,7 @@ class Settings(BaseSettings):
         return (
             self.database_url_direct
             if self.database_url_direct.get_secret_value()
-            else (self.database_url)
+            else self.database_url
         )
 
 
