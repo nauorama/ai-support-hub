@@ -34,22 +34,32 @@ _WINDOW_LENGTHS = (16, 15, 19, 13, 14, 17, 18)
 # asterisks are not separators, so ``[CARD ****1111]`` never joins a following number.
 _SEPARATOR_CHARS = (
     r"\s"  # any whitespace, including NBSP and the ideographic space
-    r"\-+./_,()"
+    r"\-+./_()"
     r"\u00ad\u00b7"  # soft hyphen, middle dot
     r"\u200b-\u200d\u2060\ufeff"  # zero-width space, joiners, word joiner, BOM
     r"\u2010-\u2015\u2212\ufe63\uff0d"  # Unicode dashes, minus sign, small and full-width hyphen
 )
 _ENCODED_SEPARATOR = r"%20|%2[bBdD]"  # URL-encoded space, plus, dash
-_SEPARATOR = rf"(?:[{_SEPARATOR_CHARS}]{{1,5}}|{_ENCODED_SEPARATOR})"
+# A comma counts only when no space follows it: "4111,1111,1111,1111" is one number, but
+# "1200, 3400, 5600" and "12.50, 8.00" are lists of amounts (owner decision, P2-03).
+_SEPARATOR = rf"(?:(?:[{_SEPARATOR_CHARS}]|,(?!\s)){{1,5}}|{_ENCODED_SEPARATOR})"
 _DIGIT_RUN = re.compile(rf"\d(?:{_SEPARATOR}?\d){{{_MIN_PAN - 1},}}")
 _ENCODED = re.compile(_ENCODED_SEPARATOR)
 _DIGIT = re.compile(r"\d")
+
+# IBAN: country code, 2 check digits, then letters and digits, in groups or written together.
+_IBAN_MIN = 15
+_IBAN_MAX = 34
+_IBAN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,40}")
+_IBAN_GROUP = re.compile(r"[ ]?[A-Z0-9]+")
 
 # Gap between a trigger word and its code: a few characters, no digits, no line break.
 _GAP_BEFORE = r"[^\d\n]{0,25}?"
 _GAP_AFTER = r"[^\d\n]{0,15}?"
 # A code is not part of a longer number and not the last 4 digits after "****".
 _CODE_START = r"(?<!\d)(?<!\*\*\*\*)"
+# ... and not followed by more digits or a decimal part ("250.00" is an amount).
+_CODE_END = r"(?!\d)(?![.,]\d)"
 # "card ending 1111", "last 4 digits: 1111": these digits are not a code.
 _LAST_DIGITS_BEFORE = re.compile(
     r"(?:ending(?:\s+(?:in|with))?|ends\s+(?:in|with)|last\s+(?:4|four)(?:\s+digits)?)\W{0,3}\Z",
@@ -58,7 +68,7 @@ _LAST_DIGITS_BEFORE = re.compile(
 
 
 def _code_patterns(triggers: str, digits: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
-    code = rf"{_CODE_START}\d{{{digits}}}(?!\d)"
+    code = rf"{_CODE_START}\d{{{digits}}}{_CODE_END}"
     # Not inside a longer word, but "cvv737" and "OTP482913" still count.
     trigger = rf"(?<![^\W\d_])(?:{triggers})(?![^\W\d_])"
     before = re.compile(rf"(?P<lead>{trigger}{_GAP_BEFORE})(?P<code>{code})", re.IGNORECASE)
@@ -89,16 +99,26 @@ _CODE_RULES: tuple[tuple[EntityType, tuple[re.Pattern[str], re.Pattern[str]]], .
 
 # A CVV without a trigger word: 3-4 digits directly next to a masked card or an expiry date,
 # separated by at most three spaces or punctuation characters (owner decision, P2-03).
-_CARD_OR_EXPIRY = (
-    r"(?:\[CARD \*{4}\d{4}\]"
-    r"|(?<!\d)(?:0[1-9]|1[0-2])\s?/\s?(?:\d{4}|\d{2})(?!\d))"
+# Expiry: MM/YY or MM/YYYY anywhere, but not as part of a full date ("03/14/2026"); MM-YY and
+# MMYY only right after "exp", "expiry" or "valid until". "code" right after a masked card is
+# a CVV word.
+_MASKED_CARD = r"\[CARD \*{4}\d{4}\](?:[^\w\n]{0,3}code(?![^\W\d_]))?"
+_SLASH_EXPIRY = r"(?<![\d/])(?<!/ )(?:0[1-9]|1[0-2])\s?/\s?(?:\d{4}|\d{2})(?!\d)(?!\s?/\s?\d)"
+_WORD_EXPIRY = (
+    r"(?<![^\W\d_])(?:exp(?:iry)?\.?|valid\s+until)\s*:?\s*"
+    r"(?:0[1-9]|1[0-2])-?\d{2}(?!\d)"
 )
+_CARD_OR_EXPIRY = rf"(?:{_MASKED_CARD}|{_SLASH_EXPIRY}|{_WORD_EXPIRY})"
 _NEXT_TO = r"[^\w\n]{0,3}"
+# Before a card the gap has no colon: "Order 1234: [CARD ****1111]" is a label, not a CVV.
+_NEXT_TO_BEFORE = r"[^\w\n:]{0,3}"
 _CVV_AFTER_CARD = re.compile(
-    rf"(?P<lead>{_CARD_OR_EXPIRY}{_NEXT_TO})(?P<code>{_CODE_START}\d{{3,4}}(?!\d))"
+    rf"(?P<lead>{_CARD_OR_EXPIRY}{_NEXT_TO})(?P<code>{_CODE_START}\d{{3,4}}{_CODE_END})",
+    re.IGNORECASE,
 )
 _CVV_BEFORE_CARD = re.compile(
-    rf"(?P<code>{_CODE_START}\d{{3,4}}(?!\d))(?P<trail>{_NEXT_TO}{_CARD_OR_EXPIRY})"
+    rf"(?P<code>{_CODE_START}\d{{3,4}}{_CODE_END})(?P<trail>{_NEXT_TO_BEFORE}{_CARD_OR_EXPIRY})",
+    re.IGNORECASE,
 )
 # Amounts stay visible: no CVV when a currency sign or code is next to the number.
 _CURRENCY_WORD = (
@@ -168,8 +188,41 @@ def _mask_run(run: str) -> tuple[str, int]:
     return run, 0
 
 
+def _iban_valid(compact: str) -> bool:
+    """ISO 13616 check: move the first 4 characters to the end, letters to numbers, mod 97."""
+    rearranged = compact[4:] + compact[:4]
+    number = "".join(str(int(char, 36)) for char in rearranged)
+    return int(number) % 97 == 1
+
+
+def _iban_spans(text: str) -> list[tuple[int, int]]:
+    """Start and end of each valid IBAN in the text.
+
+    An IBAN is kept (ADR-0010: IBANs stay in the database; G3 replaces them in model input).
+    The longest valid IBAN ending at a group boundary wins.
+    """
+    spans: list[tuple[int, int]] = []
+    for candidate in _IBAN_CANDIDATE.finditer(text):
+        compact = ""
+        best_end: int | None = None
+        for group in _IBAN_GROUP.finditer(candidate.group(0)):
+            compact += group.group(0).strip()
+            if _IBAN_MIN <= len(compact) <= _IBAN_MAX and _iban_valid(compact):
+                best_end = candidate.start() + group.end()
+        if best_end is not None:
+            spans.append((candidate.start(), best_end))
+    return spans
+
+
 def _mask_cards(text: str, counts: Counter[EntityType]) -> str:
+    iban_spans = _iban_spans(text)
+
     def replace(match: re.Match[str]) -> str:
+        iban_end = next((end for start, end in iban_spans if start <= match.start() < end), None)
+        if iban_end is not None:
+            # Keep the IBAN; a card typed right after it is still masked.
+            cut = iban_end - match.start()
+            return match.group(0)[:cut] + _mask_cards(match.group(0)[cut:], counts)
         masked, found = _mask_run(match.group(0))
         if found:
             counts["PAN"] += found
@@ -210,8 +263,14 @@ def _redact_code(
     *,
     keep_amounts: bool = False,
 ) -> str:
+    # "Card ending 1111" names card digits, not a CVV. PIN and 2FA codes are masked anyway: a
+    # code written after "ending" is still a code (P2-03 review).
+    skip_last_digits = entity == "CVV"
+
     def replace(match: re.Match[str]) -> str:
-        if _names_last_digits(match) or (keep_amounts and _next_to_currency(match)):
+        if (skip_last_digits and _names_last_digits(match)) or (
+            keep_amounts and _next_to_currency(match)
+        ):
             return match.group(0)
         counts[entity] += 1
         code_start = match.start("code") - match.start()

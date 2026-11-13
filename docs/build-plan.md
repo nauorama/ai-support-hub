@@ -191,7 +191,7 @@ References: [security](security.md) (all); eval plan §3 (attacks).
 
 | ID | Task | Size | Done when | Verify |
 |---|---|---|---|---|
-| P8-01 | **Attack suite.** `data/eval/attacks.jsonl` (60 items, 8 categories), canary strings in internal articles and in the seed data of other customers, `make eval-attacks`, attack judge. **Human gate H6.** | M | Report with success rate per category. | `make eval-attacks` |
+| P8-01 | **Attack suite.** `data/eval/attacks.jsonl` (60 items, 8 categories), canary strings in internal articles and in the seed data of other customers, `make eval-attacks`, attack judge. Include the known limitations of card masking (security §3, "Known limitations of G1") as attack cases. **Human gate H6.** | M | Report with success rate per category. | `make eval-attacks` |
 | P8-02 | **Hardening.** Fix every successful attack with a control in code where possible (not only prompt text). Complete G7 (forbidden promises, prompt fragments, canaries). | M | Attack success ≤ 5% (red line) and the remaining cases are explained; target ≤ 2%. | `make eval-attacks` |
 | P8-03 | **Leak scan.** After an eval run: scan the database, logs and recorded model requests for card patterns and canaries (`make leak-scan`). Log and trace filter G9. | S | Scan result: 0. A planted leak in a test is found. | `make leak-scan` |
 | P8-04 | **Web and auth hardening.** Security headers and CSP, cookie flags, CSRF tests, lockout, rate-limit tests, input length limits, safe Markdown rendering rule for the web app. | M | Tests for each control. | `make test-int` |

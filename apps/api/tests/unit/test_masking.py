@@ -125,7 +125,9 @@ def test_run_with_a_card_inside_is_masked_whole(text: str, words_before: str) ->
         ("PIN: [4821]", "PIN: [[REDACTED]]", "PIN"),
         ("OTP482913", "OTP[REDACTED]", "2FA"),
         ("Card ending 1111, cvv 737", "Card ending 1111, cvv [REDACTED]", "CVV"),
-        ("last 4 digits: 1111 and pin 4821", "last 4 digits: 1111 and pin [REDACTED]", "PIN"),
+        # "ending" exempts only card digits from the CVV rules; PIN and 2FA are always masked.
+        ("PIN ending 4821", "PIN ending [REDACTED]", "PIN"),
+        ("my otp, ending in 482913", "my otp, ending in [REDACTED]", "2FA"),
     ],
 )
 def test_codes_next_to_trigger_words(text: str, expected: str, entity: str) -> None:
@@ -158,6 +160,12 @@ def test_codes_without_a_trigger_are_kept(text: str) -> None:
         ("737 [CARD ****1111]", "[REDACTED] [CARD ****1111]"),
         ("valid until 12/2028 - 7373", "valid until 12/2028 - [REDACTED]"),
         ("12 / 28 737", "12 / 28 [REDACTED]"),
+        ("4111 1111 1111 1111 exp 1228 737", "[CARD ****1111] exp 1228 [REDACTED]"),
+        ("4111 1111 1111 1111 exp 12-28 737", "[CARD ****1111] exp 12-28 [REDACTED]"),
+        ("valid until 1228, 737", "valid until 1228, [REDACTED]"),
+        ("expiry: 12-28 737", "expiry: 12-28 [REDACTED]"),
+        ("4111 1111 1111 1111 code 737", "[CARD ****1111] code [REDACTED]"),
+        ("4111 1111 1111 1111, code: 737", "[CARD ****1111], code: [REDACTED]"),
     ],
 )
 def test_cvv_directly_next_to_a_card_or_expiry(text: str, expected: str) -> None:
@@ -182,11 +190,48 @@ def test_cvv_directly_next_to_a_card_or_expiry(text: str, expected: str) -> None
         "[CARD ****1111] was charged 250",  # not directly next to the card
         "12/28 then 737",
         "13/28 737",  # not an expiry date
+        "1228 737",  # MMYY counts only after "exp", "expiry" or "valid until"
+        "12-28 737",
+        "the code 737",  # "code" is a CVV word only right after a masked card
+        "[CARD ****1111]: 250.00",  # a decimal part makes it an amount
+        "[CARD ****1111] 250,00",
+        "on 05/25 120.50",
+        "03/14/2026",  # a full date is not an expiry date
+        "12/28/2025 1500",
+        "2025/12/28 1500",
+        "Order 1234: [CARD ****1111]",  # a label before a colon is not a CVV
     ],
 )
 def test_amounts_and_far_numbers_are_kept(text: str) -> None:
     assert mask(text).counts.get("CVV") is None
     assert mask(text).text == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "IBAN DE89 3704 0044 0532 0130 00",  # public example IBANs (ADR-0010: IBANs are kept)
+        "IBAN DE89370400440532013000",
+        "GB82 WEST 1234 5698 7654 32",
+        "NL91 ABNA 0417 1643 00",
+        "FR14 2004 1010 0505 0001 3M02 606",
+        "Amounts: 12.50, 8.00, 120.00, 45.99 EUR",  # ", " does not join numbers
+        "transactions 1200, 3400, 5600, 7800",
+    ],
+)
+def test_ibans_and_amount_lists_are_kept(text: str) -> None:
+    assert mask(text) == MaskResult(text=text, counts={})
+
+
+def test_card_after_an_iban_is_still_masked() -> None:
+    result = mask("IBAN DE89 3704 0044 0532 0130 00 4111 1111 1111 1111")
+    assert result.text == "IBAN DE89 3704 0044 0532 0130 00 [CARD ****1111]"
+    assert result.counts == {"PAN": 1}
+
+
+def test_invalid_iban_is_not_protected() -> None:
+    # Check digits 00 never pass mod 97, so the card in it is masked as usual.
+    assert mask("XX00 4111 1111 1111 1111").text == "XX[CARD ****1111]"
 
 
 def test_card_and_cvv_together() -> None:
@@ -327,7 +372,7 @@ def test_any_luhn_valid_number_in_random_text_is_masked(
 # the 4 digits inside the placeholder are visible (B1/B2 of the P2-03 review).
 words = st.text(alphabet="abcdefghijklmnopqrstuvwxyz ", max_size=20)
 digit_groups = st.text(alphabet="0123456789", min_size=1, max_size=4)
-short_separators = st.sampled_from([" ", "-", " - ", ", ", "/", "\u00a0", "  "])
+short_separators = st.sampled_from([" ", "-", " - ", ",", "/", "\u00a0", "  "])
 
 
 @settings(max_examples=500)
