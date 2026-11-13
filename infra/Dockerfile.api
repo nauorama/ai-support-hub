@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+# Dev image for the `api` service of infra/docker-compose.yml: dependencies are baked in, the
+# source is bind-mounted and uvicorn reloads on change. The production image (multi-stage, built
+# web app, only runtime files) is written in phase 10 (docs/operations.md §6).
+FROM python:3.13.18-slim-trixie
+
+# Keep equal to UV_VERSION in .github/workflows/ci.yml.
+COPY --from=ghcr.io/astral-sh/uv:0.11.8 /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH
+
+WORKDIR /app
+
+# Dependencies first: this layer is rebuilt only when a lock or pyproject file changes.
+# `uv sync --locked` needs every workspace member's pyproject to check the lock file.
+COPY uv.lock pyproject.toml ./
+COPY apps/api/pyproject.toml apps/api/pyproject.toml
+COPY apps/mcp_server/pyproject.toml apps/mcp_server/pyproject.toml
+COPY evals/pyproject.toml evals/pyproject.toml
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --package support-hub-api --no-install-workspace
+
+# The package itself, installed editable; compose mounts the live source over apps/api/src.
+COPY apps/api/src apps/api/src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --package support-hub-api
+
+RUN useradd --system --uid 10001 --no-create-home hub
+USER hub
+
+EXPOSE 8000
+CMD ["uvicorn", "hub.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", \
+     "--reload", "--reload-dir", "/app/apps/api/src"]

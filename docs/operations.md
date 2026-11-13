@@ -6,6 +6,8 @@ Requirements: Docker, Python 3.13 with `uv`, Node.js LTS with `pnpm`, `make`.
 
 `infra/docker-compose.yml` services: `postgres`, `qdrant`, `api` (hot reload), `mcp` (support-tools server), `web` (Vite dev server). Optional profile `tracing`: self-hosted Langfuse — only if the cloud free tier is not used.
 
+Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdrant` and `api`; `mcp` comes in phase 7 and `web` in phase 10. **Until the MCP server exists (P7), `GET /ready` answers 503** with `mcp` reported as not reachable, while `postgres` and `qdrant` report `ok`; the compose healthcheck of `api` uses `/health` for this reason. Likewise `make dev` gains `migrate`, `seed` and `kb-load` as P2-02, P2-05 and P2-09 build them. Ports bind to `127.0.0.1` only. Integration tests do not use this stack: testcontainers starts Postgres and Qdrant with the image tags of the compose file.
+
 | Command | Does |
 |---|---|
 | `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks |
@@ -91,7 +93,7 @@ Trace attributes on every run: `ticket_id`, `intent`, `route`, `route_reasons`, 
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit + integration with testcontainers, coverage gate for safety modules) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks, pip-audit, pnpm audit) · `data-check` |
+| `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit tests, coverage gate for safety modules) · `test-int` (integration with testcontainers; builds the api dev image) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks, pip-audit, pnpm audit) · `data-check` |
 | `eval-smoke.yml` | pull request touching the AI paths (see [eval plan](eval-plan.md) §8); manual | `make eval-smoke` with real keys from repository secrets; comment with the metrics table on the pull request |
 | `eval-full.yml` | weekly; manual | full dev run; opens a pull request with the report |
 | `deploy.yml` | push to main after `ci` is green; manual | build images → push → migrate → deploy → smoke check |

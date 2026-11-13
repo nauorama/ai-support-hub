@@ -1,0 +1,17 @@
+# Build context for infra/Dockerfile.*: only what the images need. Secrets never enter an image.
+.env
+.env.*
+.git
+.venv
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+.import_linter_cache
+.coverage
+node_modules
+apps/web/dist
+evals/runs
+docs
