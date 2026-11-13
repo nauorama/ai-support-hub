@@ -96,9 +96,26 @@ def test_secrets_are_hidden_in_repr() -> None:
 
 def test_migrations_use_the_direct_url_when_set() -> None:
     pooled = Settings(_env_file=None, database_url="postgresql+psycopg://a@pooled/db")
-    assert pooled.database_url_for_migrations == "postgresql+psycopg://a@pooled/db"
-    direct = pooled.model_copy(update={"database_url_direct": "postgresql+psycopg://a@direct/db"})
-    assert direct.database_url_for_migrations == "postgresql+psycopg://a@direct/db"
+    assert pooled.database_url_for_migrations.get_secret_value() == (
+        "postgresql+psycopg://a@pooled/db"
+    )
+    direct = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://a@pooled/db",
+        database_url_direct="postgresql+psycopg://a@direct/db",
+    )
+    assert direct.database_url_for_migrations.get_secret_value() == (
+        "postgresql+psycopg://a@direct/db"
+    )
+
+
+def test_database_urls_are_hidden_in_repr() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://hub:pw-placeholder@db/hub",
+        eval_database_url="postgresql+psycopg://hub:pw-placeholder@db/eval",
+    )
+    assert "pw-placeholder" not in repr(settings)
 
 
 def test_settings_are_frozen() -> None:

@@ -31,39 +31,55 @@ def postgres_check(
     return check
 
 
+class UnexpectedStatusError(Exception):
+    """The dependency answered, but not with a status that shows it is usable."""
+
+
 def http_check(
     url: str,
     *,
+    accept: Callable[[int], bool],
     headers: dict[str, str] | None = None,
     transport: httpx2.AsyncBaseTransport | None = None,
-    accept_client_errors: bool = False,
 ) -> ReadinessCheck:
-    """GET `url`. A 5xx always fails; a 4xx fails unless `accept_client_errors`."""
+    """GET `url`; fails unless `accept(status)` is true. Redirects are not followed."""
 
     async def check() -> None:
         async with httpx2.AsyncClient(transport=transport, headers=headers) as client:
             response = await client.get(url)
-        if response.status_code >= 500 or (
-            response.status_code >= 400 and not accept_client_errors
-        ):
-            response.raise_for_status()
+        if not accept(response.status_code):
+            raise UnexpectedStatusError(f"HTTP {response.status_code}")
 
     return check
+
+
+def _is_success(status: int) -> bool:
+    return 200 <= status < 300
+
+
+# What an MCP streamable-HTTP endpoint may answer to a plain GET that is not an MCP exchange.
+# 401, 403 and 404 are left out: a wrong token, a refused caller or a wrong path means the Hub
+# cannot use the server, so it is not ready.
+_MCP_REACHABLE_STATUSES = frozenset({400, 405, 406})
+
+
+def _mcp_answered(status: int) -> bool:
+    return _is_success(status) or status in _MCP_REACHABLE_STATUSES
 
 
 def qdrant_check(
     qdrant_url: str, transport: httpx2.AsyncBaseTransport | None = None
 ) -> ReadinessCheck:
     # Qdrant's /readyz needs no API key (Qdrant docs, "Monitoring").
-    return http_check(f"{qdrant_url.rstrip('/')}/readyz", transport=transport)
+    return http_check(f"{qdrant_url.rstrip('/')}/readyz", accept=_is_success, transport=transport)
 
 
 def mcp_check(
     mcp_server_url: str, token: str, transport: httpx2.AsyncBaseTransport | None = None
 ) -> ReadinessCheck:
-    # A plain GET is not a valid MCP exchange, so the server may answer 4xx; any answer below
-    # 500 shows it is up. The real MCP handshake is tested with the client in phase 7.
-    headers = {"Authorization": f"Bearer {token}"} if token else None
-    return http_check(
-        mcp_server_url, headers=headers, transport=transport, accept_client_errors=True
-    )
+    # Reachability only; the real MCP handshake is tested with the client in phase 7.
+    # Accept: application/json, so the server never opens an SSE stream for this GET.
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return http_check(mcp_server_url, accept=_mcp_answered, headers=headers, transport=transport)

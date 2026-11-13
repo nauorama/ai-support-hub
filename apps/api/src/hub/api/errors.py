@@ -1,8 +1,10 @@
 """RFC 9457 problem details for every error the API returns (docs/api.md §1).
 
 `type` is `about:blank`, so `title` is the standard HTTP status phrase and `code` carries the
-meaning. Error bodies never repeat what the client sent: a request can hold card data, and a
+meaning. Error bodies never repeat a submitted value: a request can hold card data, and a
 validation error that echoes the input would send it back and into any log of the response.
+Validation errors keep `loc`, which can name a key the client sent (an unknown field); it goes
+back only to the sender.
 """
 
 from http import HTTPStatus
@@ -34,14 +36,15 @@ def problem_response(
     headers: dict[str, str] | None = None,
     extensions: dict[str, Any] | None = None,
 ) -> JSONResponse:
+    # Extensions first, so they can never replace a standard member or the code.
     body: dict[str, Any] = {
+        **(extensions or {}),
         "type": "about:blank",
-        "title": HTTPStatus(status).phrase,
+        "title": _title_for_status(status),
         "status": status,
         "detail": detail,
         "code": code,
     }
-    body.update(extensions or {})
     return JSONResponse(body, status_code=status, headers=headers, media_type=PROBLEM_MEDIA_TYPE)
 
 
@@ -54,8 +57,20 @@ def internal_error_response() -> JSONResponse:
     )
 
 
+def _title_for_status(status: int) -> str:
+    # A non-standard status (e.g. 499) has no phrase; the handler must still answer.
+    try:
+        return HTTPStatus(status).phrase
+    except ValueError:
+        return f"HTTP {status}"
+
+
 def _code_for_status(status: int) -> str:
-    return HTTPStatus(status).phrase.lower().replace(" ", "_").replace("-", "_").replace("'", "")
+    try:
+        phrase = HTTPStatus(status).phrase
+    except ValueError:
+        return f"http_{status}"
+    return phrase.lower().replace(" ", "_").replace("-", "_").replace("'", "")
 
 
 async def _problem_error_handler(_request: Request, exc: Exception) -> JSONResponse:
@@ -65,7 +80,7 @@ async def _problem_error_handler(_request: Request, exc: Exception) -> JSONRespo
 
 async def _http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, HTTPException)  # noqa: S101 - registered for this class only
-    title = HTTPStatus(exc.status_code).phrase
+    title = _title_for_status(exc.status_code)
     detail = exc.detail if isinstance(exc.detail, str) and exc.detail else title
     return problem_response(
         exc.status_code,

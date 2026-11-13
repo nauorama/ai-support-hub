@@ -51,10 +51,14 @@ class RequestContextMiddleware:
                 MutableHeaders(scope=message).append(REQUEST_ID_HEADER, request_id)
             await send(message)
 
+        outcome = "ok"
         with structlog.contextvars.bound_contextvars(request_id=request_id):
             try:
                 await self.app(scope, receive, send_with_request_id)
             except Exception:
+                # When the response had started (a stream), its status says nothing about the
+                # failure; `outcome` does.
+                outcome = "error"
                 log.exception("request.unhandled_error")
                 # Not re-raised: the error is logged (masked) above, and the server would
                 # otherwise log the traceback again without masking.
@@ -65,5 +69,6 @@ class RequestContextMiddleware:
                 method=scope["method"],
                 path=scope["path"],
                 status=status_code,
+                outcome=outcome,
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
             )

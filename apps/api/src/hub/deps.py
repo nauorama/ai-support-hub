@@ -24,7 +24,7 @@ def build_container(settings: Settings) -> Container:
     return Container(
         settings=settings,
         readiness_checks={
-            "postgres": postgres_check(settings.database_url),
+            "postgres": postgres_check(settings.database_url.get_secret_value()),
             "qdrant": qdrant_check(settings.qdrant_url),
             "mcp": mcp_check(settings.mcp_server_url, settings.mcp_server_token.get_secret_value()),
         },

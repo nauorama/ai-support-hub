@@ -29,9 +29,10 @@ class Settings(BaseSettings):
     app_env: Literal["local", "test", "demo"] = "local"
     log_level: LogLevel = "INFO"
 
-    database_url: str = "postgresql+psycopg://hub:hub@localhost:5432/hub"
-    database_url_direct: str = ""
-    eval_database_url: str = ""
+    # Secret: the URLs carry the database password.
+    database_url: SecretStr = SecretStr("postgresql+psycopg://hub:hub@localhost:5432/hub")
+    database_url_direct: SecretStr = SecretStr("")
+    eval_database_url: SecretStr = SecretStr("")
 
     core_anchor_date: date | None = None
     jobs_token: SecretStr = SecretStr("")
@@ -74,9 +75,13 @@ class Settings(BaseSettings):
         return value.upper() if isinstance(value, str) else value
 
     @property
-    def database_url_for_migrations(self) -> str:
+    def database_url_for_migrations(self) -> SecretStr:
         """Direct (not pooled) connection; falls back to the app connection when not set."""
-        return self.database_url_direct or self.database_url
+        return (
+            self.database_url_direct
+            if self.database_url_direct.get_secret_value()
+            else (self.database_url)
+        )
 
 
 class SettingsError(Exception):

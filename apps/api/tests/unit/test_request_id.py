@@ -5,9 +5,12 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+import structlog
 from fastapi.testclient import TestClient
+from starlette.types import Message, Receive, Scope, Send
 
-from hub.api.middleware import request_id_for
+from hub.api.middleware import RequestContextMiddleware, request_id_for
+from hub.observability.logging import configure_logging
 
 MakeClient = Callable[..., TestClient]
 LogLines = Callable[[], list[dict[str, Any]]]
@@ -42,19 +45,45 @@ def test_log_line_names_the_request(make_client: MakeClient, log_lines: LogLines
     assert line["method"] == "GET"
     assert line["path"] == "/nope"
     assert line["status"] == 404
+    assert line["outcome"] == "ok"
     assert line["level"] == "info"
     assert isinstance(line["duration_ms"], float)
 
 
-def test_request_id_does_not_leak_into_later_logs(
-    make_client: MakeClient, log_lines: LogLines
+async def test_request_id_is_bound_during_the_request_and_reset_after(
+    log_lines: LogLines,
 ) -> None:
-    import structlog
+    # The middleware is called directly in this task, so a binding without reset would stay
+    # visible here afterwards (TestClient runs the app in another thread and cannot show it).
+    configure_logging("INFO")
+    seen_inside: dict[str, Any] = {}
 
-    make_client().get("/health", headers={"X-Request-ID": "req-2"})
-    structlog.get_logger("after").info("after.request")
-    line = next(line for line in log_lines() if line["event"] == "after.request")
-    assert "request_id" not in line
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        seen_inside.update(structlog.contextvars.get_contextvars())
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/x",
+        "headers": [(b"x-request-id", b"req-3")],
+    }
+    await RequestContextMiddleware(app)(scope, receive, send)
+
+    assert seen_inside["request_id"] == "req-3"
+    assert "request_id" not in structlog.contextvars.get_contextvars()
+    assert (b"x-request-id", b"req-3") in sent[0]["headers"]
+    (line,) = log_lines()
+    assert (line["event"], line["request_id"]) == ("request.completed", "req-3")
 
 
 def test_lifespan_passes_through(make_client: MakeClient) -> None:
@@ -82,6 +111,7 @@ def test_error_after_the_response_started_is_logged_not_raised(
     response = client.get("/stream")
     assert response.status_code == 200
     assert response.text.startswith("event: ticket.created")
-    events_logged = [line["event"] for line in log_lines()]
-    assert "request.unhandled_error" in events_logged
-    assert "request.completed" in events_logged
+    lines = log_lines()
+    assert any(line["event"] == "request.unhandled_error" for line in lines)
+    completed = next(line for line in lines if line["event"] == "request.completed")
+    assert (completed["status"], completed["outcome"]) == (200, "error")

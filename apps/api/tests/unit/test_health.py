@@ -10,7 +10,13 @@ from fastapi.testclient import TestClient
 from hub.api import health
 from hub.config import Settings
 from hub.deps import build_container
-from hub.observability.readiness import libpq_url, mcp_check, postgres_check, qdrant_check
+from hub.observability.readiness import (
+    UnexpectedStatusError,
+    libpq_url,
+    mcp_check,
+    postgres_check,
+    qdrant_check,
+)
 
 MakeClient = Callable[..., TestClient]
 
@@ -128,21 +134,41 @@ async def test_qdrant_check_calls_readyz() -> None:
     assert str(seen[0].url) == "http://qdrant:6333/readyz"
 
 
-@pytest.mark.parametrize("status", [404, 503])
-async def test_qdrant_check_fails_on_error_status(status: int) -> None:
-    with pytest.raises(httpx2.HTTPStatusError):
+@pytest.mark.parametrize("status", [204, 200])
+async def test_qdrant_check_accepts_2xx(status: int) -> None:
+    await qdrant_check("http://qdrant:6333", transport=_transport(status, []))()
+
+
+@pytest.mark.parametrize("status", [301, 401, 404, 503])
+async def test_qdrant_check_fails_on_other_statuses(status: int) -> None:
+    with pytest.raises(UnexpectedStatusError, match=f"HTTP {status}"):
         await qdrant_check("http://qdrant:6333", transport=_transport(status, []))()
 
 
-@pytest.mark.parametrize("status", [200, 400, 405, 406])
-async def test_mcp_check_accepts_any_answer_below_500(status: int) -> None:
+@pytest.mark.parametrize("status", [200, 202, 400, 405, 406])
+async def test_mcp_check_accepts_answers_of_a_reachable_server(status: int) -> None:
     seen: list[httpx2.Request] = []
     await mcp_check("http://mcp:8001/mcp", "tok", transport=_transport(status, seen))()
     assert seen[0].headers["authorization"] == "Bearer tok"
+    assert seen[0].headers["accept"] == "application/json"
 
 
-async def test_mcp_check_fails_on_5xx_and_sends_no_auth_without_token() -> None:
+@pytest.mark.parametrize("status", [302, 401, 403, 404, 500, 502])
+async def test_mcp_check_fails_when_the_hub_could_not_use_the_server(status: int) -> None:
+    with pytest.raises(UnexpectedStatusError, match=f"HTTP {status}"):
+        await mcp_check("http://mcp:8001/mcp", "tok", transport=_transport(status, []))()
+
+
+async def test_mcp_check_sends_no_auth_without_token() -> None:
     seen: list[httpx2.Request] = []
-    with pytest.raises(httpx2.HTTPStatusError):
-        await mcp_check("http://mcp:8001/mcp", "", transport=_transport(502, seen))()
+    await mcp_check("http://mcp:8001/mcp", "", transport=_transport(200, seen))()
     assert "authorization" not in seen[0].headers
+
+
+def test_ready_shows_the_status_of_a_wrong_answer(make_client: MakeClient) -> None:
+    async def unauthorised() -> None:
+        raise UnexpectedStatusError("HTTP 401")
+
+    response = make_client({"mcp": unauthorised}).get("/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["mcp"] == {"status": "error", "error": "HTTP 401"}

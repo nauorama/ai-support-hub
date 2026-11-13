@@ -9,7 +9,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from hub.deps import Container
-from hub.observability.readiness import ReadinessCheck
+from hub.observability.readiness import ReadinessCheck, UnexpectedStatusError
 
 router = APIRouter(tags=["health"])
 
@@ -27,6 +27,8 @@ async def _run_check(name: str, check: ReadinessCheck) -> tuple[str, dict[str, s
             await check()
     except TimeoutError:
         return name, {"status": "error", "error": "timeout"}
+    except UnexpectedStatusError as exc:
+        return name, {"status": "error", "error": str(exc)}  # "HTTP 401": safe to show
     except Exception as exc:
         # Only the class name: messages of connection errors can contain the connection string.
         return name, {"status": "error", "error": type(exc).__name__}

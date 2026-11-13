@@ -4,7 +4,12 @@ Base path `/api/v1`. JSON, `snake_case`. FastAPI generates the OpenAPI file; thi
 
 ## 1. Conventions
 
-- **Errors:** RFC 9457 problem details: `{"type": "...", "title": "...", "status": 409, "detail": "...", "code": "stale_draft"}`.
+- **Errors:** RFC 9457 problem details, media type `application/problem+json`: `{"type": "about:blank", "title": "Conflict", "status": 409, "detail": "...", "code": "stale_draft"}`. `type` is always `about:blank`, so `title` is the standard HTTP status phrase (`HTTP 499` for a status without one) and `code` carries the meaning. Codes:
+  - codes named by an endpoint in this document, e.g. `stale_draft`;
+  - `validation_error` (422): the request does not match the schema. Extension member `errors`: a list of `{"loc": [...], "type": "...", "msg": "..."}`. Submitted values are never repeated; `loc` can name a key the client sent;
+  - `internal_error` (500): unexpected error. `detail` is generic; quote the `X-Request-ID` to find the log line;
+  - any other HTTP error: the status phrase in snake case, e.g. `not_found`, `method_not_allowed`, `too_many_requests` (`http_<status>` for a status without a phrase).
+- **Request id:** every response has an `X-Request-ID` header. A caller's own `X-Request-ID` (1–64 characters from `A-Z a-z 0-9 . _ -`) is kept; otherwise the API generates one (32 hex characters). Every log line of the request carries it as `request_id`.
 - **Auth:** two cookie sessions, both `HttpOnly`, `Secure`, `SameSite=Lax`, signed.
   - `hub_customer` — demo customer session (stands for the login of the Tallybridge app).
   - `hub_operator` — operator session. State-changing console requests also need the `X-CSRF-Token` header.

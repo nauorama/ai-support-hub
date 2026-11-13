@@ -106,3 +106,41 @@ def test_problem_error_carries_its_fields() -> None:
         "stale_draft",
         "The draft is out of date.",
     )
+
+
+def test_unhandled_error_log_has_no_locals_request_content_or_secrets(
+    make_client: MakeClient, log_lines: LogLines, test_db_password: str
+) -> None:
+    message = "My email is jane.doe@example.com and IBAN DE89370400440532013000"
+    response = make_client().post("/boom-with-body", json={"message": message})
+    assert response.status_code == 500
+
+    lines = log_lines()
+    error_line = next(line for line in lines if line["event"] == "request.unhandled_error")
+    frames = [frame for exc in error_line["exception"] for frame in exc["frames"]]
+    assert frames, "the traceback is logged"
+    assert all("locals" not in frame for frame in frames)
+    everything = json.dumps(lines)
+    assert "jane.doe" not in everything
+    assert test_db_password not in everything
+
+
+def test_extensions_cannot_replace_standard_members() -> None:
+    response = problem_response(
+        409, "stale_draft", "Out of date.", extensions={"type": "x", "code": "y", "status": 200}
+    )
+    body = json.loads(bytes(response.body))
+    assert (body["type"], body["code"], body["status"]) == ("about:blank", "stale_draft", 409)
+
+
+def test_non_standard_status_still_gets_a_problem(make_client: MakeClient) -> None:
+    from starlette.exceptions import HTTPException
+
+    client = make_client()
+
+    @client.app.get("/client-closed")  # type: ignore[attr-defined, untyped-decorator]
+    async def client_closed() -> None:
+        raise HTTPException(499)
+
+    response = client.get("/client-closed")
+    _assert_problem(response, 499, "HTTP 499", "http_499")
