@@ -1,4 +1,5 @@
-"""`make data-check` fails safe until the real validators exist (P2-05, P2-08, P4-01)."""
+"""`make data-check`: the layout rules (fail safe for files without a validator) and the seed
+validator (P2-05). Knowledge-base and evaluation validators come in P2-08 and P4-01."""
 
 from pathlib import Path
 
@@ -34,7 +35,13 @@ def test_os_noise_is_ignored(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["kb/refunds.md", "seed/customers.json", "eval/tickets.dev.jsonl", "kb/nested/deep.md"],
+    [
+        "kb/refunds.md",
+        "seed/accounts.json",
+        "seed/old/customers.json",
+        "eval/tickets.dev.jsonl",
+        "kb/nested/deep.md",
+    ],
 )
 def test_a_data_file_without_a_validator_fails(tmp_path: Path, name: str) -> None:
     errors = check_layout(_layout(tmp_path, name))
