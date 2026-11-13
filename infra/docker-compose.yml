@@ -1,0 +1,84 @@
+# Local stack (docs/operations.md §1). `make up` starts it, `make down` stops it.
+# Services that come later: `mcp` (support-tools server, phase 7; until then `/ready` reports
+# mcp as not ready and answers 503) and `web` (Vite dev server, phase 10).
+#
+# hub:hub are local defaults only, never real credentials. Every port binds to 127.0.0.1, so
+# nothing is reachable from the network. The image tags are also used by the testcontainers
+# fixtures (apps/api/tests/integration/conftest.py reads them from this file).
+name: support-hub
+
+services:
+  postgres:
+    image: postgres:17.12-alpine
+    environment:
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: hub
+      POSTGRES_DB: hub
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Over TCP: during first-time init the entrypoint runs a temporary server on the Unix
+      # socket only, which a socket check would wrongly report as ready.
+      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 --username hub --dbname hub"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # The image has bash but no curl or wget. /readyz needs no API key (Qdrant docs, "Monitoring").
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\r\n\r\n' >&3 && head -n 1 <&3 | grep -q ' 200 '
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    # `.env` gives the settings; the URLs below point at the compose services instead of localhost.
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://hub:hub@postgres:5432/hub
+      # Empty = same as DATABASE_URL (operations §2), so a localhost value from .env is not used.
+      DATABASE_URL_DIRECT: ""
+      EVAL_DATABASE_URL: postgresql+psycopg://hub:hub@postgres:5432/hub_eval
+      QDRANT_URL: http://qdrant:6333
+      MCP_SERVER_URL: http://mcp:8001/mcp
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ../apps/api/src:/app/apps/api/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      # /health, not /ready: /ready is 503 until the MCP server exists (phase 7).
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+  qdrant-data:

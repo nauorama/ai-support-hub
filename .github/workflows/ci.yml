@@ -1,4 +1,4 @@
-# CI from docs/operations.md §5. Jobs added later: web (P10), e2e (P10), integration tests (P2),
+# CI from docs/operations.md §5. Jobs added later: web (P10), e2e (P10),
 # pnpm audit and Dependabot (P8-06). Every check runs a make target where one exists, so CI and
 # a laptop run the same commands. Actions are pinned by commit SHA; the comment names the release.
 name: ci
@@ -60,6 +60,27 @@ jobs:
           fi
           echo "ANTHROPIC_API_KEY and OPENAI_API_KEY are empty"
           make test
+
+  # Integration tests with testcontainers (Postgres, Qdrant); ubuntu-latest runners have Docker.
+  # A separate job, so a slow image pull does not hold up the unit test result.
+  test-int:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --all-packages --locked
+      - name: Integration tests (no provider API keys)
+        run: |
+          if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::a provider API key is set for the tests"
+            exit 1
+          fi
+          make test-int
 
   data-check:
     runs-on: ubuntu-latest

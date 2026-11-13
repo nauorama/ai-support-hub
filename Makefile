@@ -7,8 +7,8 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test data-check
-NOT_IMPLEMENTED := up down migrate seed kb-load dev test-int test-e2e \
+BUILT := setup lint test data-check up down dev test-int
+NOT_IMPLEMENTED := migrate seed kb-load test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
 	record-llm leak-scan export-review-candidates rollback
 
@@ -40,6 +40,24 @@ test:
 
 data-check:
 	uv run python -m hub_evals.data_check data
+
+COMPOSE := docker compose -f infra/docker-compose.yml
+
+# --wait returns when every service is healthy (the api healthcheck uses /health).
+up:
+	$(COMPOSE) up --detach --build --wait
+
+down:
+	$(COMPOSE) down
+
+# operations §1: dev = up + migrate + seed + kb-load. migrate, seed and kb-load join here when
+# they are built (P2-02, P2-05, P2-09); until then dev only starts the stack.
+dev: up
+	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
+
+# Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).
+test-int:
+	uv run pytest apps/api/tests/integration
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"
