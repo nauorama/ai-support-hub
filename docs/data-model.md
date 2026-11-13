@@ -256,6 +256,8 @@ Append-only. The application database role (`hub_app`, [operations](operations.m
 
 Two rules that keep the log usable. (1) Inserts are serialised (a Postgres advisory lock around "read last hash → insert"), otherwise two requests at the same time break the chain. (2) The log refers to a customer only by the internal UUID. Erasure anonymises the `customers` row, so the UUID no longer points to a person and no audit row has to change.
 
+**Hash details** (`hub/audit/chain.py`). `canonical_json(row)` covers every column except `id`, `prev_hash` and `hash`: JSON with sorted keys, no spaces, ASCII only, `ts` in UTC with microseconds. `id` is assigned by the database on insert, so it is not known when the hash is computed; the order of rows is protected by `prev_hash`. The first row has `prev_hash` = 64 zeros. `details` are masked (G1) before they are hashed and stored. `jsonb` prints numbers without exponent notation (`1e20` comes back as `100000000000000000000`), so a decimal number with a whole value is hashed as an integer; otherwise `verify_chain()` would report rows nobody changed. `details` accept only JSON types; NaN, infinity and NUL characters are refused, as `jsonb` refuses them.
+
 ### LangGraph checkpoint tables
 Created by `langgraph-checkpoint-postgres` (`setup()` in a migration step). Do not edit by hand. Checkpoints of closed tickets are deleted by the retention job.
 

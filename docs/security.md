@@ -75,6 +75,8 @@ Events (each with actor, entity and masked details): `ticket.created`, `guardrai
 
 The hash chain makes changes visible: `GET /console/audit/verify` recomputes it. The log holds ids, codes and numbers — no names, no message text, no card data. It refers to a customer only by the internal UUID. Retention 5 years (configurable). Erasure does not touch the log: it anonymises the `customers` row, so the UUID no longer points to a person, and the hash chain stays valid.
 
+**Known limitation: deleting the newest rows is not detected.** A hash chain proves only that the rows it has are unchanged and in order. A changed row fails its own hash, and a deleted row breaks the link of the row after it. But removing the last N rows leaves a shorter chain that still verifies (test `test_known_limitation_deleting_the_last_rows_is_not_detected`). The app role cannot delete rows (§4), so this needs the table owner or a superuser. Not fixed in this project. A fix would anchor the chain head outside the database, for example by publishing the latest `id` and `hash` periodically to a separate append-only store and comparing on verify.
+
 ## 6. Privacy (GDPR)
 
 | Principle | Implementation |
