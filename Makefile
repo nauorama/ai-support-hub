@@ -32,9 +32,10 @@ lint:
 	@if [ -f apps/web/package.json ]; then pnpm -C apps/web lint && pnpm -C apps/web typecheck; else echo "web: apps/web has no package.json yet, skipping eslint and tsc"; fi
 
 # Coverage gate for deterministic safety code (AGENTS.md, security §3): >= 95% line coverage.
-# hub.domain holds the ticket status transitions. Add the other safety modules
+# hub.domain holds the ticket status transitions; hub.audit.chain the audit hash chain and the
+# masking of audit details. Add the other safety modules
 # (tools/permissions, auth) here when they are built.
-SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov-report=term-missing:skip-covered --cov-fail-under=95
+SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:
 	uv run pytest $(SAFETY_COVERAGE)
