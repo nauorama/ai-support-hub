@@ -117,8 +117,10 @@ The server sends a comment line (`: ping`) every 10 s to keep the connection ope
 
 | Path | Purpose |
 |---|---|
-| `GET /healthz` | Process is up. No dependencies. |
-| `GET /readyz` | Postgres, Qdrant and the MCP server answer. Returns the state of each. |
+| `GET /health` | Process is up. No dependencies. |
+| `GET /ready` | Postgres, Qdrant and the MCP server answer. Returns the state of each; 503 when one does not. |
+
+Both paths are at the root, outside `/api/v1`. They are not `/healthz` and `/readyz`: Cloud Run reserves some paths that end in `z` and recommends avoiding them (https://cloud.google.com/run/docs/issues).
 
 ## 7. MCP server: `support-tools`
 
