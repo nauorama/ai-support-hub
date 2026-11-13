@@ -297,9 +297,24 @@ updated_at: 2026-10-01
 Rules: one topic per article; 150–600 words; `##` sections that make sense alone; every number comes from [the world file](tallybridge-world.md); about 10 articles are `internal` (operator procedures, escalation rules, compliance wording). `error_codes.csv` has the columns `code, title, customer_explanation, customer_action, visibility` — each row becomes one chunk.
 
 ### `data/seed/` — demo data
-`customers.json`, `cards.json`, `transactions.json` (40 customers, 5–40 transactions each, including pending, failed-with-error-code and under-review cases), `operators.json` (demo operators; passwords come from environment variables, not from the file).
+`customers.json`, `cards.json`, `transactions.json` (40 customers, 5–40 transactions each, including pending, failed-with-error-code and under-review cases), `operators.json` (demo operators, one per role; passwords come from `SEED_OPERATOR_PASSWORD`, not from the file). Each file is a JSON array. The schemas (Pydantic, unknown fields refused) and the rules across files are in `hub/domain/seed.py`; `make data-check` runs them.
 
-Dates in seed files are **offsets** from an anchor date (`"requested_at": "-3d 10:15"`). The core mock resolves them against `CORE_ANCHOR_DATE`: empty = today (the demo always has a "withdrawal from three days ago"), a fixed date in tests and evaluation (repeatable results).
+| File | Fields |
+|---|---|
+| `customers.json` | `external_ref` (`CUS-0001`), `display_name`, `email` (`@example.com`), `tier`, `country`, `opened_at`, `balances` (`{"EUR": "1250.00"}`), `restricted`, `restriction_reason` (internal), `upgrade` (verification for a higher tier: `target_tier`, `status` `pending`\|`rejected`, `submitted_at`, `error_code`), `support_scenarios` |
+| `cards.json` | `card_ref` (`CRD-0001`), `customer_ref`, `kind` `virtual`\|`physical`, `last4`, `status` `active`\|`frozen`\|`pin_blocked`\|`cancelled`, `issued_at`, `delivery_status` `ordered`\|`shipped`\|`delivered` and `delivery_method` `standard`\|`express` (physical only) |
+| `transactions.json` | `reference` (`TX-000001`), `customer_ref`, `type`, `amount`, `currency`, `fee`, `fee_currency` (currency of the fee; empty = `currency`; `EUR` for fixed fees on USD or GBP transactions), `status` `pending`\|`held_for_review`\|`completed`\|`failed`\|`returned`, `error_code`, `requested_at`, `status_history` (`[{status, at}]`), `counterparty`, `card_ref` (card payments and ATM withdrawals), `merchant_category` (card payments only) |
+| `operators.json` | `email` (`@tallybridge.example`), `name`, `role` |
+
+Rules that matter outside the schema:
+- Amounts are JSON strings with two decimals (exact, no float rounding).
+- Fees follow [the world file](tallybridge-world.md) §4: fixed fees are EUR amounts (with `fee_currency: "EUR"` on a USD or GBP transaction); failed or returned withdrawals and mass payouts have no fee.
+- Transaction `type` is one of `incoming_sepa`, `incoming_ach`, `incoming_fps`, `payment_request_card`, `payment_request_bank`, `withdrawal_sepa`, `withdrawal_swift`, `card_payment`, `atm_withdrawal`, `conversion`, `fee`, `mass_payout`.
+- Cards hold only the last 4 digits, never a full card number (no tool returns more). No text in a seed file may look like card data; `make data-check` scans every value with the masking code.
+- Every customer has finished the checks of their current tier (an account without them cannot hold money, world file §3); verification cases are upgrades to a higher tier.
+- **`support_scenarios` is test-data metadata only.** It lists the intents that the customer's data fits, so `make data-check` can prove that each of the 12 intents has at least 3 customers. **It must never reach a model:** no tool result, prompt, memory or evaluation input may contain it, because it would leak the expected intent into evaluation. The core adapter (P7) drops it, like `restriction_reason`.
+
+Dates in seed files are **offsets** from an anchor date (`"requested_at": "-3d 10:15"`: days, then a time of day in **UTC**). **Every seed date is a past event: `-1d` or earlier, and on `-1d` before 22:00 UTC** (the anchor day starts at 00:00 CET, which is 22:00 UTC in summer). With an empty `CORE_ANCHOR_DATE` an event at `0d` would lie in the future for part of the day. Only expected dates (`expected_at`), which the core mock computes, may be in the future; `make data-check` enforces this. The core mock resolves them against `CORE_ANCHOR_DATE`: empty = today (the demo always has a "withdrawal from three days ago"), a fixed date in tests and evaluation (repeatable results). Because the anchor can be any weekday and either side of the summer-time change, scenario dates are chosen to stay true for every anchor: "late" cases lie far enough back to be late on any weekday (late SWIFT at 14 days or more), and a SEPA withdrawal is never requested between 13:00 and 13:59 UTC, the hour that is before the 15:00 CET cut-off in winter but after it in summer (CEST).
 
 ### `data/eval/` — evaluation sets
 See [eval plan](eval-plan.md) §3 for the schemas of `tickets.dev.jsonl`, `tickets.test.jsonl`, `attacks.jsonl` and `judge_validation.jsonl`.

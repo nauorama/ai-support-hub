@@ -1,0 +1,22 @@
+[
+  {
+    "email": "avery.lindgren@tallybridge.example",
+    "name": "Avery Lindgren",
+    "role": "operator"
+  },
+  {
+    "email": "noor.haddad@tallybridge.example",
+    "name": "Noor Haddad",
+    "role": "lead"
+  },
+  {
+    "email": "tobias.renner@tallybridge.example",
+    "name": "Tobias Renner",
+    "role": "compliance"
+  },
+  {
+    "email": "sana.whitcombe@tallybridge.example",
+    "name": "Sana Whitcombe",
+    "role": "admin"
+  }
+]

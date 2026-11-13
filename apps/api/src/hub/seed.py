@@ -1,0 +1,228 @@
+"""`make seed`: load the demo customers, operators and default settings (docs/operations.md §1).
+
+Idempotent, in one transaction:
+- customers are upserted by `external_ref` (the Hub mirrors the core mock), except anonymised
+  rows: an erasure must survive a later seed;
+- operators and settings are inserted only when missing, so a re-run never resets an operator's
+  password or a value a lead changed in the console.
+
+Cards and transactions are not loaded: the core mock reads them from `data/seed/` (P7).
+Every row written gets an audit record; a run that changes nothing writes none.
+Output names only counts, never customer data.
+"""
+
+import asyncio
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from hub.audit import record
+from hub.auth.passwords import hash_password
+from hub.config import Settings, SettingsError, load_settings
+from hub.db.models import Customer, Operator, Setting
+from hub.db.repositories import CustomerRepository, OperatorRepository
+from hub.db.session import connect
+from hub.domain.enums import ActorType, Intent, SettingKey
+from hub.domain.seed import SeedData, parse_seed, validate_seed
+
+ACTOR = "make-seed"
+SEED_DIR = Path("data/seed")
+SEED_FILES = ("customers.json", "cards.json", "transactions.json", "operators.json")
+
+# First value of the allow-list: the `auto_reply_allowlist` of docs/ai-pipeline.md §6.
+# Hard-coded until `config/policy.yaml` exists (deferred to P6-02, docs/build-plan.md).
+DEFAULT_INTENT_ALLOWLIST = (
+    Intent.PAYMENT_PENDING,
+    Intent.WITHDRAWAL_ISSUE,
+    Intent.CARD_DECLINED,
+    Intent.KYC_VERIFICATION,
+    Intent.FEES_FX,
+    Intent.LIMITS,
+    Intent.ACCOUNT_MANAGEMENT,
+)
+# Until phase 9 there is no trained confidence model: auto-reply starts off and the threshold
+# is 0.95 (docs/ai-pipeline.md §6).
+DEFAULT_CONFIDENCE_THRESHOLD = 0.95
+
+
+def default_settings(daily_budget_usd: float) -> dict[SettingKey, Any]:
+    return {
+        SettingKey.AUTO_REPLY_ENABLED: False,
+        SettingKey.CONFIDENCE_THRESHOLD: DEFAULT_CONFIDENCE_THRESHOLD,
+        SettingKey.DAILY_BUDGET_USD: daily_budget_usd,
+        SettingKey.INTENT_ALLOWLIST: [str(intent) for intent in DEFAULT_INTENT_ALLOWLIST],
+    }
+
+
+@dataclass
+class SeedReport:
+    customers_added: int = 0
+    customers_updated: int = 0
+    customers_unchanged: int = 0
+    operators_added: int = 0
+    settings_added: list[str] = field(default_factory=list)
+
+    @property
+    def changed(self) -> bool:
+        return bool(
+            self.customers_added
+            or self.customers_updated
+            or self.operators_added
+            or self.settings_added
+        )
+
+
+class SeedError(Exception):
+    """The seed cannot run: invalid files or a missing setting. Nothing was written."""
+
+
+def read_seed(seed_dir: Path) -> SeedData:
+    """Read, parse and cross-check the seed files. Raises SeedError on any problem."""
+    try:
+        files = {name: (seed_dir / name).read_bytes() for name in SEED_FILES}
+    except OSError as error:
+        raise SeedError(f"cannot read the seed files in {seed_dir}: {error.strerror}") from error
+    try:
+        seed = parse_seed(files)
+    except ValueError as error:  # pydantic.ValidationError is a ValueError
+        raise SeedError("the seed files are invalid; run `make data-check`") from error
+    if validate_seed(seed):
+        raise SeedError("the seed files are inconsistent; run `make data-check`")
+    return seed
+
+
+async def load_seed(
+    session: AsyncSession, seed: SeedData, *, operator_password: str, daily_budget_usd: float
+) -> SeedReport:
+    """Write the seed inside the caller's transaction (the caller commits)."""
+    if not operator_password:
+        raise SeedError(
+            "SEED_OPERATOR_PASSWORD is empty. Set it in .env (the password of the demo "
+            "operators), then run `make seed` (or `make dev`) again. Nothing was written."
+        )
+    report = SeedReport()
+    await _load_customers(session, seed, report)
+    await _load_operators(session, seed, operator_password, report)
+    await _load_settings(session, default_settings(daily_budget_usd), report)
+    return report
+
+
+async def _load_customers(session: AsyncSession, seed: SeedData, report: SeedReport) -> None:
+    customers = CustomerRepository(session)
+    for item in seed.customers:
+        fields = {
+            "display_name": item.display_name,
+            "email": item.email,
+            "tier": item.tier,
+            "country": item.country,
+        }
+        row = await customers.get_by_external_ref(item.external_ref)
+        if row is None:
+            row = await customers.add(Customer(external_ref=item.external_ref, **fields))
+            await _audit(session, "seed.customer_added", "customer", row)
+            report.customers_added += 1
+            continue
+        changed = [name for name, value in fields.items() if getattr(row, name) != value]
+        if row.anonymised_at is not None or not changed:
+            report.customers_unchanged += 1
+            continue
+        for name in changed:
+            setattr(row, name, fields[name])
+        await session.flush()
+        # Field names only: the audit log holds no names or emails (data model, audit_log).
+        await _audit(session, "seed.customer_updated", "customer", row, {"fields": changed})
+        report.customers_updated += 1
+
+
+async def _load_operators(
+    session: AsyncSession, seed: SeedData, password: str, report: SeedReport
+) -> None:
+    operators = OperatorRepository(session)
+    for item in seed.operators:
+        if await operators.get_by_email(item.email) is not None:
+            continue
+        row = await operators.add(
+            Operator(
+                email=item.email,
+                name=item.name,
+                role=item.role,
+                password_hash=hash_password(password),
+            )
+        )
+        await _audit(session, "seed.operator_added", "operator", row, {"role": str(item.role)})
+        report.operators_added += 1
+
+
+async def _load_settings(
+    session: AsyncSession, defaults: dict[SettingKey, Any], report: SeedReport
+) -> None:
+    for key, value in defaults.items():
+        if await session.get(Setting, key) is not None:
+            continue
+        session.add(Setting(key=key, value=value))
+        await session.flush()
+        await record(
+            session,
+            actor_type=ActorType.SYSTEM,
+            actor_id=ACTOR,
+            action="settings.changed",
+            entity_type="setting",
+            entity_id=str(key),
+            details={"key": str(key), "old": None, "new": value},
+        )
+        report.settings_added.append(str(key))
+
+
+async def _audit(
+    session: AsyncSession,
+    action: str,
+    entity_type: str,
+    row: Customer | Operator,
+    details: dict[str, Any] | None = None,
+) -> None:
+    await record(
+        session,
+        actor_type=ActorType.SYSTEM,
+        actor_id=ACTOR,
+        action=action,
+        entity_type=entity_type,
+        entity_id=row.id,
+        details=details,
+    )
+
+
+async def run(settings: Settings, seed_dir: Path) -> SeedReport:
+    seed = read_seed(seed_dir)
+    database = connect(settings.database_url.get_secret_value())
+    try:
+        async with database.sessions() as session, session.begin():
+            return await load_seed(
+                session,
+                seed,
+                operator_password=settings.seed_operator_password.get_secret_value(),
+                daily_budget_usd=settings.daily_budget_usd,
+            )
+    finally:
+        await database.dispose()
+
+
+def main(argv: list[str]) -> int:
+    seed_dir = Path(argv[0]) if argv else SEED_DIR
+    try:
+        report = asyncio.run(run(load_settings(), seed_dir))
+    except (SeedError, SettingsError) as error:
+        print(f"seed: {error}", file=sys.stderr)
+        return 1
+    print(
+        f"seed: customers +{report.customers_added} ~{report.customers_updated} "
+        f"={report.customers_unchanged}; operators +{report.operators_added}; "
+        f"settings +{len(report.settings_added)}" + ("" if report.changed else " (nothing to do)")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

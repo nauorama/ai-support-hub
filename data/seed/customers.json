@@ -1,0 +1,724 @@
+[
+  {
+    "external_ref": "CUS-0001",
+    "display_name": "Lucia Ferrandis",
+    "email": "lucia.ferrandis@example.com",
+    "tier": "verified",
+    "country": "ES",
+    "opened_at": "-840d 09:30",
+    "balances": {
+      "EUR": "3420.55",
+      "USD": "610.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0002",
+    "display_name": "Tomasz Wierzbicki",
+    "email": "tomasz.wierzbicki@example.com",
+    "tier": "verified",
+    "country": "PL",
+    "opened_at": "-610d 09:30",
+    "balances": {
+      "EUR": "2185.40",
+      "USD": "940.10"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "payment_pending",
+      "dispute_chargeback"
+    ]
+  },
+  {
+    "external_ref": "CUS-0003",
+    "display_name": "Ines Carvalhal",
+    "email": "ines.carvalhal@example.com",
+    "tier": "starter",
+    "country": "PT",
+    "opened_at": "-6d 09:30",
+    "balances": {
+      "EUR": "140.00"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "verified",
+      "status": "pending",
+      "submitted_at": "-1d 08:40"
+    },
+    "support_scenarios": [
+      "payment_pending",
+      "kyc_verification"
+    ]
+  },
+  {
+    "external_ref": "CUS-0004",
+    "display_name": "Kofi Adjei-Brenner",
+    "email": "kofi.adjeibrenner@example.com",
+    "tier": "verified",
+    "country": "GH",
+    "opened_at": "-720d 09:30",
+    "balances": {
+      "EUR": "820.00",
+      "USD": "1975.30"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "login_security"
+    ]
+  },
+  {
+    "external_ref": "CUS-0005",
+    "display_name": "Priya Raghunathan",
+    "email": "priya.raghunathan@example.com",
+    "tier": "starter",
+    "country": "IN",
+    "opened_at": "-210d 09:30",
+    "balances": {
+      "EUR": "905.00",
+      "USD": "64.80"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "verified",
+      "status": "rejected",
+      "submitted_at": "-3d 10:00",
+      "error_code": "ERR-4010"
+    },
+    "support_scenarios": [
+      "kyc_verification",
+      "limits",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0006",
+    "display_name": "Fjordlight Design AS",
+    "email": "henrik.solberg@example.com",
+    "tier": "business",
+    "country": "NO",
+    "opened_at": "-760d 09:30",
+    "balances": {
+      "EUR": "61850.00",
+      "USD": "14230.75",
+      "GBP": "3120.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "limits",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0007",
+    "display_name": "Jonas Albrecht",
+    "email": "jonas.albrecht@example.com",
+    "tier": "verified",
+    "country": "DE",
+    "opened_at": "-540d 09:30",
+    "balances": {
+      "EUR": "6740.20",
+      "USD": "1210.00"
+    },
+    "restricted": true,
+    "restriction_reason": "Source of funds review opened by Compliance",
+    "support_scenarios": [
+      "account_restricted",
+      "withdrawal_issue",
+      "card_declined"
+    ]
+  },
+  {
+    "external_ref": "CUS-0008",
+    "display_name": "Mei Lin Tan",
+    "email": "meilin.tan@example.com",
+    "tier": "verified",
+    "country": "SG",
+    "opened_at": "-480d 09:30",
+    "balances": {
+      "USD": "2310.00",
+      "EUR": "455.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_declined",
+      "dispute_chargeback"
+    ]
+  },
+  {
+    "external_ref": "CUS-0009",
+    "display_name": "Olumide Bakare",
+    "email": "olumide.bakare@example.com",
+    "tier": "starter",
+    "country": "NG",
+    "opened_at": "-330d 09:30",
+    "balances": {
+      "USD": "385.60"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "payment_pending",
+      "fees_fx",
+      "other"
+    ]
+  },
+  {
+    "external_ref": "CUS-0010",
+    "display_name": "Chloe Marchetti",
+    "email": "chloe.marchetti@example.com",
+    "tier": "verified",
+    "country": "FR",
+    "opened_at": "-390d 09:30",
+    "balances": {
+      "EUR": "1530.25"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_lost_stolen",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0011",
+    "display_name": "Diego Albarran",
+    "email": "diego.albarran@example.com",
+    "tier": "verified",
+    "country": "MX",
+    "opened_at": "-420d 09:30",
+    "balances": {
+      "USD": "1730.00",
+      "EUR": "220.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_lost_stolen",
+      "dispute_chargeback"
+    ]
+  },
+  {
+    "external_ref": "CUS-0012",
+    "display_name": "Lindqvist Audio AB",
+    "email": "hanna.lindqvist@example.com",
+    "tier": "business",
+    "country": "SE",
+    "opened_at": "-680d 09:30",
+    "balances": {
+      "EUR": "28740.00",
+      "USD": "9120.40"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_declined",
+      "limits"
+    ]
+  },
+  {
+    "external_ref": "CUS-0013",
+    "display_name": "Ellis Okafor-Grant",
+    "email": "ellis.okaforgrant@example.com",
+    "tier": "starter",
+    "country": "GB",
+    "opened_at": "-150d 09:30",
+    "balances": {
+      "GBP": "210.00"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "verified",
+      "status": "rejected",
+      "submitted_at": "-2d 18:20",
+      "error_code": "ERR-4001"
+    },
+    "support_scenarios": [
+      "kyc_verification",
+      "payment_pending"
+    ]
+  },
+  {
+    "external_ref": "CUS-0014",
+    "display_name": "Sofia Kalogeraki",
+    "email": "sofia.kalogeraki@example.com",
+    "tier": "verified",
+    "country": "GR",
+    "opened_at": "-560d 09:30",
+    "balances": {
+      "EUR": "3890.00",
+      "GBP": "410.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0015",
+    "display_name": "Jordan Ellison",
+    "email": "jordan.ellison@example.com",
+    "tier": "verified",
+    "country": "US",
+    "opened_at": "-260d 09:30",
+    "balances": {
+      "USD": "47.15",
+      "EUR": "120.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "payment_pending",
+      "card_declined"
+    ]
+  },
+  {
+    "external_ref": "CUS-0016",
+    "display_name": "Petra Horvathova",
+    "email": "petra.horvathova@example.com",
+    "tier": "verified",
+    "country": "CZ",
+    "opened_at": "-450d 09:30",
+    "balances": {
+      "EUR": "2640.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "account_management"
+    ]
+  },
+  {
+    "external_ref": "CUS-0017",
+    "display_name": "Nadia Belkacem",
+    "email": "nadia.belkacem@example.com",
+    "tier": "starter",
+    "country": "MA",
+    "opened_at": "-900d 09:30",
+    "balances": {
+      "EUR": "31.40"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "fees_fx",
+      "account_management"
+    ]
+  },
+  {
+    "external_ref": "CUS-0018",
+    "display_name": "Van Bergen Studio BV",
+    "email": "maarten.vanbergen@example.com",
+    "tier": "business",
+    "country": "NL",
+    "opened_at": "-500d 09:30",
+    "balances": {
+      "EUR": "48210.00",
+      "USD": "12600.00"
+    },
+    "restricted": true,
+    "restriction_reason": "Unusual incoming volume from new payers; monitoring alert under review",
+    "support_scenarios": [
+      "account_restricted",
+      "withdrawal_issue"
+    ]
+  },
+  {
+    "external_ref": "CUS-0019",
+    "display_name": "Grace Pennington",
+    "email": "grace.pennington@example.com",
+    "tier": "verified",
+    "country": "AU",
+    "opened_at": "-330d 09:30",
+    "balances": {
+      "USD": "1180.00",
+      "GBP": "260.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_lost_stolen",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0020",
+    "display_name": "Ciaran Mulready",
+    "email": "ciaran.mulready@example.com",
+    "tier": "verified",
+    "country": "IE",
+    "opened_at": "-470d 09:30",
+    "balances": {
+      "EUR": "1975.80"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "dispute_chargeback",
+      "card_declined"
+    ]
+  },
+  {
+    "external_ref": "CUS-0021",
+    "display_name": "Harbor & Pine Consulting LLC",
+    "email": "danielle.okoro@example.com",
+    "tier": "business",
+    "country": "US",
+    "opened_at": "-620d 09:30",
+    "balances": {
+      "USD": "38450.00",
+      "EUR": "6200.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0022",
+    "display_name": "Matteo Sanvitale",
+    "email": "matteo.sanvitale@example.com",
+    "tier": "verified",
+    "country": "IT",
+    "opened_at": "-700d 09:30",
+    "balances": {
+      "EUR": "9120.00",
+      "USD": "350.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "limits",
+      "account_management"
+    ]
+  },
+  {
+    "external_ref": "CUS-0023",
+    "display_name": "Thiago Lacerda",
+    "email": "thiago.lacerda@example.com",
+    "tier": "starter",
+    "country": "BR",
+    "opened_at": "-260d 09:30",
+    "balances": {
+      "EUR": "690.00",
+      "USD": "120.00"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "verified",
+      "status": "pending",
+      "submitted_at": "-1d 16:45"
+    },
+    "support_scenarios": [
+      "limits",
+      "kyc_verification"
+    ]
+  },
+  {
+    "external_ref": "CUS-0024",
+    "display_name": "Oksana Hrytsenko",
+    "email": "oksana.hrytsenko@example.com",
+    "tier": "verified",
+    "country": "UA",
+    "opened_at": "-380d 09:30",
+    "balances": {
+      "EUR": "2450.00",
+      "USD": "500.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "login_security"
+    ]
+  },
+  {
+    "external_ref": "CUS-0025",
+    "display_name": "Kessler Roth Studio GmbH",
+    "email": "lena.kessler@example.com",
+    "tier": "business",
+    "country": "DE",
+    "opened_at": "-730d 09:30",
+    "balances": {
+      "EUR": "22340.00",
+      "GBP": "1800.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_lost_stolen",
+      "dispute_chargeback",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0026",
+    "display_name": "Wanjiru Kamau",
+    "email": "wanjiru.kamau@example.com",
+    "tier": "verified",
+    "country": "KE",
+    "opened_at": "-520d 09:30",
+    "balances": {
+      "USD": "3120.00",
+      "EUR": "640.00"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "business",
+      "status": "pending",
+      "submitted_at": "-12d 11:00"
+    },
+    "support_scenarios": [
+      "kyc_verification",
+      "payment_pending"
+    ]
+  },
+  {
+    "external_ref": "CUS-0027",
+    "display_name": "Etienne Beaulieu",
+    "email": "etienne.beaulieu@example.com",
+    "tier": "verified",
+    "country": "CA",
+    "opened_at": "-300d 09:30",
+    "balances": {
+      "USD": "1840.00",
+      "EUR": "300.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_declined",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0028",
+    "display_name": "Linh Pham",
+    "email": "linh.pham@example.com",
+    "tier": "starter",
+    "country": "VN",
+    "opened_at": "-400d 09:30",
+    "balances": {
+      "EUR": "260.00",
+      "USD": "95.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "payment_pending",
+      "other"
+    ]
+  },
+  {
+    "external_ref": "CUS-0029",
+    "display_name": "Callum Ferris",
+    "email": "callum.ferris@example.com",
+    "tier": "verified",
+    "country": "GB",
+    "opened_at": "-610d 09:30",
+    "balances": {
+      "GBP": "5120.00",
+      "EUR": "760.00"
+    },
+    "restricted": true,
+    "restriction_reason": "Possible sanctions screening match on a recent counterparty",
+    "support_scenarios": [
+      "account_restricted",
+      "login_security"
+    ]
+  },
+  {
+    "external_ref": "CUS-0030",
+    "display_name": "Olivos Digital SL",
+    "email": "marta.olivares@example.com",
+    "tier": "business",
+    "country": "ES",
+    "opened_at": "-640d 09:30",
+    "balances": {
+      "EUR": "17450.00",
+      "USD": "4200.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "login_security"
+    ]
+  },
+  {
+    "external_ref": "CUS-0031",
+    "display_name": "Elif Arslanoglu",
+    "email": "elif.arslanoglu@example.com",
+    "tier": "verified",
+    "country": "TR",
+    "opened_at": "-500d 09:30",
+    "balances": {
+      "EUR": "4100.00",
+      "USD": "2290.00"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "business",
+      "status": "rejected",
+      "submitted_at": "-6d 09:30",
+      "error_code": "ERR-4006"
+    },
+    "support_scenarios": [
+      "card_declined",
+      "login_security",
+      "kyc_verification"
+    ]
+  },
+  {
+    "external_ref": "CUS-0032",
+    "display_name": "Thornbury Analytics Ltd",
+    "email": "isla.thornbury@example.com",
+    "tier": "business",
+    "country": "GB",
+    "opened_at": "-820d 09:30",
+    "balances": {
+      "GBP": "31200.00",
+      "EUR": "8400.00",
+      "USD": "5100.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "dispute_chargeback",
+      "fees_fx",
+      "account_management"
+    ]
+  },
+  {
+    "external_ref": "CUS-0033",
+    "display_name": "Rautiainen Media Oy",
+    "email": "aino.rautiainen@example.com",
+    "tier": "business",
+    "country": "FI",
+    "opened_at": "-440d 09:30",
+    "balances": {
+      "EUR": "11850.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_declined",
+      "other"
+    ]
+  },
+  {
+    "external_ref": "CUS-0034",
+    "display_name": "Bilal Rana",
+    "email": "bilal.rana@example.com",
+    "tier": "starter",
+    "country": "PK",
+    "opened_at": "-180d 09:30",
+    "balances": {
+      "USD": "310.00"
+    },
+    "restricted": false,
+    "upgrade": {
+      "target_tier": "verified",
+      "status": "rejected",
+      "submitted_at": "-4d 07:15",
+      "error_code": "ERR-4002"
+    },
+    "support_scenarios": [
+      "kyc_verification",
+      "other"
+    ]
+  },
+  {
+    "external_ref": "CUS-0035",
+    "display_name": "Valentina Iturralde",
+    "email": "valentina.iturralde@example.com",
+    "tier": "verified",
+    "country": "AR",
+    "opened_at": "-360d 09:30",
+    "balances": {
+      "USD": "1420.00",
+      "EUR": "180.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_declined",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0036",
+    "display_name": "Marisol Dimaculangan",
+    "email": "marisol.dimaculangan@example.com",
+    "tier": "starter",
+    "country": "PH",
+    "opened_at": "-240d 09:30",
+    "balances": {
+      "USD": "640.00"
+    },
+    "restricted": true,
+    "restriction_reason": "Identity document authenticity check reopened by Compliance",
+    "support_scenarios": [
+      "account_restricted",
+      "other"
+    ]
+  },
+  {
+    "external_ref": "CUS-0037",
+    "display_name": "Wendlinger Woodcraft e.U.",
+    "email": "florian.wendlinger@example.com",
+    "tier": "business",
+    "country": "AT",
+    "opened_at": "-790d 09:30",
+    "balances": {
+      "EUR": "71200.00",
+      "GBP": "2300.00",
+      "USD": "6100.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "withdrawal_issue",
+      "limits"
+    ]
+  },
+  {
+    "external_ref": "CUS-0038",
+    "display_name": "Halvorsen Surf Co Ltd",
+    "email": "ruby.halvorsen@example.com",
+    "tier": "business",
+    "country": "NZ",
+    "opened_at": "-560d 09:30",
+    "balances": {
+      "USD": "15400.00",
+      "GBP": "2100.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "card_lost_stolen",
+      "login_security"
+    ]
+  },
+  {
+    "external_ref": "CUS-0039",
+    "display_name": "Youssef Nassar",
+    "email": "youssef.nassar@example.com",
+    "tier": "starter",
+    "country": "EG",
+    "opened_at": "-620d 09:30",
+    "balances": {
+      "USD": "212.40",
+      "EUR": "48.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "account_management",
+      "other",
+      "fees_fx"
+    ]
+  },
+  {
+    "external_ref": "CUS-0040",
+    "display_name": "Ruta Valanciute",
+    "email": "ruta.valanciute@example.com",
+    "tier": "verified",
+    "country": "LT",
+    "opened_at": "-430d 09:30",
+    "balances": {
+      "EUR": "1660.00"
+    },
+    "restricted": false,
+    "support_scenarios": [
+      "payment_pending",
+      "account_management"
+    ]
+  }
+]

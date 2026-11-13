@@ -7,8 +7,8 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test data-check up down dev test-int migrate
-NOT_IMPLEMENTED := seed kb-load test-e2e \
+BUILT := setup lint test data-check up down dev test-int migrate seed
+NOT_IMPLEMENTED := kb-load test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
 	record-llm leak-scan export-review-candidates rollback
 
@@ -32,10 +32,10 @@ lint:
 	@if [ -f apps/web/package.json ]; then pnpm -C apps/web lint && pnpm -C apps/web typecheck; else echo "web: apps/web has no package.json yet, skipping eslint and tsc"; fi
 
 # Coverage gate for deterministic safety code (AGENTS.md, security §3): >= 95% line coverage.
-# hub.domain holds the ticket status transitions; hub.audit.chain the audit hash chain and the
-# masking of audit details. Add the other safety modules
-# (tools/permissions, auth) here when they are built.
-SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov-report=term-missing:skip-covered --cov-fail-under=95
+# hub.domain holds the ticket status transitions and the seed rules; hub.audit.chain the audit
+# hash chain and the masking of audit details; hub.auth the password hashing (login joins in
+# P2-07). Add tools/permissions here when it is built.
+SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov=hub.auth --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:
 	uv run pytest $(SAFETY_COVERAGE)
@@ -57,9 +57,13 @@ down:
 migrate:
 	uv run alembic -c infra/alembic.ini upgrade head
 
-# operations §1: dev = up + migrate + seed + kb-load. seed and kb-load join here when they are
-# built (P2-05, P2-09).
-dev: up migrate
+# Demo customers, operators (password from SEED_OPERATOR_PASSWORD) and default settings, as the
+# app role (DATABASE_URL). Idempotent: a second run changes nothing.
+seed:
+	uv run python -m hub.seed data/seed
+
+# operations §1: dev = up + migrate + seed + kb-load. kb-load joins here when it is built (P2-09).
+dev: up migrate seed
 	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
 
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).

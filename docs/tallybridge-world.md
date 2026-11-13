@@ -56,6 +56,13 @@ Tallybridge is a **fictional** company. It does not exist and has no relation to
 | Inactivity fee | €5 per month after 12 months without transactions; never takes the balance below zero |
 | Account opening and closing | free |
 
+How fees are charged:
+- Fixed fees (the amounts in EUR above: withdrawals, card delivery, annual card fee, ATM, inactivity) are set in EUR. When they are taken from a USD or GBP balance, the EUR amount is converted at the mid-market rate, **without** the conversion fee. A SWIFT withdrawal in USD costs €15 taken from the USD balance, not "15 USD".
+- Percentage fees (receiving USD by ACH, Payment Requests, currency conversion) are charged in the currency of the payment.
+- A failed or returned withdrawal costs nothing: the withdrawal fee is not charged.
+- Mass Payouts have no fee (a Business tier benefit).
+- A card payment is made in the merchant's currency. If the customer does not hold that currency, the amount is converted with the conversion fee above.
+
 Fees are never refunded by the AI. A fee refund is a decision of a human operator (goodwill limit: €25 per case; above that a supervisor approves).
 
 ## 5. Timeframes

@@ -6,14 +6,14 @@ Requirements: Docker, Python 3.13 with `uv`, Node.js LTS with `pnpm`, `make`.
 
 `infra/docker-compose.yml` services: `postgres`, `qdrant`, `api` (hot reload), `mcp` (support-tools server), `web` (Vite dev server). Optional profile `tracing`: self-hosted Langfuse — only if the cloud free tier is not used.
 
-Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdrant` and `api`; `mcp` comes in phase 7 and `web` in phase 10. **Until the MCP server exists (P7), `GET /ready` answers 503** with `mcp` reported as not reachable, while `postgres` and `qdrant` report `ok`; the compose healthcheck of `api` uses `/health` for this reason. Likewise `make dev` gains `migrate`, `seed` and `kb-load` as P2-02, P2-05 and P2-09 build them. Ports bind to `127.0.0.1` only. Integration tests do not use this stack: testcontainers starts Postgres and Qdrant with the image tags of the compose file.
+Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdrant` and `api`; `mcp` comes in phase 7 and `web` in phase 10. **Until the MCP server exists (P7), `GET /ready` answers 503** with `mcp` reported as not reachable, while `postgres` and `qdrant` report `ok`; the compose healthcheck of `api` uses `/health` for this reason. Likewise `make dev` gains `migrate`, `seed` and `kb-load` as P2-02, P2-05 and P2-09 build them. **`make seed` (and therefore `make dev`) needs `SEED_OPERATOR_PASSWORD` in `.env`:** `.env.example` leaves it empty on purpose (no shared demo password in the repository), so on a fresh clone `make dev` stops at the seed step with a message that says to set it in `.env`; set it and run `make dev` again. Nothing is written when it stops. Ports bind to `127.0.0.1` only. Integration tests do not use this stack: testcontainers starts Postgres and Qdrant with the image tags of the compose file.
 
 | Command | Does |
 |---|---|
 | `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks |
 | `make up` / `make down` | start / stop the compose stack |
 | `make migrate` | Alembic upgrade + LangGraph checkpointer setup |
-| `make seed` | load demo customers, operators, settings |
+| `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
 | `make kb-load` | load `data/kb` into Postgres and Qdrant (only changed documents) |
 | `make dev` | `up` + `migrate` + `seed` + `kb-load` |
 | `make test` | unit tests (no network, no containers) |
