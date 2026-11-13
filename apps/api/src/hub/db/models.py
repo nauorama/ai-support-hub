@@ -170,7 +170,7 @@ class Ticket(Base):
     first_response_at: Mapped[datetime | None]
     resolved_at: Mapped[datetime | None]
     resolution: Mapped[Resolution | None] = mapped_column(TextEnum(Resolution))
-    version: Mapped[int] = mapped_column()
+    version: Mapped[int] = mapped_column(server_default=text("1"))
     created_at: Mapped[datetime] = _created_at_column()
 
     # Optimistic lock: every ORM UPDATE checks and increments `version` (StaleDataError when
@@ -229,7 +229,7 @@ class Feedback(Base):
 
 
 class AuditLog(Base):
-    """Append-only: the app role has only INSERT and SELECT here (migration 0001).
+    """Append-only: the app role has only INSERT and SELECT here (migrations 0001 and 0002).
 
     Rows are written by `hub/audit` (P2-04), which computes the hash chain. `ts` is the
     `created_at` of this table.

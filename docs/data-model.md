@@ -237,6 +237,7 @@ Key-value table for runtime settings changed from the console: `auto_reply_enabl
 |---|---|---|
 | key | text PK | one of the four names above (`CHECK`) |
 | value | jsonb | |
+| created_at | timestamptz | |
 | updated_at | timestamptz | |
 
 ### audit_log

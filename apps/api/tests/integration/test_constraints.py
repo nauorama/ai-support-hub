@@ -22,9 +22,10 @@ ROWS = [
     """INSERT INTO operators (id, email, name, password_hash, role)
        VALUES ('00000000-0000-7000-8000-0000000000c2', 'op@example.com', 'Test Operator',
                'x', 'operator')""",
-    """INSERT INTO tickets (id, customer_id, channel, status, ai_disclosed_at, version)
+    # No `version`: the database default (migration 0003) gives 1.
+    """INSERT INTO tickets (id, customer_id, channel, status, ai_disclosed_at)
        VALUES ('00000000-0000-7000-8000-0000000000c3', '00000000-0000-7000-8000-0000000000c1',
-               'chat', 'processing', now(), 1)""",
+               'chat', 'processing', now())""",
     """INSERT INTO messages (id, ticket_id, role, body)
        VALUES ('00000000-0000-7000-8000-0000000000c4', '00000000-0000-7000-8000-0000000000c3',
                'customer', 'hello')""",
@@ -99,3 +100,8 @@ async def test_valid_values_pass(seeded: Connection) -> None:
             "last_route = 'approval', resolution = 'ai_edited', confidence = 0.875, "
             "route_reasons = '[\"auto_reply_off\"]'::jsonb"
         )
+
+
+async def test_plain_sql_ticket_insert_gets_version_1(seeded: Connection) -> None:
+    cursor = await seeded.execute("SELECT version FROM tickets")
+    assert await cursor.fetchall() == [(1,)]

@@ -10,6 +10,10 @@ Default privileges give `hub_app` read and write access to every table and seque
 migrator creates from now on, including later tables. A table that needs less (`audit_log`)
 revokes in its own migration.
 
+Downgrade removes the grants and default privileges but keeps two things on purpose: the role
+`hub_app` (see `downgrade`), and `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, which only
+tightens access and is the Postgres 15+ default anyway.
+
 Revision ID: 0001
 Revises:
 Create Date: 2026-11-13
@@ -52,7 +56,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The role itself stays: other databases of the cluster and the login user depend on it.
+    # The role itself stays: roles belong to the whole cluster, so grants in other databases
+    # and the login user (member of hub_app) still refer to it.
     op.execute(
         "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE, SELECT ON SEQUENCES FROM hub_app"
     )
