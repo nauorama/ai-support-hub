@@ -6,6 +6,7 @@ holds hand-made audit rows from test_db_roles.py that are not part of any chain.
 """
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
@@ -140,20 +141,20 @@ async def test_text_fields_are_stored_masked(
     assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
 
 
-async def test_an_exact_uuid_is_stored_unchanged(
+async def test_a_uuid_object_is_stored_unchanged(
     app_engine: AsyncEngine, audit_db: tuple[str, str]
 ) -> None:
     """Text masking would turn this id into "0b74d[CARD ****8741]-e5b0ef08c44e"."""
-    uuid = "0b74d664-3640-4097-8741-e5b0ef08c44e"
+    value = uuid.UUID("0b74d664-3640-4097-8741-e5b0ef08c44e")
     async with AsyncSession(app_engine) as session:
         await record(
             session,
             actor_type=ActorType.OPERATOR,
-            actor_id=uuid,
+            actor_id=value,
             action="ticket.claimed",
             entity_type="ticket",
-            entity_id=uuid,
-            details={"ticket_id": uuid},
+            entity_id=value,
+            details={"ticket_id": value},
         )
         await session.commit()
 
@@ -161,7 +162,36 @@ async def test_an_exact_uuid_is_stored_unchanged(
         row = connection.execute(
             "SELECT actor_id, entity_id, details ->> 'ticket_id' FROM audit_log"
         ).fetchone()
-    assert row == (uuid, uuid, uuid)
+    assert row == (str(value), str(value), str(value))
+    assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
+
+
+async def test_a_card_in_a_uuid_shaped_string_or_a_float_is_stored_masked(
+    app_engine: AsyncEngine, audit_db: tuple[str, str]
+) -> None:
+    """Round-2 review: neither shape may carry a full card number into the log."""
+    shaped = "41111111-1111-1111-abcd-ef0123456789"
+    async with AsyncSession(app_engine) as session:
+        await record(
+            session,
+            actor_type=ActorType.CUSTOMER,
+            actor_id=shaped,
+            action="ticket.created",
+            entity_type="ticket",
+            entity_id=shaped,
+            details={"ref": shaped, "n": float(VISA)},
+        )
+        await session.commit()
+
+    with psycopg.connect(libpq_url(audit_db[0])) as connection:
+        row = connection.execute(
+            "SELECT concat_ws('|', actor_id, entity_id, details::text) FROM audit_log"
+        ).fetchone()
+    assert row is not None
+    assert "41111111-1111-1111" not in row[0]
+    assert VISA not in row[0]
+    assert "[CARD ****1111]" in row[0]
+    assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
 
 
 @pytest.mark.parametrize(
@@ -278,11 +308,11 @@ async def test_values_read_back_from_postgres_verify(app_engine: AsyncEngine) ->
     await _record(
         app_engine,
         details={
-            "big": 1e20,
-            # Whole floats that are not exactly representable (reviewer finding on P2-04).
-            "not_exact": 1e23,
-            "power": float(2**70),
-            "huge": 1e300,
+            # Whole floats above 2**53 that are not exactly representable, so int(value) differs
+            # from the decimal text jsonb stores (round-1 review). Chosen so that masking keeps
+            # them as numbers; 1e23 and 1e300 hold long zero runs, which mask as cards.
+            "not_exact": 5.6266053047935685e22,
+            "not_exact_2": 7.500827868583425e22,
             "whole": 1.0,
             "small": 1e-7,
             "sum": 0.1 + 0.2,
@@ -290,5 +320,12 @@ async def test_values_read_back_from_postgres_verify(app_engine: AsyncEngine) ->
         },
     )
     async with AsyncSession(app_engine) as session:
+        types = await session.scalar(
+            text(
+                "SELECT string_agg(jsonb_typeof(details -> k), ',') FROM audit_log, "
+                "unnest(ARRAY['not_exact', 'not_exact_2']) AS k"
+            )
+        )
+        assert types == "number,number"
         await session.execute(text("SET TIME ZONE 'Asia/Tokyo'"))
         assert await verify_chain(session) == ChainCheck(ok=True, checked=1)

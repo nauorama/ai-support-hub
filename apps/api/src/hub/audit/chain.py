@@ -15,15 +15,18 @@ nobody changed. Two places where they differ, both handled here:
   than 2**53, their decimal text has few digits, and they come back as the same float.
 - ``timestamptz`` comes back in the session time zone. The timestamp is hashed in UTC.
 
-Masking (G1) covers every text field of the row, not only ``details``. A string that is exactly a
-UUID is kept: about 1 in 100 UUIDs contains a Luhn-valid run of 13+ digits across its dashes,
-and masking it would break the ids the log is searched by.
+Masking (G1) covers every text field of the row and every string and number in ``details``. Only
+``uuid.UUID`` objects are kept as they are: about 1 in 100 UUIDs contains a Luhn-valid run of 13+
+digits across its dashes, and masking them would break the ids the log is searched by. A UUID
+object is made by code, never typed by a customer. A string is always masked, even one shaped
+like a UUID, because such a string can hold a card number ("41111111-1111-1111-abcd-…"); the
+request id makes the same choice (P2-01).
 """
 
 import hashlib
 import json
 import math
-import re
+import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -38,7 +41,6 @@ GENESIS_HASH = "0" * 64
 
 # A card number stored as a number has 13-19 digits; shorter integers are amounts and counts.
 _MIN_CARD_DIGITS = 13
-_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 class AuditRow(BaseModel):
@@ -57,6 +59,7 @@ class AuditRow(BaseModel):
     details: dict[str, Any]
 
 
+type Id = str | uuid.UUID
 type JsonValue = dict[str, JsonValue] | list[JsonValue] | str | int | float | bool | None
 
 
@@ -66,24 +69,30 @@ class AuditValueError(ValueError):
 
 
 def mask_details(details: Mapping[str, object]) -> dict[str, JsonValue]:
-    """A copy of ``details`` with every string (keys too) passed through card masking (G1).
+    """A copy of ``details`` with every string (keys too) and number passed through masking (G1).
 
-    An integer that masking would change (a card number given as a number) becomes its masked
-    text. Only JSON types are accepted, so nothing reaches ``jsonb`` that comes back different.
+    A number that masking would change (a card number given as an integer or a float) becomes its
+    masked text. A ``uuid.UUID`` becomes its text, unmasked. Only JSON types and UUIDs are
+    accepted, so nothing reaches ``jsonb`` that comes back different.
     """
     return _mask_mapping(details)
 
 
+def mask_id(value: Id) -> str:
+    """An id field (``actor_id``, ``entity_id``): a ``uuid.UUID`` as its text, a string masked."""
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    return mask_field(value)
+
+
 def mask_field(text: str) -> str:
-    """One text field of the row, masked (G1). A string that is exactly a UUID is kept."""
+    """One text field of the row, masked (G1). Every string is masked, UUID-shaped or not."""
     if "\x00" in text:
         raise AuditValueError("audit strings must not contain NUL (Postgres rejects it)")
     try:
         text.encode("utf-8")
     except UnicodeEncodeError:
         raise AuditValueError("audit strings must be valid Unicode (no lone surrogates)") from None
-    if _UUID.fullmatch(text):
-        return text
     return mask_text(text)
 
 
@@ -105,6 +114,8 @@ def _mask_value(value: object) -> JsonValue:
         return _mask_mapping(value)
     if isinstance(value, list | tuple):
         return [_mask_value(item) for item in value]
+    if isinstance(value, uuid.UUID):
+        return str(value)
     if isinstance(value, str):
         return mask_field(value)
     if value is None or isinstance(value, bool):
@@ -118,8 +129,11 @@ def _mask_value(value: object) -> JsonValue:
     if isinstance(value, float):
         if not math.isfinite(value):
             raise AuditValueError("details numbers must be finite (jsonb rejects NaN, Infinity)")
-        return value
-    raise AuditValueError(f"details values must be JSON types, got {type(value).__name__}")
+        # The decimal text jsonb will store, without exponent: 4111111111111111.0 is a card too.
+        text = format(Decimal(repr(value)), "f")
+        masked_text = mask_text(text)
+        return value if masked_text == text else masked_text
+    raise AuditValueError(f"details values must be JSON types or UUIDs, got {type(value).__name__}")
 
 
 def _normalise(value: object) -> object:
