@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
 
     # Secret: the URLs carry the database password.
-    database_url: SecretStr = SecretStr("postgresql+psycopg://hub:hub@localhost:5432/hub")
+    # The default is the local app role (hub_api, member of hub_app), never the schema owner:
+    # a missing DATABASE_URL must not silently give the app UPDATE and DELETE on audit_log
+    # (security §4). Migrations then fail loudly until DATABASE_URL_DIRECT names the owner.
+    database_url: SecretStr = SecretStr("postgresql+psycopg://hub_api:hub_api@localhost:5432/hub")
     database_url_direct: SecretStr = SecretStr("")
     eval_database_url: SecretStr = SecretStr("")
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.engine import make_url
 
 from hub.config import Settings, SettingsError
 from hub.main import create_app
@@ -122,3 +123,28 @@ def test_settings_are_frozen() -> None:
     settings = Settings(_env_file=None)
     with pytest.raises(ValidationError):
         settings.app_env = "demo"  # type: ignore[misc]
+
+
+def _user(url: str) -> str | None:
+    return make_url(url).username
+
+
+def test_default_app_url_is_the_app_role_not_the_migrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Least privilege (security §4): without DATABASE_URL the app must not run as the owner.
+    for name in ("DATABASE_URL", "DATABASE_URL_DIRECT", "EVAL_DATABASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=None)
+    migrator = _user(Settings(_env_file=ENV_EXAMPLE).database_url_direct.get_secret_value())
+    assert _user(settings.database_url.get_secret_value()) == "hub_api"
+    assert _user(settings.database_url.get_secret_value()) != migrator
+
+
+def test_env_example_separates_app_and_migrator_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("DATABASE_URL", "DATABASE_URL_DIRECT", "EVAL_DATABASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings(_env_file=ENV_EXAMPLE)
+    assert _user(settings.database_url.get_secret_value()) == "hub_api"
+    assert _user(settings.eval_database_url.get_secret_value()) == "hub_api"
+    assert _user(settings.database_url_direct.get_secret_value()) == "hub"

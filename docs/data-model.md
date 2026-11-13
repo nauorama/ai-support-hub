@@ -101,7 +101,7 @@ Closing: an operator closes a ticket by hand, or the scheduled job `close-stale`
 | body | text | card data already masked; never the raw text |
 | is_ai_generated | bool | drives the label in the UI |
 | author_operator_id | uuid FK null | |
-| run_id | uuid FK null | |
+| run_id | uuid FK null | the foreign key is added with the `runs` table (phase 6) |
 | citations | jsonb | `[{"marker": 1, "chunk_id": "...", "doc_id": "...", "title": "...", "url": "..."}]` |
 | masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}` |
 | idempotency_key | text null unique | |
@@ -233,13 +233,20 @@ Postgres keeps the knowledge base as the source of truth for the index and for t
 ### settings
 Key-value table for runtime settings changed from the console: `auto_reply_enabled` (bool), `confidence_threshold` (number), `daily_budget_usd` (number), `intent_allowlist` (list). Every change writes an audit record.
 
+| Column | Type | Note |
+|---|---|---|
+| key | text PK | one of the four names above (`CHECK`) |
+| value | jsonb | |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
 ### audit_log
-Append-only. The application database role has only `INSERT` and `SELECT` on this table.
+Append-only. The application database role (`hub_app`, [operations](operations.md) §2) has only `INSERT` and `SELECT` on this table.
 
 | Column | Type | Note |
 |---|---|---|
 | id | bigserial PK | |
-| ts | timestamptz | |
+| ts | timestamptz | the `created_at` of this table |
 | actor_type | text | `ai` \| `operator` \| `customer` \| `system` |
 | actor_id | text null | operator id, customer id or run id |
 | action | text | e.g. `route.decided`, `draft.approved`, `tool.called`, `auth.login`, `settings.changed`, `customer.erased` |

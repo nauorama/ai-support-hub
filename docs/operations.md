@@ -40,8 +40,8 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | Variable | Example | Note |
 |---|---|---|
 | `APP_ENV` | `local` \| `test` \| `demo` | |
-| `DATABASE_URL` | `postgresql+psycopg://…` | |
-| `DATABASE_URL_DIRECT` | | direct (not pooled) connection for migrations and checkpointer setup; empty = same as `DATABASE_URL` |
+| `DATABASE_URL` | `postgresql+psycopg://…` | pooled connection as the **app role** (a login user in group `hub_app`) |
+| `DATABASE_URL_DIRECT` | | direct (not pooled) connection as the **migrator** (schema owner) for migrations and checkpointer setup; empty = same as `DATABASE_URL`, which only works when that user may create tables |
 | `EVAL_DATABASE_URL` | | separate database for evaluation runs |
 | `CORE_ANCHOR_DATE` | empty \| `2026-11-12` | "today" for the core mock and the workflow; empty = real date; fixed in tests and evaluation |
 | `JOBS_TOKEN` | random | bearer token for `POST /admin/jobs/*` |
@@ -59,6 +59,11 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `EVAL_MAX_COST_USD` | `8.0` | |
 | `EVAL_TRACE_SAMPLE` | `0.2` | share of evaluation runs sent to Langfuse |
 | `LOG_LEVEL` | `INFO` | |
+
+**Database roles** (security §4, least privilege). Two connections, two roles:
+- **Migrator**: owns the schema and runs `make migrate` through `DATABASE_URL_DIRECT`. Locally `hub`; on Neon the owner role of the database.
+- **App**: the API connects through `DATABASE_URL` as a login user that is a member of the group role `hub_app`. Locally `hub_api` (created by `infra/postgres/init/02-app-user.sql`). Migration 0001 creates `hub_app` when it is missing and gives it, through default privileges, read and write access to every table the migrator creates; `audit_log` keeps only `SELECT` and `INSERT`.
+- **Deploy setup (once per managed database, before the first deploy):** as the owner role, `CREATE ROLE hub_app NOLOGIN;` (or let migration 0001 do it) and `CREATE ROLE <app user> LOGIN PASSWORD '<secret>' IN ROLE hub_app;`. The password goes into the secret for `DATABASE_URL`, never into the repository.
 
 Runtime settings that the lead changes in the console (auto-reply, threshold, budget, allow-list) live in the `settings` table; environment variables give only the first values.
 

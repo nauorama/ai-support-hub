@@ -2,7 +2,7 @@
 # Services that come later: `mcp` (support-tools server, phase 7; until then `/ready` reports
 # mcp as not ready and answers 503) and `web` (Vite dev server, phase 10).
 #
-# hub:hub are local defaults only, never real credentials. Every port binds to 127.0.0.1, so
+# hub:hub and hub_api:hub_api are local defaults only, never real credentials. Every port binds to 127.0.0.1, so
 # nothing is reachable from the network. The image tags are also used by the testcontainers
 # fixtures (apps/api/tests/integration/conftest.py reads them from this file).
 name: support-hub
@@ -59,10 +59,11 @@ services:
       - path: ../.env
         required: false
     environment:
-      DATABASE_URL: postgresql+psycopg://hub:hub@postgres:5432/hub
-      # Empty = same as DATABASE_URL (operations §2), so a localhost value from .env is not used.
-      DATABASE_URL_DIRECT: ""
-      EVAL_DATABASE_URL: postgresql+psycopg://hub:hub@postgres:5432/hub_eval
+      # The app connects as hub_api (member of hub_app, no UPDATE/DELETE on audit_log); the
+      # migrator connection is the schema owner hub (infra/postgres/init/02-app-user.sql).
+      DATABASE_URL: postgresql+psycopg://hub_api:hub_api@postgres:5432/hub
+      DATABASE_URL_DIRECT: postgresql+psycopg://hub:hub@postgres:5432/hub
+      EVAL_DATABASE_URL: postgresql+psycopg://hub_api:hub_api@postgres:5432/hub_eval
       QDRANT_URL: http://qdrant:6333
       MCP_SERVER_URL: http://mcp:8001/mcp
     ports:

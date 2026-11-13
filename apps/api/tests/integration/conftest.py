@@ -5,14 +5,16 @@ so tests and the local stack cannot run different versions. Each container start
 session; tests that change data must clean up after themselves or use their own schema.
 """
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.qdrant import QdrantContainer
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 
 from ._compose import ROOT, compose_config, compose_image
+from ._db import app_url, migrate
 
 POSTGRES_INIT_DIR = ROOT / "infra" / "postgres" / "init"
 
@@ -48,3 +50,35 @@ def qdrant_url() -> Iterator[str]:
     )
     with container:
         yield f"http://{container.rest_host_address}"
+
+
+@pytest.fixture(scope="session")
+def migrated_db_url(postgres_url: str) -> str:
+    """Migrator URL of the `hub` database after `alembic upgrade head`."""
+    migrate(postgres_url)
+    return postgres_url
+
+
+@pytest.fixture(scope="session")
+def app_db_url(migrated_db_url: str) -> str:
+    """The migrated database as the app role (`hub_api`, member of `hub_app`)."""
+    return app_url(migrated_db_url)
+
+
+@pytest.fixture
+async def app_session(app_db_url: str) -> AsyncIterator[AsyncSession]:
+    """A session as the app role inside one outer transaction that is rolled back at the end,
+    so tests leave no rows behind (SQLAlchemy recipe "Joining a Session into an External
+    Transaction"). Commits inside the test become savepoints."""
+    engine = create_async_engine(app_db_url)
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            await transaction.rollback()
+    await engine.dispose()
