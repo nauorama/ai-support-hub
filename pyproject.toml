@@ -15,6 +15,8 @@ dev = [
     "pip-audit==2.10.1",
     "pre-commit==4.7.0",
     "pytest==9.2.0",
+    "pytest-asyncio==1.4.1",
+    "pytest-cov==7.1.0",
     "ruff==0.17.3",
 ]
 
@@ -89,6 +91,8 @@ modules = ["hub_evals", "support_tools"]
 [tool.mypy]
 strict = true
 python_version = "3.13"
+# Lets mypy see pydantic-settings init arguments such as `_env_file` (pydantic docs, "mypy").
+plugins = ["pydantic.mypy"]
 # Several `tests` folders exist; explicit bases give each test file a unique module name.
 mypy_path = "apps/api/src:apps/mcp_server/src:evals/src"
 explicit_package_bases = true
@@ -103,4 +107,7 @@ files = [
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
+asyncio_mode = "auto"
+# Explicit, so pytest-asyncio does not warn that it is unset.
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["apps/api/tests/unit", "apps/mcp_server/tests", "evals/tests"]

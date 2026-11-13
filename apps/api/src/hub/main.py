@@ -1,0 +1,25 @@
+"""FastAPI app factory. Run with `uvicorn hub.main:create_app --factory`."""
+
+from fastapi import FastAPI
+
+from hub.api.errors import install_error_handlers
+from hub.api.health import router as health_router
+from hub.api.middleware import RequestContextMiddleware
+from hub.config import load_settings
+from hub.deps import Container, build_container
+from hub.observability.logging import configure_logging
+
+
+def create_app(container: Container | None = None) -> FastAPI:
+    """Build the app. Without a container, settings are read now, so a bad `.env` stops start."""
+    if container is None:
+        container = build_container(load_settings())
+    configure_logging(container.settings.log_level)
+
+    # debug stays off: Starlette's debug pages would show tracebacks with request data.
+    app = FastAPI(title="Enterprise AI Support Hub", version="0.1.0", debug=False)
+    app.state.container = container
+    install_error_handlers(app)
+    app.add_middleware(RequestContextMiddleware)
+    app.include_router(health_router)
+    return app
