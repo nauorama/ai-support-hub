@@ -81,6 +81,10 @@ jobs:
             exit 1
           fi
           make test-int
+      # Nothing else builds the dev image, so a Dockerfile that no longer matches the workspace
+      # (a new member, a moved pyproject) would only show up at `make dev`.
+      - name: Build the api dev image
+        run: docker compose -f infra/docker-compose.yml build api
 
   data-check:
     runs-on: ubuntu-latest

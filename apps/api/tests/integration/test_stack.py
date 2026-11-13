@@ -8,7 +8,7 @@ import pytest
 
 from hub.observability.readiness import libpq_url, postgres_check, qdrant_check
 
-from .conftest import compose_config, compose_image
+from ._compose import compose_config, compose_image
 
 PINNED_TAG = re.compile(r":v?\d+\.\d+(\.\d+)?(-[a-z0-9.]+)?$")
 

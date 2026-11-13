@@ -22,10 +22,14 @@ services:
     healthcheck:
       # Over TCP: during first-time init the entrypoint runs a temporary server on the Unix
       # socket only, which a socket check would wrongly report as ready.
-      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 --username hub --dbname hub"]
-      interval: 2s
+      # $$ escapes compose interpolation, so the container's own POSTGRES_* values are used.
+      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 --username \"$${POSTGRES_USER}\" --dbname \"$${POSTGRES_DB}\""]
+      # Every 2s while starting (so `up --wait` is quick), then every 30s (quiet logs).
+      start_period: 60s
+      start_interval: 2s
+      interval: 30s
       timeout: 3s
-      retries: 30
+      retries: 3
 
   qdrant:
     image: qdrant/qdrant:v1.20.0
@@ -40,9 +44,11 @@ services:
         - bash
         - -c
         - exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\r\n\r\n' >&3 && head -n 1 <&3 | grep -q ' 200 '
-      interval: 2s
+      start_period: 60s
+      start_interval: 2s
+      interval: 30s
       timeout: 3s
-      retries: 30
+      retries: 3
 
   api:
     build:
@@ -75,9 +81,11 @@ services:
         - python
         - -c
         - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
-      interval: 2s
+      start_period: 60s
+      start_interval: 2s
+      interval: 30s
       timeout: 3s
-      retries: 30
+      retries: 3
 
 volumes:
   postgres-data:

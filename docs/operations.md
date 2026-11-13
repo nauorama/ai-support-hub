@@ -93,7 +93,7 @@ Trace attributes on every run: `ticket_id`, `intent`, `route`, `route_reasons`, 
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit + integration with testcontainers, coverage gate for safety modules) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks, pip-audit, pnpm audit) · `data-check` |
+| `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit tests, coverage gate for safety modules) · `test-int` (integration with testcontainers; builds the api dev image) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks, pip-audit, pnpm audit) · `data-check` |
 | `eval-smoke.yml` | pull request touching the AI paths (see [eval plan](eval-plan.md) §8); manual | `make eval-smoke` with real keys from repository secrets; comment with the metrics table on the pull request |
 | `eval-full.yml` | weekly; manual | full dev run; opens a pull request with the report |
 | `deploy.yml` | push to main after `ci` is green; manual | build images → push → migrate → deploy → smoke check |
