@@ -45,7 +45,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    # compare_server_default: `alembic check` also compares server defaults (now(), '[]'::jsonb,
+    # true, 1), which it skips by default; CHECK constraints are still not compared
+    # (tests/integration/test_schema_checks.py does that).
+    context.configure(
+        connection=connection, target_metadata=target_metadata, compare_server_default=True
+    )
     with context.begin_transaction():
         context.run_migrations()
 
