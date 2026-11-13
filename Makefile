@@ -7,8 +7,8 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test data-check up down dev test-int
-NOT_IMPLEMENTED := migrate seed kb-load test-e2e \
+BUILT := setup lint test data-check up down dev test-int migrate
+NOT_IMPLEMENTED := seed kb-load test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
 	record-llm leak-scan export-review-candidates rollback
 
@@ -32,8 +32,9 @@ lint:
 	@if [ -f apps/web/package.json ]; then pnpm -C apps/web lint && pnpm -C apps/web typecheck; else echo "web: apps/web has no package.json yet, skipping eslint and tsc"; fi
 
 # Coverage gate for deterministic safety code (AGENTS.md, security §3): >= 95% line coverage.
-# Add the other safety modules (tools/permissions, auth) here when they are built.
-SAFETY_COVERAGE := --cov=hub.guardrails --cov-report=term-missing:skip-covered --cov-fail-under=95
+# hub.domain holds the ticket status transitions. Add the other safety modules
+# (tools/permissions, auth) here when they are built.
+SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:
 	uv run pytest $(SAFETY_COVERAGE)
@@ -50,9 +51,14 @@ up:
 down:
 	$(COMPOSE) down
 
-# operations §1: dev = up + migrate + seed + kb-load. migrate, seed and kb-load join here when
-# they are built (P2-02, P2-05, P2-09); until then dev only starts the stack.
-dev: up
+# Alembic upgrade as the migrator (DATABASE_URL_DIRECT). The LangGraph checkpointer setup
+# (operations §1) joins here in phase 6.
+migrate:
+	uv run alembic -c infra/alembic.ini upgrade head
+
+# operations §1: dev = up + migrate + seed + kb-load. seed and kb-load join here when they are
+# built (P2-05, P2-09).
+dev: up migrate
 	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
 
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).

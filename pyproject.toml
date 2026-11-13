@@ -105,6 +105,7 @@ files = [
     "apps/mcp_server/tests",
     "evals/src",
     "evals/tests",
+    "infra/alembic",
 ]
 
 [tool.pytest.ini_options]

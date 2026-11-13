@@ -1,5 +1,8 @@
 """FastAPI app factory. Run with `uvicorn hub.main:create_app --factory`."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from hub.api.errors import install_error_handlers
@@ -16,8 +19,16 @@ def create_app(container: Container | None = None) -> FastAPI:
         container = build_container(load_settings())
     configure_logging(container.settings.log_level)
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        yield
+        if container.database is not None:
+            await container.database.dispose()
+
     # debug stays off: Starlette's debug pages would show tracebacks with request data.
-    app = FastAPI(title="Enterprise AI Support Hub", version="0.1.0", debug=False)
+    app = FastAPI(
+        title="Enterprise AI Support Hub", version="0.1.0", debug=False, lifespan=lifespan
+    )
     app.state.container = container
     install_error_handlers(app)
     app.add_middleware(RequestContextMiddleware)
