@@ -1,11 +1,13 @@
 """structlog JSON logs to stdout; every record is masked before it is written (G9).
 
+The mask is the card-data mask of G1 (`hub.guardrails.masking`), so logs follow the same rules
+as stored text.
+
 Logs from the standard library (uvicorn, libraries) go through the same chain, so the masking
 processor sees every line the process writes, not only the lines of our own code.
 """
 
 import logging
-import re
 import sys
 from collections.abc import MutableMapping
 from typing import Any
@@ -14,19 +16,7 @@ import structlog
 import structlog.tracebacks
 from structlog.typing import EventDict, Processor, WrappedLogger
 
-# TEMPORARY (P2-01): a stricter stand-in until `guardrails/masking.py` exists (P2-03).
-# Any run of 13 or more digits becomes [REDACTED] as a whole: no Luhn check and no upper length,
-# so a card number with the expiry typed after it is caught too. Between two digits it allows up
-# to three separators (whitespace including NBSP, - + . / _) or a URL-encoded space, plus or dash.
-# P2-03 removes this and wires in masking.py (docs/build-plan.md, task P2-03).
-_TEMPORARY_SEPARATOR = r"(?:[\s\-+./_]{1,3}|%20|%2[bBdD])"
-_TEMPORARY_CARD_LIKE = re.compile(rf"\d(?:{_TEMPORARY_SEPARATOR}?\d){{12,}}")
-_TEMPORARY_REPLACEMENT = "[REDACTED]"
-
-
-def mask_text(text: str) -> str:
-    """The log mask, for code that must know whether a value would change in the logs."""
-    return _TEMPORARY_CARD_LIKE.sub(_TEMPORARY_REPLACEMENT, text)
+from hub.guardrails.masking import mask_text
 
 
 def _mask_value(value: object) -> object:

@@ -72,7 +72,7 @@ def test_unhandled_error_is_500_problem_without_the_message(
     error_line = next(line for line in log_lines() if line["event"] == "request.unhandled_error")
     assert error_line["request_id"] == response.headers["x-request-id"]
     assert "4111" not in str(error_line)
-    assert "[REDACTED]" in str(error_line["exception"])  # the traceback is logged, masked
+    assert "[CARD ****1111]" in str(error_line["exception"])  # the traceback is logged, masked
 
 
 @pytest.mark.parametrize(

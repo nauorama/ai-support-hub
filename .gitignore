@@ -42,3 +42,6 @@ evals/runs/**/raw/
 
 # Phase walkthroughs: the owner's personal notes, never committed
 docs/walkthrough/
+
+# Hypothesis example database
+.hypothesis/

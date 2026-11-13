@@ -14,27 +14,29 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from hub.api.errors import internal_error_response
-from hub.observability.logging import mask_text
+from hub.guardrails.masking import mask_text
 
 REQUEST_ID_HEADER = "X-Request-ID"
 # Accept a caller's id only when it is short and plain, so it is safe in logs and headers.
 _VALID_REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# A long digit run in an id looks like a card number or a timestamp; keep ids plainly readable.
+_LONG_DIGIT_RUN = re.compile(r"\d{13,}")
 
 log = structlog.get_logger(__name__)
 
 
-def _survives_log_mask(request_id: str) -> bool:
+def _reads_the_same_in_logs(request_id: str) -> bool:
     # The id must read the same in the header and in the logs, or nobody can find the log line.
     # It is never exempt from the mask instead: a caller could send a card number as the id.
-    return mask_text(request_id) == request_id
+    return not _LONG_DIGIT_RUN.search(request_id) and mask_text(request_id) == request_id
 
 
 def _new_request_id() -> str:
-    # About 2% of uuid4 hex strings hold 13+ digits in a row, which the log mask redacts;
+    # About 2% of uuid4 hex strings hold 13+ digits in a row, which api.md does not allow;
     # draw again. Each draw fails with p ≈ 0.02, so this ends after one or two draws.
     while True:
         request_id = uuid.uuid4().hex
-        if _survives_log_mask(request_id):
+        if _reads_the_same_in_logs(request_id):
             return request_id
 
 
@@ -43,7 +45,7 @@ def request_id_for(incoming: str | None) -> str:
     if (
         incoming is not None
         and _VALID_REQUEST_ID.fullmatch(incoming)
-        and _survives_log_mask(incoming)
+        and _reads_the_same_in_logs(incoming)
     ):
         return incoming
     return _new_request_id()

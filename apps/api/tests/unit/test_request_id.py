@@ -42,9 +42,11 @@ def test_valid_incoming_id_is_kept(make_client: MakeClient) -> None:
         "has space",
         "semi;colon",
         "über",
-        "1731500000000",  # epoch ms: the log mask would redact it
+        "1731500000000",  # epoch ms: 13+ digits in a row (api.md)
+        "4111111111111112",  # fails Luhn, so not masked, but still 13+ digits in a row
         "4111111111111111",  # a card number sent as the id: never logged, never kept
-        "req-4111-1111-1111-1111",
+        "req-4111-1111-1111-1111",  # the card mask would change it
+        "pin-4821",  # the PIN mask would change it
     ],
 )
 def test_unsafe_incoming_id_is_replaced(incoming: str) -> None:
@@ -150,3 +152,4 @@ def test_ids_read_the_same_in_the_header_and_the_log(
         logged = [line["request_id"] for line in log_lines() if "request_id" in line]
         assert logged == [response.headers["x-request-id"]]
         assert "[REDACTED]" not in logged[0]
+        assert "[CARD" not in logged[0]
