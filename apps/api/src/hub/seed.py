@@ -99,7 +99,10 @@ async def load_seed(
 ) -> SeedReport:
     """Write the seed inside the caller's transaction (the caller commits)."""
     if not operator_password:
-        raise SeedError("SEED_OPERATOR_PASSWORD is empty; set it in .env")
+        raise SeedError(
+            "SEED_OPERATOR_PASSWORD is empty. Set it in .env (the password of the demo "
+            "operators), then run `make seed` (or `make dev`) again. Nothing was written."
+        )
     report = SeedReport()
     await _load_customers(session, seed, report)
     await _load_operators(session, seed, operator_password, report)

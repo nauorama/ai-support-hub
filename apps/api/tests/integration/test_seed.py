@@ -186,7 +186,7 @@ async def test_existing_settings_and_passwords_are_kept(
         assert setting is not None
         setting.value = 0.8
 
-    report = await _load(engine, seed, password="another-password")  # noqa: S106 - test value  # noqa: S106 - test value
+    report = await _load(engine, seed, password="another-password")  # noqa: S106 - test value
 
     assert report.settings_added == []
     assert report.operators_added == 0

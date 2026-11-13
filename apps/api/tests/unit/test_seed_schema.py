@@ -95,7 +95,7 @@ def _transactions(customer: int) -> list[Transaction]:
         _tx(base + 4, customer, type="card_payment", card_ref=card,
             merchant_category="software", requested_at="-10d 12:00"),
         _tx(base + 5, customer, type="withdrawal_sepa", status="failed", error_code="ERR-2001",
-            requested_at="0d 09:00"),
+            requested_at="-1d 09:00"),
         _tx(base + 6, customer, type="conversion", requested_at="-3d 11:00"),
     ]  # fmt: skip
 
@@ -164,6 +164,30 @@ def test_resolve_offset_is_utc_and_crosses_month_and_year_ends() -> None:
 def test_the_same_anchor_gives_the_same_datetime() -> None:
     anchor = date(2026, 11, 12)
     assert resolve_offset("-14d 09:30", anchor) == resolve_offset("-14d 09:30", anchor)
+
+
+@pytest.mark.parametrize(
+    "offset", ["-1d 22:00", "-1d 23:59", "0d 00:00", "0d 23:59", "+1d 09:00", "+30d 09:00"]
+)
+def test_seed_dates_are_in_the_past(offset: str) -> None:
+    # With an empty CORE_ANCHOR_DATE (= today) an event on the anchor day can lie in the future.
+    with pytest.raises(ValidationError, match="not in the past"):
+        _tx(1, 1, requested_at=offset)
+    with pytest.raises(ValidationError, match="not in the past"):
+        _card(1, issued_at=offset)
+    with pytest.raises(ValidationError, match="not in the past"):
+        _customer(1, opened_at=offset)
+    with pytest.raises(ValidationError, match="not in the past"):
+        Upgrade.model_validate(
+            {"target_tier": "business", "status": "pending", "submitted_at": offset}
+        )
+    history = [{"status": "pending", "at": "-1d 10:00"}, {"status": "completed", "at": offset}]
+    with pytest.raises(ValidationError, match="not in the past"):
+        _tx(1, 1, requested_at="-1d 10:00", status_history=history)
+
+
+def test_the_last_moment_of_the_day_before_is_accepted() -> None:
+    assert _tx(1, 1, requested_at="-1d 21:59").requested_at == "-1d 21:59"
 
 
 def test_a_model_refuses_a_bad_offset() -> None:
@@ -290,7 +314,44 @@ def test_transaction_rules(changes: dict[str, Any], message: str) -> None:
         _tx(1, 1, **changes)
 
 
-@pytest.mark.parametrize("at", ["-1d 12:59", "-1d 14:00", "0d 09:00", "0d 18:30"])
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"type": "withdrawal_swift", "currency": "USD", "fee": "15.00"}, "set in EUR"),
+        ({"type": "withdrawal_swift", "currency": "USD", "fee": "15.00", "fee_currency": "USD"},
+         "set in EUR"),
+        ({"type": "withdrawal_swift", "fee": "12.00"}, "fee is EUR 15.00"),
+        ({"type": "withdrawal_sepa", "fee": "15.00"}, "fee is EUR 1.50"),
+        ({"type": "fee", "currency": "USD"}, "fixed fee, set in EUR"),
+        ({"fee_currency": "EUR"}, "only when there is a fee"),
+        ({"type": "withdrawal_swift", "status": "failed", "error_code": "ERR-2003",
+          "fee": "15.00"}, "no fee"),
+        ({"type": "withdrawal_sepa", "status": "returned", "error_code": "ERR-2010",
+          "fee": "1.50"}, "no fee"),
+        ({"type": "mass_payout", "fee": "1.00"}, "Business benefit"),
+    ],
+)  # fmt: skip
+def test_fee_rules(changes: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _tx(1, 1, **changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"type": "withdrawal_swift", "currency": "USD", "fee": "15.00", "fee_currency": "EUR"},
+        {"type": "atm_withdrawal", "currency": "GBP", "fee": "2.50", "fee_currency": "EUR",
+         "card_ref": "CRD-0001"},
+        {"type": "withdrawal_sepa", "fee": "1.50"},
+        {"type": "incoming_ach", "currency": "USD", "fee": "3.20"},  # a percentage fee
+        {"type": "fee", "amount": "24.00"},
+    ],
+)  # fmt: skip
+def test_valid_fees(changes: dict[str, Any]) -> None:
+    assert _tx(1, 1, **changes).fee >= 0
+
+
+@pytest.mark.parametrize("at", ["-1d 12:59", "-1d 14:00", "-2d 09:00", "-2d 18:30"])
 def test_sepa_withdrawal_times_outside_the_cutoff_gap_are_accepted(at: str) -> None:
     assert _tx(1, 1, type="withdrawal_sepa", requested_at=at).requested_at == at
 
@@ -455,19 +516,22 @@ def test_card_and_kyc_scenarios_need_a_card_and_an_upgrade() -> None:
     assert f"{kyc.external_ref}: data does not fit the kyc_verification scenario" in errors
 
 
-def test_limits_can_be_nearly_used_by_todays_withdrawals() -> None:
+def test_limits_can_be_nearly_used_by_withdrawals_on_one_day() -> None:
     seed = _valid_seed()
     ref = next(c.external_ref for c in seed.customers if c.support_scenarios == [Intent.LIMITS])
     number = int(ref[-4:])
     txs = [t for t in seed.transactions if t.customer_ref != ref or t.error_code != "ERR-2001"]
-    today = [
-        _tx(700_001, number, type="withdrawal_sepa", amount="5000.00", requested_at="0d 08:00"),
-        _tx(700_002, number, type="withdrawal_sepa", amount="3000.00", requested_at="0d 10:00",
+    one_day = [
+        _tx(700_001, number, type="withdrawal_sepa", amount="5000.00", requested_at="-1d 08:00"),
+        _tx(700_002, number, type="withdrawal_sepa", amount="3000.00", requested_at="-1d 10:00",
             status="pending"),
     ]  # fmt: skip
-    assert validate_seed(_replace(seed, transactions=[*txs, *today])) == []
-    yesterday = [t.model_copy(update={"requested_at": "-1d 08:00"}) for t in today]
-    errors = validate_seed(_replace(seed, transactions=[*txs, *yesterday]))
+    assert validate_seed(_replace(seed, transactions=[*txs, *one_day])) == []
+    two_days = [one_day[0], one_day[1].model_copy(update={"requested_at": "-2d 10:00"})]
+    two_days[1] = Transaction.model_validate(
+        {**two_days[1].model_dump(), "status_history": [{"status": "pending", "at": "-2d 10:00"}]}
+    )
+    errors = validate_seed(_replace(seed, transactions=[*txs, *two_days]))
     assert f"{ref}: data does not fit the limits scenario" in errors
 
 

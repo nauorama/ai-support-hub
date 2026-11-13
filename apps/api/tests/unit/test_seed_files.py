@@ -1,7 +1,7 @@
 """The real seed files in `data/seed/`: valid, repeatable dates, and correct around the SEPA
 cut-off (15:00 CET) in winter and in summer."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -22,7 +22,7 @@ CET = ZoneInfo("Europe/Bratislava")  # the support timezone of docs/ai-pipeline.
 WINTER = date(2026, 1, 14)  # CET, UTC+1
 SUMMER = date(2026, 7, 15)  # CEST, UTC+2
 SEPA_CUTOFF_HOUR = 15
-# A pending SEPA withdrawal requested today after the cut-off (named in the content brief).
+# A pending SEPA withdrawal requested yesterday after the cut-off (named in the content brief).
 AFTER_CUTOFF_REFERENCE = "TX-000900"
 
 
@@ -68,8 +68,24 @@ def test_the_after_cutoff_sepa_withdrawal_is_after_15_cet_in_winter_and_summer()
     assert tx.status is TransactionStatus.PENDING
     for anchor in (WINTER, SUMMER):
         local = resolve_offset(tx.requested_at, anchor).astimezone(CET)
-        assert local.date() == anchor
+        assert local.date() == anchor - timedelta(days=1)
         assert local.hour >= SEPA_CUTOFF_HOUR, (anchor, local)
+
+
+def test_no_seed_event_is_on_the_anchor_day_or_later() -> None:
+    # Checked for the latest possible moment of the anchor day in UTC: still before it starts.
+    seed = _seed()
+    anchor = date(2026, 11, 12)
+    start_of_anchor_day = datetime(2026, 11, 12, tzinfo=CET)
+    assert all(moment < start_of_anchor_day for moment in _all_dates(seed, anchor))
+
+
+def test_fixed_fees_on_usd_and_gbp_transactions_are_in_eur() -> None:
+    fixed = {TransactionType.WITHDRAWAL_SWIFT, TransactionType.WITHDRAWAL_SEPA,
+             TransactionType.ATM_WITHDRAWAL}  # fmt: skip
+    for tx in _seed().transactions:
+        if tx.type in fixed and tx.fee > 0:
+            assert (tx.fee_currency or tx.currency) == "EUR", tx.reference
 
 
 def test_every_sepa_withdrawal_is_on_the_same_side_of_the_cutoff_all_year() -> None:

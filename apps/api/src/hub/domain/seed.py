@@ -47,12 +47,31 @@ def resolve_offset(offset: str, anchor: date) -> datetime:
     return datetime.combine(anchor + timedelta(days=days), at, tzinfo=UTC)
 
 
-def _check_offset(value: str) -> str:
-    parse_offset(value)
+# Every date in the seed is an event that has happened: none lies on the anchor day or later,
+# because with an empty `CORE_ANCHOR_DATE` (= today) a "0d 14:20" event is in the future
+# during the morning (owner decision, P2-05). Expected dates (`expected_at`) are computed by the
+# core mock (P7), not stored, and are the only dates that may be in the future.
+LATEST_EVENT_DAY = -1
+
+
+# The anchor day starts at 00:00 CET, which is 22:00 UTC the day before in summer (CEST). A
+# "-1d 22:30" event would be on the anchor day in CET, so the last day ends earlier.
+LAST_DAY_ENDS_UTC = time(22, 0)
+
+
+def _check_past_offset(value: str) -> str:
+    days, at = parse_offset(value)
+    if days > LATEST_EVENT_DAY or (days == LATEST_EVENT_DAY and at >= LAST_DAY_ENDS_UTC):
+        raise ValueError(
+            f"offset {value!r} is not in the past: "
+            f"seed events are before {LATEST_EVENT_DAY}d 22:00 (UTC), the start of the "
+            "anchor day in CET"
+        )
     return value
 
 
-Offset = Annotated[str, AfterValidator(_check_offset)]
+# A date in a seed file: the shape of `parse_offset`, and in the past.
+Offset = Annotated[str, AfterValidator(_check_past_offset)]
 CustomerRef = Annotated[str, Field(pattern=r"^CUS-\d{4}$")]
 CardRef = Annotated[str, Field(pattern=r"^CRD-\d{4}$")]
 TransactionRef = Annotated[str, Field(pattern=r"^TX-\d{6}$")]
@@ -88,6 +107,14 @@ CARD_ALLOWANCE = {
     CustomerTier.BUSINESS: (5, 20),
 }
 DISPUTE_WINDOW_DAYS = 120
+# Fixed fees, set in EUR (world file §4). On a USD or GBP transaction they are still EUR amounts
+# (charged from that balance at the mid-market rate, without a conversion fee), so the seed
+# records them with `fee_currency: "EUR"`.
+FIXED_FEES_EUR = {
+    "withdrawal_sepa": Decimal("1.50"),
+    "withdrawal_swift": Decimal("15.00"),
+    "atm_withdrawal": Decimal("2.50"),
+}
 # A share of the daily withdrawal limit that counts as "nearly used".
 NEARLY_USED_SHARE = Decimal("0.8")
 
@@ -263,6 +290,8 @@ class Transaction(_Seed):
     amount: Amount
     currency: Currency
     fee: Balance = Decimal(0)
+    # The currency of `fee`; empty means the transaction's currency. Fixed fees are EUR.
+    fee_currency: Currency | None = None
     status: TransactionStatus
     error_code: ErrorCode | None = None
     requested_at: Offset
@@ -316,9 +345,36 @@ def transaction_errors(tx: Transaction) -> list[str]:
             "a SEPA withdrawal requested 13:00-13:59 UTC is before 15:00 CET in winter but after "
             "15:00 CEST in summer; pick a time that is on one side of the cut-off all year"
         )
+    errors.extend(_fee_errors(tx))
     rail = RAIL_CURRENCY.get(tx.type)
     if rail is not None and tx.currency is not rail:
         errors.append(f"{tx.type} carries {rail}, not {tx.currency}")
+    return errors
+
+
+def _fee_errors(tx: Transaction) -> list[str]:
+    """Fee rules of world file §4 that a single transaction can break."""
+    errors: list[str] = []
+    fee_currency = tx.fee_currency or tx.currency
+    if tx.fee_currency is not None and tx.fee == 0:
+        errors.append("fee_currency is set only when there is a fee")
+    fixed = FIXED_FEES_EUR.get(tx.type)
+    if fixed is not None and tx.fee > 0 and (tx.fee != fixed or fee_currency is not Currency.EUR):
+        errors.append(f"the {tx.type} fee is EUR {fixed}, set in EUR (fee_currency EUR)")
+    if tx.type is TransactionType.FEE and tx.currency is not Currency.EUR:
+        errors.append("a fee transaction is a fixed fee, set in EUR")
+    if (
+        tx.fee > 0
+        and tx.type in WITHDRAWALS
+        and tx.status
+        in {
+            TransactionStatus.FAILED,
+            TransactionStatus.RETURNED,
+        }
+    ):
+        errors.append("a failed or returned withdrawal has no fee")
+    if tx.fee > 0 and tx.type is TransactionType.MASS_PAYOUT:
+        errors.append("mass payouts have no fee (Business benefit)")
     return errors
 
 
@@ -529,21 +585,25 @@ def _has_fees(c: Customer, txs: list[Transaction], cards: list[Card]) -> bool:
 
 
 def _limit_nearly_used(c: Customer, txs: list[Transaction], cards: list[Card]) -> bool:
+    """A limit error, or EUR withdrawals on one day that used most of the daily limit.
+
+    Seed events are never on the anchor day (LATEST_EVENT_DAY), so the daily limit is never
+    nearly used *today*; the data shows a day on which it was, and limit errors.
+    """
     limit_codes = {"ERR-1020", "ERR-2001", "ERR-3011"}
     if any(t.error_code in limit_codes for t in txs):
         return True
-    today = sum(
-        (
-            t.amount
-            for t in txs
-            if t.type in WITHDRAWALS
+    per_day: dict[int, Decimal] = {}
+    for t in txs:
+        if (
+            t.type in WITHDRAWALS
             and t.currency is Currency.EUR
             and t.status in {TransactionStatus.COMPLETED, TransactionStatus.PENDING}
-            and _days(t.requested_at) == 0
-        ),
-        Decimal(0),
-    )
-    return today >= DAILY_WITHDRAW_LIMIT_EUR[c.tier] * NEARLY_USED_SHARE
+        ):
+            day = _days(t.requested_at)
+            per_day[day] = per_day.get(day, Decimal(0)) + t.amount
+    limit = DAILY_WITHDRAW_LIMIT_EUR[c.tier] * NEARLY_USED_SHARE
+    return any(total >= limit for total in per_day.values())
 
 
 def _has_disputable_payment(c: Customer, txs: list[Transaction], cards: list[Card]) -> bool:

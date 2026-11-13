@@ -47,7 +47,7 @@
     "upgrade": {
       "target_tier": "verified",
       "status": "pending",
-      "submitted_at": "0d 08:40"
+      "submitted_at": "-1d 08:40"
     },
     "support_scenarios": [
       "payment_pending",
