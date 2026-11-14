@@ -6,9 +6,16 @@ from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import exc, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from hub.db.models import Customer, Operator, StatusChangeRefusedError, Ticket
+from hub.db.models import (
+    APPROVED_STATUS_KEY,
+    Customer,
+    Operator,
+    StatusChangeRefusedError,
+    Ticket,
+    approve_status_change,
+)
 from hub.db.repositories import (
     ConcurrentUpdateError,
     CustomerRepository,
@@ -155,6 +162,114 @@ async def test_approval_of_change_status_is_used_once(app_session: AsyncSession)
     ticket.status = TicketStatus.CLOSED
     with pytest.raises(StatusChangeRefusedError):
         await repo.save(ticket)
+
+
+async def test_an_approval_does_not_survive_a_rollback(app_session: AsyncSession) -> None:
+    # An approval left behind by a failed flush must not let a later direct change through.
+    customer = await _customer(app_session)
+    repo = TicketRepository(app_session)
+    ticket = await repo.create(customer_id=customer.id, ai_disclosed_at=NOW)
+    await app_session.commit()  # the ticket outlives the rollback below
+    await app_session.refresh(ticket)  # opens the transaction the approval belongs to
+    approve_status_change(app_session.sync_session, ticket.id, TicketStatus.ANSWERED)
+    await app_session.rollback()
+    assert APPROVED_STATUS_KEY not in app_session.info
+    await app_session.refresh(ticket)
+    ticket.status = TicketStatus.ANSWERED
+    with pytest.raises(StatusChangeRefusedError):
+        await repo.save(ticket)
+
+
+async def test_an_unused_approval_does_not_survive_a_commit(app_session: AsyncSession) -> None:
+    customer = await _customer(app_session)
+    repo = TicketRepository(app_session)
+    ticket = await repo.create(customer_id=customer.id, ai_disclosed_at=NOW)
+    approve_status_change(app_session.sync_session, ticket.id, TicketStatus.ANSWERED)
+    await app_session.commit()
+    assert APPROVED_STATUS_KEY not in app_session.info
+    ticket.status = TicketStatus.ANSWERED
+    with pytest.raises(StatusChangeRefusedError):
+        await repo.save(ticket)
+
+
+async def test_a_failed_flush_clears_the_approval(app_session: AsyncSession) -> None:
+    customer = await _customer(app_session)
+    repo = TicketRepository(app_session)
+    ticket = await repo.create(customer_id=customer.id, ai_disclosed_at=NOW)
+    await app_session.commit()
+    # Another writer moved the version on: change_status approves, then its flush fails.
+    await app_session.execute(
+        text("UPDATE tickets SET version = version + 1 WHERE id = :id"), {"id": ticket.id}
+    )
+    with pytest.raises(ConcurrentUpdateError):
+        await repo.change_status(ticket, TicketStatus.HANDED_OFF)
+    # The flush rolled back its own inner transaction, which already cleared the approvals.
+    assert APPROVED_STATUS_KEY not in app_session.info
+
+
+async def test_an_approval_needs_an_open_transaction(app_session: AsyncSession) -> None:
+    await app_session.commit()
+    with pytest.raises(RuntimeError, match="inside a transaction"):
+        approve_status_change(app_session.sync_session, uuid.uuid4(), TicketStatus.ANSWERED)
+
+
+async def test_change_status_still_works_after_a_rollback(app_session: AsyncSession) -> None:
+    customer = await _customer(app_session)
+    repo = TicketRepository(app_session)
+    ticket = await repo.create(customer_id=customer.id, ai_disclosed_at=NOW)
+    await app_session.commit()
+    await app_session.rollback()
+    await app_session.refresh(ticket)
+    await repo.change_status(ticket, TicketStatus.ANSWERED)
+    assert ticket.status is TicketStatus.ANSWERED
+
+
+async def test_message_row_lock_blocks_a_second_writer(app_db_url: str) -> None:
+    """`get_in_ticket(for_update=True)` holds the row: a concurrent second lock waits (here it
+    times out), so two feedback requests for one message cannot both insert."""
+    engine = create_async_engine(app_db_url)
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as setup:
+            customer = await _customer(setup, "CUS-0901")
+            ticket = await TicketRepository(setup).create(
+                customer_id=customer.id, ai_disclosed_at=NOW
+            )
+            message = await MessageRepository(setup).add(
+                ticket_id=ticket.id, role=MessageRole.ASSISTANT, body="answer", is_ai_generated=True
+            )
+            await setup.commit()
+        async with AsyncSession(engine) as first, AsyncSession(engine) as second:
+            assert await MessageRepository(first).get_in_ticket(
+                ticket.id, message.id, for_update=True
+            )
+            await second.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            with pytest.raises(exc.OperationalError, match="lock timeout"):
+                await MessageRepository(second).get_in_ticket(
+                    ticket.id, message.id, for_update=True
+                )
+            await first.rollback()
+        async with AsyncSession(engine) as cleanup:
+            await cleanup.execute(text("DELETE FROM messages WHERE id = :id"), {"id": message.id})
+            await cleanup.execute(text("DELETE FROM tickets WHERE id = :id"), {"id": ticket.id})
+            await cleanup.execute(text("DELETE FROM customers WHERE id = :id"), {"id": customer.id})
+            await cleanup.commit()
+    finally:
+        await engine.dispose()
+
+
+async def test_first_feedback_of_a_message(app_session: AsyncSession) -> None:
+    customer = await _customer(app_session)
+    ticket = await TicketRepository(app_session).create(
+        customer_id=customer.id, ai_disclosed_at=NOW
+    )
+    message = await MessageRepository(app_session).add(
+        ticket_id=ticket.id, role=MessageRole.ASSISTANT, body="answer", is_ai_generated=True
+    )
+    repo = FeedbackRepository(app_session)
+    assert await repo.get_for_message(message.id) is None
+    first = await repo.add(ticket_id=ticket.id, message_id=message.id, rating=FeedbackRating.UP)
+    await repo.add(ticket_id=ticket.id, message_id=message.id, rating=FeedbackRating.DOWN)
+    assert await repo.get_for_message(message.id) is first
 
 
 async def test_other_ticket_fields_can_still_be_saved(app_session: AsyncSession) -> None:

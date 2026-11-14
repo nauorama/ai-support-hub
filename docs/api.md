@@ -18,7 +18,7 @@ Base path `/api/v1`. JSON, `snake_case`. FastAPI generates the OpenAPI file; thi
 - **Idempotency:** `Idempotency-Key` header (UUID) on every POST that creates a message or runs an action; a missing or malformed key is a `validation_error`. The same key returns the first result. Keys are scoped to the caller (a customer's key never returns another customer's result). The same key sent with a different request (other text, other ticket) returns `409 idempotency_key_reused`.
 - **Pagination:** `?limit=50&cursor=...`; response `{"items": [...], "next_cursor": "..."}`.
 - **Rate limits (demo):** customer endpoints 10 messages per minute per session and 60 per hour per IP; login 5 tries per 15 minutes (for the demo session: 5 wrong access codes per 15 minutes per IP). Over the limit → 429 with `Retry-After`.
-- **Input limits:** a request body is at most 32 KB (`413 content_too_large`, checked before the body is parsed). A customer message is at most 4,000 characters (`422 validation_error`, checked before masking, security T9).
+- **Input limits:** a request body is at most 32 KB (`413 content_too_large`, checked before the body is parsed). A customer message is at most 4,000 characters (`422 validation_error`, checked before masking, security T9). Text with a NUL character is refused with `422 validation_error` (Postgres cannot store it).
 - **Time:** ISO 8601 UTC.
 
 ## 2. Customer endpoints
@@ -33,7 +33,7 @@ Base path `/api/v1`. JSON, `snake_case`. FastAPI generates the OpenAPI file; thi
 | GET | `/tickets/{id}` | Ticket with status and the AI disclosure text. |
 | GET | `/tickets/{id}/messages?after={message_id}` | New messages. The chat polls this every 3 s while the ticket is not closed and no stream is open. |
 | POST | `/tickets/{id}/request-human` | Immediate handoff with reason `customer_request`. Returns the ticket. A ticket that already waits for a human (`handed_off`, `pending_approval`) is returned unchanged; a closed ticket returns `409 ticket_closed`. |
-| POST | `/tickets/{id}/feedback` | Body `{"message_id": "...", "rating": "up" | "down", "comment": "..."}` (comment optional, max 1,000 characters, masked). 201 with `{"id"}`. Only AI messages of this ticket: another message → `422 not_ai_message`. |
+| POST | `/tickets/{id}/feedback` | Body `{"message_id": "...", "rating": "up" | "down", "comment": "..."}` (comment optional, max 1,000 characters, masked). 201 with `{"id"}`. Only AI messages of this ticket: another message → `422 not_ai_message`. One rating per message: a repeated request (a double click) stores nothing and returns the first rating's `{"id"}` with 200. |
 | GET | `/help/{doc_id}` | Public. One `external` knowledge-base article (title, sections with anchors). `internal` documents return 404. Target of citation links. |
 | GET | `/privacy` | Public. Short privacy text: what the AI sees, which providers process the data, how to reach a human. |
 
@@ -103,7 +103,7 @@ Conflict rule: every state-changing draft or ticket request sends `ticket_versio
 | `error` | problem details | the run failed; the ticket was handed off |
 | `done` | `{}` | always the last event |
 
-`POST /tickets/{id}/messages` also starts with `ticket.created`, carrying the new message. Until the workflow exists (phase 6), the stream is `ticket.created` → `message` (a placeholder system message, not stored) → `done`.
+`POST /tickets/{id}/messages` also starts with `ticket.created`, carrying the new message. Until the workflow exists (phase 6), the stream is `ticket.created` → `message` (a placeholder system message, not stored) → `done`. When masking fails, the ticket is handed to a human (reason `system_error`) and `ticket.status` (`handed_off`) comes before `done`.
 
 The server sends a comment line (`: ping`) every 10 s to keep the connection open. If the stream breaks, the client falls back to polling `GET /tickets/{id}/messages`.
 

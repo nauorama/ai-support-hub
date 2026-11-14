@@ -23,8 +23,13 @@ MAX_FEEDBACK_COMMENT_CHARS = 1_000
 
 # Length is counted in characters (code points), as the chat counter does (docs/ui.md §2).
 # `strip_whitespace` is not used: the stored text stays what the customer wrote (masked).
+# NUL is refused here (422): Postgres text cannot store it, so it would otherwise fail at the
+# INSERT with a 500.
 MessageText = Annotated[
-    str, StringConstraints(min_length=1, max_length=MAX_MESSAGE_CHARS, pattern=r"\S")
+    str,
+    StringConstraints(
+        min_length=1, max_length=MAX_MESSAGE_CHARS, pattern=r"^[^\x00]*[^\x00\s][^\x00]*$"
+    ),
 ]
 
 
@@ -50,7 +55,13 @@ class MessageIn(_Strict):
 class FeedbackIn(_Strict):
     message_id: uuid.UUID
     rating: FeedbackRating
-    comment: Annotated[str, StringConstraints(max_length=MAX_FEEDBACK_COMMENT_CHARS)] | None = None
+    comment: (
+        Annotated[
+            str,
+            StringConstraints(max_length=MAX_FEEDBACK_COMMENT_CHARS, pattern=r"^[^\x00]*$"),
+        ]
+        | None
+    ) = None
 
 
 class CitationOut(BaseModel):

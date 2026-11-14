@@ -27,7 +27,10 @@ def connect(url: str) -> Database:
     """Create the engine. No connection is opened until the first query."""
     # pre_ping: the demo database sleeps after minutes without queries (operations §6), so a
     # pooled connection may be dead when it is taken from the pool.
-    engine = create_async_engine(url, pool_pre_ping=True)
+    # hide_parameters: SQLAlchemy writes the bound values into the text of every database error,
+    # and those values are customer messages; a logged traceback would carry the (masked) text
+    # (security §8: never ticket text in an exception message).
+    engine = create_async_engine(url, pool_pre_ping=True, hide_parameters=True)
     # expire_on_commit=False: objects stay readable after commit without new (implicit) IO,
     # which the asyncio extension cannot do lazily.
     return Database(engine=engine, sessions=async_sessionmaker(engine, expire_on_commit=False))

@@ -11,8 +11,9 @@ from fastapi.testclient import TestClient
 
 from hub.api import tickets
 from hub.api.dependencies import current_customer, db_session
-from hub.api.schemas import MessageOut, TicketOut, citations_for_customer
+from hub.api.schemas import MessageIn, MessageOut, TicketOut, citations_for_customer
 from hub.db.models import Customer
+from hub.db.session import connect
 from hub.domain.enums import CustomerTier, TicketStatus
 
 from .conftest import MakeClient
@@ -156,3 +157,30 @@ def test_citations_drop_internal_ids() -> None:
     assert [c.model_dump() for c in citations_for_customer(stored)] == [
         {"marker": 1, "title": "T", "url": "/help/a"}
     ]
+
+
+@pytest.mark.parametrize("message", ["a\x00b", "\x00"])
+def test_nul_in_a_message_is_refused(make_client: MakeClient, message: str) -> None:
+    # Postgres text cannot hold NUL; without this the INSERT fails with a 500.
+    response = _client_with_customer(make_client).post(
+        "/api/v1/tickets", json={"message": message}, headers=KEY
+    )
+    assert response.status_code == 422
+
+
+def test_nul_in_a_feedback_comment_is_refused(make_client: MakeClient) -> None:
+    response = _client_with_customer(make_client).post(
+        f"/api/v1/tickets/{TICKET}/feedback",
+        json={"message_id": str(TICKET), "rating": "up", "comment": "bad\x00"},
+    )
+    assert response.status_code == 422
+
+
+def test_exactly_4000_characters_pass_the_schema() -> None:
+    assert MessageIn(message="x" * 4000).message == "x" * 4000
+
+
+def test_database_errors_hide_the_bound_values() -> None:
+    # Customer text is a bound value; it must not appear in the text of a database error.
+    database = connect("postgresql+psycopg://hub:pw@db/hub")
+    assert database.engine.sync_engine.hide_parameters is True

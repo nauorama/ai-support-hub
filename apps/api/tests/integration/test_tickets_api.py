@@ -25,6 +25,8 @@ from hub.db.models import Message
 from hub.db.repositories import MessageRepository
 from hub.db.session import connect
 from hub.deps import Container
+from hub.guardrails import masking
+from hub.guardrails.masking import MaskResult
 from hub.main import create_app
 from hub.observability.readiness import libpq_url
 
@@ -623,3 +625,171 @@ def test_more_than_10_messages_a_minute_get_429(
 
 def test_placeholder_text_does_not_promise_an_ai_answer() -> None:
     assert "AI" not in tickets_module.PLACEHOLDER_TEXT
+
+
+# --- failures go to a human ------------------------------------------------------------------
+
+
+def _break_masking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ticket handler's mask takes the failure path of the real `mask()`: every digit
+    replaced, no counts, `failed=True`. Patched at the handler only: with masking broken
+    everywhere, request-id generation in the middleware never ends (reported in the PR)."""
+
+    def failed_mask(text: str) -> MaskResult:
+        return MaskResult(text=masking._mask_all_digits(text), counts={}, failed=True)
+
+    monkeypatch.setattr(tickets_module, "mask", failed_mask)
+
+
+def test_failed_masking_is_audited_and_hands_the_new_ticket_to_a_human(
+    app_client: TestClient,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _login(app_client)
+    _break_masking(monkeypatch)
+    response = client.post("/api/v1/tickets", json={"message": f"card {TEST_CARD}"}, headers=_key())
+    assert response.status_code == 200
+    events = _events(response)
+    assert [name for name, _ in events] == ["ticket.created", "message", "ticket.status", "done"]
+    assert events[2][1] == {"status": "handed_off"}
+
+    assert _sql(api_db, "SELECT body FROM messages") == [("card #### #### #### ####",)]
+    assert _sql(api_db, "SELECT status, last_route, route_reasons FROM tickets") == [
+        ("handed_off", "handoff", ["system_error"])
+    ]
+    audit = _sql(api_db, "SELECT action, actor_type, details FROM audit_log ORDER BY id")
+    assert audit[1:] == [
+        ("ticket.created", "customer", {"message_id": audit[1][2]["message_id"]}),
+        ("guardrail.masked", "system", {"counts": {}, "failed": True}),
+        ("route.decided", "system", {"route": "handoff", "reasons": ["system_error"]}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "last_route", "expected", "handed_off_now"),
+    [
+        ("answered", "auto_reply", "handed_off", True),  # AI owned: no new run, a human
+        ("processing", None, "handed_off", True),
+        ("handed_off", "handoff", "handed_off", False),  # already with a human
+        ("pending_approval", "approval", "pending_approval", False),
+    ],
+)
+def test_failed_masking_on_a_follow_up_hands_off_unless_a_human_has_it(
+    app_client: TestClient,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    last_route: str | None,
+    expected: str,
+    handed_off_now: bool,
+) -> None:
+    client = _login(app_client)
+    ticket_id = _new_ticket(client)["ticket_id"]
+    _sql(
+        api_db,
+        "UPDATE tickets SET status = %s, last_route = %s WHERE id = %s",
+        status,
+        last_route,
+        ticket_id,
+    )
+    _break_masking(monkeypatch)
+    response = client.post(
+        f"/api/v1/tickets/{ticket_id}/messages", json={"message": "pin 1234"}, headers=_key()
+    )
+    names = [name for name, _ in _events(response)]
+    assert ("ticket.status" in names) is handed_off_now
+    assert client.get(f"/api/v1/tickets/{ticket_id}").json()["status"] == expected
+    failed = _sql(
+        api_db,
+        "SELECT count(*) FROM audit_log WHERE action = 'guardrail.masked'"
+        " AND details->>'failed' = 'true'",
+    )
+    assert failed == [(1,)]
+    decided = _sql(api_db, "SELECT count(*) FROM audit_log WHERE action = 'route.decided'")
+    assert decided == [(1 if handed_off_now else 0,)]
+
+
+def test_a_database_error_puts_no_message_text_in_the_logs(
+    capsys: pytest.CaptureFixture[str],
+    app_container: Container,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A real database error on the INSERT of the message: the stored body gets a NUL, which
+    # Postgres refuses. The error text would carry the bound values without hide_parameters.
+    real_add = MessageRepository.add
+
+    async def add_with_nul(self: MessageRepository, **kwargs: Any) -> Message:  # noqa: ANN401
+        return await real_add(self, **{**kwargs, "body": kwargs["body"] + "\x00"})
+
+    monkeypatch.setattr(MessageRepository, "add", add_with_nul)
+    app = TestClient(
+        create_app(app_container), base_url="https://testserver", raise_server_exceptions=False
+    )
+    client = _login(app)
+    private_text = "my landlord Bartholomew owes me rent"
+    response = client.post("/api/v1/tickets", json={"message": private_text}, headers=_key())
+    assert response.status_code == 500
+    assert response.json()["code"] == "internal_error"
+    assert private_text not in response.text
+    logs = capsys.readouterr().out
+    assert "request.unhandled_error" in logs
+    assert "Bartholomew" not in logs
+    assert _sql(api_db, "SELECT count(*) FROM tickets") == [(0,)]
+
+
+# --- feedback idempotency --------------------------------------------------------------------
+
+
+def test_feedback_twice_is_stored_once(
+    app_client: TestClient, api_db: tuple[str, str], customers: dict[str, uuid.UUID]
+) -> None:
+    client = _login(app_client)
+    ticket_id = _new_ticket(client)["ticket_id"]
+    message_id = _assistant_message(api_db, ticket_id)
+    path = f"/api/v1/tickets/{ticket_id}/feedback"
+    first = client.post(path, json={"message_id": message_id, "rating": "up"})
+    second = client.post(path, json={"message_id": message_id, "rating": "down"})
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert _sql(api_db, "SELECT rating FROM feedback") == [("up",)]
+    created = _sql(api_db, "SELECT count(*) FROM audit_log WHERE action = 'feedback.created'")
+    assert created == [(1,)]
+
+
+def test_feedback_comment_with_a_card_is_audited(
+    app_client: TestClient, api_db: tuple[str, str], customers: dict[str, uuid.UUID]
+) -> None:
+    client = _login(app_client)
+    ticket_id = _new_ticket(client)["ticket_id"]
+    message_id = _assistant_message(api_db, ticket_id)
+    response = client.post(
+        f"/api/v1/tickets/{ticket_id}/feedback",
+        json={"message_id": message_id, "rating": "down", "comment": f"card {TEST_CARD}"},
+    )
+    feedback_id = response.json()["id"]
+    masked = _sql(
+        api_db,
+        "SELECT entity_type, entity_id, details FROM audit_log WHERE action = 'guardrail.masked'",
+    )
+    assert masked == [("feedback", feedback_id, {"counts": {"PAN": 1}, "failed": False})]
+
+
+def test_feedback_without_card_data_writes_no_masking_record(
+    app_client: TestClient, api_db: tuple[str, str], customers: dict[str, uuid.UUID]
+) -> None:
+    client = _login(app_client)
+    ticket_id = _new_ticket(client)["ticket_id"]
+    message_id = _assistant_message(api_db, ticket_id)
+    client.post(
+        f"/api/v1/tickets/{ticket_id}/feedback",
+        json={"message_id": message_id, "rating": "up", "comment": "very clear, thanks"},
+    )
+    assert _sql(api_db, "SELECT count(*) FROM audit_log WHERE action = 'guardrail.masked'") == [
+        (0,)
+    ]

@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Query, Request
+from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.sse import EventSourceResponse, format_sse_event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,13 +139,18 @@ def _event(name: str, data: Any) -> bytes:  # noqa: ANN401 - any JSON-ready valu
     return format_sse_event(event=name, data_str=json.dumps(data, separators=(",", ":")))
 
 
-def _stream(ticket_id: uuid.UUID, message: MessageOut) -> EventSourceResponse:
+def _stream(
+    ticket_id: uuid.UUID, message: MessageOut, status: TicketStatus | None = None
+) -> EventSourceResponse:
+    """`status` is sent as `ticket.status` when this request handed the ticket to a human."""
     created = TicketCreatedEvent(ticket_id=ticket_id, message=message).model_dump(mode="json")
     placeholder = _placeholder().model_dump(mode="json")
 
     async def events() -> AsyncIterator[bytes]:
         yield _event("ticket.created", created)
         yield _event("message", placeholder)
+        if status is not None:
+            yield _event("ticket.status", {"status": status.value})
         yield _event("done", {})
 
     # No buffering in proxies, no caching: the events must reach the browser as they are sent.
@@ -235,21 +240,60 @@ async def _audit_message(
         entity_id=ticket_id,
         details={"message_id": message_id},
     )
-    if masked.counts:
+    await _audit_masking(session, masked, entity_type="message", entity_id=message_id)
+
+
+async def _audit_masking(
+    session: AsyncSession, masked: MaskResult, *, entity_type: str, entity_id: uuid.UUID
+) -> None:
+    """`guardrail.masked` when something was masked, and also when masking failed: then every
+    digit was replaced and the counts are unknown, and the failure must leave a trace."""
+    if masked.counts or masked.failed:
         await record(
             session,
             actor_type=ActorType.SYSTEM,
             actor_id=None,
             action="guardrail.masked",
-            entity_type="message",
-            entity_id=message_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
             details={"counts": dict(masked.counts), "failed": masked.failed},
         )
 
 
+async def _change_status_or_409(
+    session: AsyncSession, ticket: Ticket, target: TicketStatus
+) -> None:
+    try:
+        await TicketRepository(session).change_status(ticket, target)
+    except ConcurrentUpdateError:
+        raise ProblemError(409, "conflict", "The ticket changed. Please try again.") from None
+
+
+async def _hand_off_after_mask_failure(
+    session: AsyncSession, ticket: Ticket, masked: MaskResult
+) -> TicketStatus | None:
+    """On any error the ticket goes to a human (AGENTS.md): a failed mask hands it off with
+    reason `system_error`. A ticket that already waits for a human keeps its status."""
+    if not masked.failed or ticket.status not in (TicketStatus.PROCESSING, TicketStatus.ANSWERED):
+        return None
+    ticket.last_route = Route.HANDOFF
+    ticket.route_reasons = ["system_error"]
+    await _change_status_or_409(session, ticket, TicketStatus.HANDED_OFF)
+    await record(
+        session,
+        actor_type=ActorType.SYSTEM,
+        actor_id=None,
+        action="route.decided",
+        entity_type="ticket",
+        entity_id=ticket.id,
+        details={"route": Route.HANDOFF.value, "reasons": ["system_error"]},
+    )
+    return TicketStatus.HANDED_OFF
+
+
 async def _save_or_replay(
     session: AsyncSession,
-    save: Callable[[], Awaitable[Message]],
+    save: Callable[[], Awaitable[tuple[Message, TicketStatus | None]]],
     scoped_key: str,
     *,
     ticket_id: uuid.UUID | None,
@@ -261,14 +305,14 @@ async def _save_or_replay(
 
     `ticket_id` is passed as a value: the rollback expires every loaded object."""
     try:
-        message = await save()
+        message, status = await save()
     except IntegrityError:
         await session.rollback()
         stored = await MessageRepository(session).get_by_idempotency_key(scoped_key)
         if stored is None:
             raise
         return await _replay(session, stored, expected_ticket_id=ticket_id, masked_body=masked_body)
-    return _stream(message.ticket_id, await _message_out(session, message))
+    return _stream(message.ticket_id, await _message_out(session, message), status)
 
 
 def _masked_entities(masked: MaskResult) -> dict[str, int]:
@@ -304,7 +348,7 @@ async def create_ticket(
 
     customer_id = customer.id
 
-    async def save() -> Message:
+    async def save() -> tuple[Message, TicketStatus | None]:
         ticket = await TicketRepository(session).create(
             customer_id=customer_id, ai_disclosed_at=datetime.now(UTC)
         )
@@ -323,8 +367,9 @@ async def create_ticket(
             masked=masked,
             action="ticket.created",
         )
+        status = await _hand_off_after_mask_failure(session, ticket, masked)
         await session.commit()
-        return message
+        return message, status
 
     return await _save_or_replay(session, save, scoped_key, ticket_id=None, masked_body=masked.text)
 
@@ -353,7 +398,7 @@ async def add_message(
 
     customer_id, ticket_id = customer.id, ticket.id
 
-    async def save() -> Message:
+    async def save() -> tuple[Message, TicketStatus | None]:
         message = await messages.add(
             ticket_id=ticket_id,
             role=MessageRole.CUSTOMER,
@@ -361,15 +406,11 @@ async def add_message(
             masked_entities=_masked_entities(masked),
             idempotency_key=scoped_key,
         )
-        if ticket.status == TicketStatus.ANSWERED:
+        status = await _hand_off_after_mask_failure(session, ticket, masked)
+        if status is None and ticket.status == TicketStatus.ANSWERED:
             # AI owns → a new run (phase 6); human owns → the operator queue.
             target = TicketStatus.HANDED_OFF if _human_owns(ticket) else TicketStatus.PROCESSING
-            try:
-                await TicketRepository(session).change_status(ticket, target)
-            except ConcurrentUpdateError:
-                raise ProblemError(
-                    409, "conflict", "The ticket changed. Please try again."
-                ) from None
+            await _change_status_or_409(session, ticket, target)
         await _audit_message(
             session,
             customer_id=customer_id,
@@ -379,7 +420,7 @@ async def add_message(
             action="message.received",
         )
         await session.commit()
-        return message
+        return message, status
 
     return await _save_or_replay(
         session, save, scoped_key, ticket_id=ticket_id, masked_body=masked.text
@@ -443,10 +484,7 @@ async def request_human(
     if ticket.status in (TicketStatus.PROCESSING, TicketStatus.ANSWERED):
         ticket.last_route = Route.HANDOFF
         ticket.route_reasons = ["customer_request"]
-        try:
-            await TicketRepository(session).change_status(ticket, TicketStatus.HANDED_OFF)
-        except ConcurrentUpdateError:
-            raise ProblemError(409, "conflict", "The ticket changed. Please try again.") from None
+        await _change_status_or_409(session, ticket, TicketStatus.HANDED_OFF)
         await record(
             session,
             actor_type=ActorType.CUSTOMER,
@@ -464,19 +502,36 @@ async def request_human(
 async def give_feedback(
     ticket_id: uuid.UUID,
     body: FeedbackIn,
+    response: Response,
     customer: CustomerDep,
     session: SessionDep,
 ) -> FeedbackOut:
+    """One rating per AI message. A repeated request (a double click) returns the first rating
+    with 200 and stores nothing; the message row is locked, so two concurrent requests cannot
+    both insert."""
     ticket = await _ticket_or_404(session, ticket_id, customer)
-    message = await MessageRepository(session).get_in_ticket(ticket.id, body.message_id)
+    message = await MessageRepository(session).get_in_ticket(
+        ticket.id, body.message_id, for_update=True
+    )
     if message is None:
         raise ProblemError(404, "not_found", "Message not found in this ticket.")
     if not message.is_ai_generated:
         raise ProblemError(422, "not_ai_message", "Only answers of the AI assistant can be rated.")
+    feedbacks = FeedbackRepository(session)
+    existing = await feedbacks.get_for_message(message.id)
+    if existing is not None:
+        existing_id = existing.id  # read first: the rollback expires every loaded object
+        await session.rollback()  # releases the row lock; nothing was written
+        response.status_code = 200
+        return FeedbackOut(id=existing_id)
+
     # The comment is customer text like a message: masked before it is stored.
-    comment = mask(body.comment).text if body.comment else None
-    feedback = await FeedbackRepository(session).add(
-        ticket_id=ticket.id, message_id=message.id, rating=body.rating, comment=comment
+    masked = mask(body.comment) if body.comment else None
+    feedback = await feedbacks.add(
+        ticket_id=ticket.id,
+        message_id=message.id,
+        rating=body.rating,
+        comment=masked.text if masked else None,
     )
     await record(
         session,
@@ -487,5 +542,7 @@ async def give_feedback(
         entity_id=message.id,
         details={"feedback_id": feedback.id, "rating": body.rating.value},
     )
+    if masked is not None:
+        await _audit_masking(session, masked, entity_type="feedback", entity_id=feedback.id)
     await session.commit()
     return FeedbackOut(id=feedback.id)

@@ -110,17 +110,23 @@ class TicketRepository:
         The only way to change a status: a flush with any other status change raises
         `StatusChangeRefusedError` (`hub.db.models`)."""
         ticket.status = check_transition(ticket.status, target)
-        approve_status_change(self._session.info, ticket.id, target)
+        # connection() begins a transaction when none is open, so the approval below always
+        # belongs to one and is dropped with it.
+        await self._session.connection()
+        approve_status_change(self._session.sync_session, ticket.id, target)
         await self.save(ticket)
         return ticket
 
     async def save(self, ticket: Ticket) -> None:
         """Flush pending changes (of the ticket and anything else in the session); the version
         check runs here. A changed status is refused unless it came from `change_status`."""
+        # Read before the flush: a failed flush expires the object, and reading it then raises
+        # PendingRollbackError instead of the error below.
+        ticket_id = ticket.id
         try:
             await self._session.flush()
         except StaleDataError as exc:
-            raise ConcurrentUpdateError(f"ticket {ticket.id} was changed by someone else") from exc
+            raise ConcurrentUpdateError(f"ticket {ticket_id} was changed by someone else") from exc
 
 
 class MessageRepository:
@@ -181,10 +187,15 @@ class MessageRepository:
         )
         return result.scalars().all()
 
-    async def get_in_ticket(self, ticket_id: uuid.UUID, message_id: uuid.UUID) -> Message | None:
-        result = await self._session.execute(
-            select(Message).where(Message.id == message_id, Message.ticket_id == ticket_id)
-        )
+    async def get_in_ticket(
+        self, ticket_id: uuid.UUID, message_id: uuid.UUID, *, for_update: bool = False
+    ) -> Message | None:
+        """`for_update` locks the row until the transaction ends (serialises writers that
+        depend on this message, e.g. one feedback per message)."""
+        statement = select(Message).where(Message.id == message_id, Message.ticket_id == ticket_id)
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
 
@@ -227,3 +238,13 @@ class FeedbackRepository:
         self._session.add(feedback)
         await self._session.flush()
         return feedback
+
+    async def get_for_message(self, message_id: uuid.UUID) -> Feedback | None:
+        """The first feedback on a message (the API stores at most one)."""
+        result = await self._session.execute(
+            select(Feedback)
+            .where(Feedback.message_id == message_id)
+            .order_by(Feedback.created_at, Feedback.id)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()

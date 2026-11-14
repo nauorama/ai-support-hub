@@ -28,7 +28,15 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, Mapper, mapped_column, object_session
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Mapper,
+    Session,
+    SessionTransaction,
+    mapped_column,
+    object_session,
+)
 from sqlalchemy.types import TypeDecorator
 from uuid_utils.compat import uuid7
 
@@ -193,8 +201,12 @@ class StatusChangeRefusedError(Exception):
     """A ticket status was changed without `TicketRepository.change_status`."""
 
 
-def approve_status_change(info: dict[Any, Any], ticket_id: uuid.UUID, target: TicketStatus) -> None:
-    info.setdefault(APPROVED_STATUS_KEY, {})[ticket_id] = target
+def approve_status_change(session: Session, ticket_id: uuid.UUID, target: TicketStatus) -> None:
+    """Record that `change_status` checked this change. Only inside an open transaction: the
+    approval is dropped when that transaction commits or rolls back, so it cannot outlive it."""
+    if not session.in_transaction():
+        raise RuntimeError("a status change can only be approved inside a transaction")
+    session.info.setdefault(APPROVED_STATUS_KEY, {})[ticket_id] = target
 
 
 @event.listens_for(Ticket, "before_insert")
@@ -218,6 +230,24 @@ def _refuse_unapproved_status(
         raise StatusChangeRefusedError(
             f"ticket {target.id}: change the status with TicketRepository.change_status"
         )
+
+
+def _forget_approvals(session: Session) -> None:
+    session.info.pop(APPROVED_STATUS_KEY, None)
+
+
+# An approval lives only until the end of the transaction it was made in. Without this, an
+# approval left by a failed flush (change_status → error → rollback) would let a later direct
+# status change through in the same session. `after_soft_rollback` fires for every rollback,
+# savepoints and the flush's own inner rollback included.
+@event.listens_for(Session, "after_soft_rollback")
+def _forget_approvals_on_rollback(session: Session, _previous: SessionTransaction) -> None:
+    _forget_approvals(session)
+
+
+@event.listens_for(Session, "after_commit")
+def _forget_approvals_on_commit(session: Session) -> None:
+    _forget_approvals(session)
 
 
 class Message(Base):
