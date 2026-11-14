@@ -35,12 +35,12 @@ INTERNAL_ONLY_PHRASES = (
     "sanctions screening",
     "suspicious activity report",
     "tipping-off",
-    "tipping off",
-    "restriction_reason",
     "restriction reason",
     "goodwill",
+    "good will",
     "supervisor",
     "support-escalations",
+    "slack",
     "jira",
     "on-call",
     "fraud analyst",
@@ -56,6 +56,8 @@ _FRONT_MATTER = re.compile(r"\A---\n(?P<yaml>.*?\n)---\n(?P<body>.*)\Z", re.DOTA
 _H1 = re.compile(r"^# ", re.MULTILINE)
 _SECTION = re.compile(r"^## +\S", re.MULTILINE)
 _LIST_NUMBER = re.compile(r"^\d+[.)]$")
+_PHRASE_WORD_GAP = re.compile(r"[\s_-]+")
+_TEXT_WORD_GAP = r"[\s_*-]+"
 
 Text = Annotated[str, Field(min_length=1, max_length=200)]
 LongText = Annotated[str, Field(min_length=1, max_length=1000)]
@@ -166,15 +168,22 @@ def word_count(body: str) -> int:
 def internal_phrases(text: str, extra: tuple[str, ...] = ()) -> list[str]:
     """The internal-only phrases that occur in the text.
 
-    Case-insensitive; a phrase must start a word but may continue it ("sanction" also finds
-    "sanctioned"), so a plural or another word form does not slip through.
+    Case-insensitive. Words of a phrase may be separated by any run of spaces, line breaks,
+    hyphens, underscores or Markdown emphasis (`*`), so "restriction reason" also finds
+    "restriction_reason", "**restriction** reason" and a phrase split across lines. A phrase
+    must start a word (after a letter or digit it does not count) but may continue it
+    ("sanction" also finds "sanctioned"), so a plural or another word form does not slip
+    through.
     """
     lowered = text.lower()
     return [
-        phrase
-        for phrase in (*INTERNAL_ONLY_PHRASES, *extra)
-        if re.search(rf"(?<![\w-]){re.escape(phrase)}", lowered)
+        phrase for phrase in (*INTERNAL_ONLY_PHRASES, *extra) if _phrase(phrase).search(lowered)
     ]
+
+
+def _phrase(phrase: str) -> re.Pattern[str]:
+    words = (re.escape(word) for word in _PHRASE_WORD_GAP.split(phrase))
+    return re.compile(r"(?<![a-z0-9])" + _TEXT_WORD_GAP.join(words))
 
 
 def error_codes_in(text: str) -> set[str]:

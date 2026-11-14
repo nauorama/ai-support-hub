@@ -26,7 +26,9 @@ Do not tell the customer the goodwill limit or that a supervisor approval exists
 
 ## Replacement cards
 
-A replacement card is a new delivery and the delivery fee applies (€9.90 standard, €24.90 express). Waiving it is a goodwill refund and follows the €25 rule.
+When a lost or stolen card is replaced, the replacement is a new delivery and the delivery fee applies (€9.90 standard, €24.90 express). Waiving it is a goodwill refund and follows the €25 rule.
+
+For a card that was never delivered, the operator decides about the fee.
 
 ## What to tell the customer
 

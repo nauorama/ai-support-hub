@@ -97,7 +97,7 @@ Business days are Monday–Friday without the closing days of the euro payment s
 - Unauthorised transactions: the customer must report them within 13 months. Support freezes the card and opens a fraud case. Only humans handle fraud cases.
 - Formal complaints get a written final answer within 15 business days (EU payment-services rule). Only humans handle complaints.
 - Supported ID documents: passport, national ID card, driving licence (EU/UK only). Proof of address: utility bill or bank statement not older than 3 months.
-- Countries where Tallybridge does not open accounts: countries under EU sanctions (the article lists them as "sanctioned countries" without names).
+- Countries where Tallybridge does not open accounts: countries under EU sanctions. No customer text mentions sanctions: it says only that Tallybridge cannot open or serve accounts in some countries, with no names (owner decision, P2-08).
 
 ## 7. Error codes
 

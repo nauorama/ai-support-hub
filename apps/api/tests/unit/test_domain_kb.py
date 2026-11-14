@@ -149,6 +149,23 @@ def test_an_internal_article_may_use_internal_phrases() -> None:
         ("A formal complaint", []),
         ("Our support team replies", []),
         ("example", []),  # "aml" inside a word is not a hit
+        # Variants found in review (P2-08): line breaks, emphasis, other separators.
+        ("the restriction\nreason", ["restriction reason"]),
+        ("the restriction  reason", ["restriction reason"]),
+        ("the **restriction** reason", ["restriction reason"]),
+        ("a restriction_reason field", ["restriction reason"]),
+        ("_restriction_ reason", ["restriction reason"]),
+        ("tipping\noff", ["tipping-off"]),
+        ("tipping off", ["tipping-off"]),
+        ("fraud\nanalyst", ["fraud analyst"]),
+        ("fraud-analyst", ["fraud analyst"]),
+        ("on call", ["on-call"]),
+        ("support escalations", ["support-escalations"]),
+        ("good will", ["good will"]),
+        ("team-supervisor", ["supervisor"]),
+        ("Post it in Slack", ["slack"]),
+        ("Escalate to the team", []),
+        ("Contact support. Escalations are rare.", []),  # a full stop is not a word gap
     ],
 )
 def test_internal_phrases(text: str, found: list[str]) -> None:

@@ -23,9 +23,16 @@ Until the check is finished, you can only:
 ## How to finish the check
 
 1. Open the app.
-2. Upload an ID document: passport, national ID card, or driving licence (EU or UK only).
-3. Take a selfie.
-4. Wait for the review. It takes 1–2 business days.
+2. Upload the documents for your tier:
+   - **Starter:** an ID document (passport, national ID card, or driving licence from the EU or UK only) and a selfie.
+   - **Verified:** the Starter documents, plus proof of address and proof of source of income.
+   - **Business:** company documents and details of the owners (KYB).
+3. Wait for the review.
+
+## How long the review takes
+
+- KYC review (Starter, Verified): 1–2 business days.
+- KYB review (Business): 3–5 business days.
 
 Our Compliance team reviews your documents and makes the decision.
 

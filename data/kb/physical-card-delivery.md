@@ -34,4 +34,4 @@ If you think someone else has your card, freeze it in the app at once.
 
 ## Replacement cards
 
-A replacement card, for example after a card was lost or stolen, is a new delivery. The delivery fee applies again: €9.90 standard or €24.90 express.
+When a lost or stolen card is replaced, the replacement is a new delivery. The delivery fee applies: €9.90 standard or €24.90 express.

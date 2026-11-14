@@ -35,4 +35,4 @@ The card fees above are set in EUR. When we take them from your USD or GBP balan
 
 ## Replacement cards
 
-A replacement card is a new delivery. The delivery fee applies again: €9.90 standard or €24.90 express.
+When a lost or stolen card is replaced, the replacement is a new delivery. The delivery fee applies: €9.90 standard or €24.90 express.

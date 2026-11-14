@@ -16,9 +16,6 @@ During the review, our team may contact you and ask for documents. A review typi
 
 1. Check your messages in the app and your email regularly.
 2. If our team asks for documents, upload them as soon as you can.
-3. Wait for our team to contact you.
-
-A person from our team handles your case.
 
 ## How long it takes
 
