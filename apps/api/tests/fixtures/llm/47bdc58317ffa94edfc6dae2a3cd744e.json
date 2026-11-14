@@ -1,0 +1,36 @@
+{
+  "request": {
+    "kind": "chat",
+    "model": "openai/gpt-6-luna",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You sort support tickets of a payments company. Reply with one word: the topic of the ticket."
+      },
+      {
+        "role": "user",
+        "content": "<ticket>How long does a SEPA withdrawal to my bank take?</ticket>"
+      }
+    ],
+    "texts": [],
+    "max_tokens": 400,
+    "params": {
+      "reasoning_effort": "none"
+    },
+    "schema_name": null,
+    "json_schema": null,
+    "tools": null
+  },
+  "response": {
+    "content": "withdrawal_issue",
+    "tool_calls": [],
+    "vectors": [],
+    "usage": {
+      "input_tokens": 48,
+      "output_tokens": 4,
+      "cached_tokens": 0,
+      "cache_write_tokens": 0
+    }
+  },
+  "recorded": "synthetic"
+}

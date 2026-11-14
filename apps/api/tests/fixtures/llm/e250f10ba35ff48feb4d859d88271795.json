@@ -1,0 +1,38 @@
+{
+  "request": {
+    "kind": "embedding",
+    "model": "openai/text-embedding-3-small",
+    "messages": [],
+    "texts": [
+      "How long does a SEPA withdrawal take?"
+    ],
+    "max_tokens": null,
+    "params": {},
+    "schema_name": null,
+    "json_schema": null,
+    "tools": null
+  },
+  "response": {
+    "content": null,
+    "tool_calls": [],
+    "vectors": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "usage": {
+      "input_tokens": 9,
+      "output_tokens": 0,
+      "cached_tokens": 0,
+      "cache_write_tokens": 0
+    }
+  },
+  "recorded": "synthetic"
+}

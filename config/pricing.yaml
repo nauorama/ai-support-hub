@@ -1,0 +1,43 @@
+# Model prices in USD per million tokens (docs/operations.md §4). Read by hub/llm/pricing.py,
+# which computes `llm_calls.cost_usd` for every call. A price change is a new `checked` date.
+#
+# A model has one or more tiers. A tier applies while the request's prompt (all input tokens,
+# cache reads and cache writes included) is at most `max_prompt_tokens`; the last tier has no
+# limit. Each request is priced on its own.
+#
+# input:        input tokens that were neither read from nor written to the cache
+# cached_input: cache reads (cache hits)
+# cache_write:  cache writes (Anthropic: 5-minute cache)
+# output:       output tokens, thinking / reasoning tokens included
+
+checked: 2026-11-14
+
+models:
+  anthropic/claude-haiku-5-5:
+    source: https://platform.claude.com/docs/en/about-claude/pricing
+    # "a request whose prompt is over 100,000 tokens pays higher prices" (long-context pricing)
+    tiers:
+      - {max_prompt_tokens: 100000, input: 0.10, cached_input: 0.01, cache_write: 0.125, output: 0.50}
+      - {input: 0.50, cached_input: 0.05, cache_write: 0.625, output: 2.50}
+  anthropic/claude-sonnet-5-5:
+    source: https://platform.claude.com/docs/en/about-claude/pricing
+    tiers:
+      - {input: 2.00, cached_input: 0.10, cache_write: 2.50, output: 10.00}
+  openai/gpt-6-luna:
+    source: https://developers.openai.com/api/docs/pricing
+    # Prompts over 272K input tokens: 2x input and cached input, 1.5x output.
+    tiers:
+      - {max_prompt_tokens: 272000, input: 0.10, cached_input: 0.01, cache_write: 0.125, output: 0.50}
+      - {input: 0.20, cached_input: 0.02, cache_write: 0.25, output: 0.75}
+  openai/gpt-6.1-sol:
+    source: https://developers.openai.com/api/docs/pricing
+    # Input, cached input and output from the pricing page. The cache-write price and the
+    # long-prompt tier were not confirmed on an OpenAI page; they come from LiteLLM 1.108.6's
+    # price map and follow the page's pattern for Luna (cache write 1.25x input; 2x / 1.5x tier).
+    tiers:
+      - {max_prompt_tokens: 272000, input: 2.00, cached_input: 0.10, cache_write: 2.50, output: 10.00}
+      - {input: 4.00, cached_input: 0.20, cache_write: 5.00, output: 15.00}
+  openai/text-embedding-3-small:
+    source: https://developers.openai.com/api/docs/pricing
+    tiers:
+      - {input: 0.02, cached_input: 0.02, output: 0.00}

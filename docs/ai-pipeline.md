@@ -281,18 +281,23 @@ Contract of each prompt:
 
 `config/models.yaml` maps roles to models, so a model change is a config change plus an eval run.
 
-```yaml
-roles:
-  triage:   {model: anthropic/claude-haiku-5-5,  fallback: openai/<small model>,  max_tokens: 400,  temperature: 0}
-  research: {model: anthropic/claude-sonnet-5-5, fallback: openai/<strong model>, max_tokens: 800,  temperature: 0}
-  write:    {model: anthropic/claude-sonnet-5-5, fallback: openai/<strong model>, max_tokens: 900,  temperature: 0.2}
-  verify:   {model: anthropic/claude-haiku-5-5,  fallback: openai/<small model>,  max_tokens: 700,  temperature: 0}
-  judge:    {model: openai/<strong model>,       max_tokens: 800, temperature: 0}   # other provider than the writer
-  embedding: {model: openai/text-embedding-3-small}
-prompts: {triage: v1, research: v1, write: v1, verify: v1, handoff_summary: v1, memory_summary: v1}
-```
+| Role | Model | Fallback | max_tokens | Notes |
+|---|---|---|---|---|
+| `triage` | `anthropic/claude-haiku-5-5` | `openai/gpt-6-luna` | 400 | Haiku: thinking off. Luna: `reasoning_effort: none` |
+| `research` | `anthropic/claude-sonnet-5-5` | `openai/gpt-6-luna` | 800 | the only role that gets tools; Luna calls tools in Chat Completions only at effort `none` |
+| `write` | `anthropic/claude-sonnet-5-5` | `openai/gpt-6.1-sol` | 900 | Sonnet: thinking `between_tools`, effort `low`. Sol: effort `low`, never tools |
+| `verify` | `anthropic/claude-haiku-5-5` | `openai/gpt-6-luna` | 700 | as triage |
+| `judge` | `openai/gpt-6.1-sol` | none | 800 | another provider than the writer, so no fallback |
+| `embedding` | `openai/text-embedding-3-small` | none | — | no fallback: vectors of another model cannot be mixed with the index |
 
-The builder fills the `<…>` names and checks all model ids and parameters against the provider documentation at build time (some parameters, for example `temperature`, are not accepted by every model). Prices go to `config/pricing.yaml` from the official pricing pages, with the date.
+Prompts: `triage`, `research`, `write`, `verify`, `handoff_summary`, `memory_summary` — all `v1`.
+
+Checked against the provider documentation on 2026-11-14 (sources in the file). Rules that shaped the table:
+- Claude Haiku 5.5 and Sonnet 5.5 reject `temperature`, so no role sends it (the earlier plan had 0 and 0.2). Thinking counts toward `max_tokens` and is billed as output: Haiku runs with thinking off; Sonnet 5.5 cannot turn thinking off and runs `between_tools` with effort `low`.
+- GPT-6.1 Sol has no tool calling in Chat Completions (which LiteLLM uses). The loader refuses a configuration that could give tools to a model that cannot take them.
+- Role parameters are limited to `thinking` and `reasoning_effort`; connection parameters (`api_base`, keys) never come from the file.
+
+Every role has a timeout (`timeout_s`); the gateway makes 2 retries with backoff (0.5 s, 1 s) on transient errors (timeout, rate limit, connection, 5xx), then tries the fallback the same way. Prices go to `config/pricing.yaml` from the official pricing pages, with the date; a model without a price stops the app at start.
 
 ## 9. Memory
 

@@ -118,6 +118,16 @@ def test_evals_and_mcp_server_rule_has_its_contract() -> None:
     assert set(contract["modules"]) == {"hub_evals", "support_tools"}
 
 
+def test_litellm_rule_has_its_contract() -> None:
+    assert "- Only `llm/gateway.py` imports `litellm`" in _module_rules()
+    assert _config()["include_external_packages"] is True
+    contract = _contracts()["only-gateway-imports-litellm"]
+    assert contract["type"] == "forbidden"
+    # Every root package, with all its descendants: a new module is covered without a change here.
+    assert set(contract["source_modules"]) == set(PACKAGES)
+    assert contract["forbidden_modules"] == ["litellm"]
+
+
 def test_every_contract_comes_from_a_design_rule() -> None:
     # A contract without a rule in design §8 is a rule nobody agreed to.
     assert set(_contracts()) == {
@@ -125,14 +135,28 @@ def test_every_contract_comes_from_a_design_rule() -> None:
         "services-not-api-graph",
         "api-mcp-independent",
         "evals-mcp-independent",
+        "only-gateway-imports-litellm",
     }
+
+
+# The litellm rule is about direct imports: every caller of the gateway reaches litellm through
+# it, so indirect imports are allowed, and the gateway's own import is the one ignored import.
+# These exact values are the only exception; anything wider would switch the rule off.
+LITELLM_EXCEPTION = {
+    "ignore_imports": ["hub.llm.gateway -> litellm"],
+    "allow_indirect_imports": True,
+}
 
 
 def test_no_contract_is_weakened() -> None:
     # Ignored imports or allowed indirect imports would quietly switch a rule off (never-do 6).
     for contract_id, contract in _contracts().items():
+        allowed = LITELLM_EXCEPTION if contract_id == "only-gateway-imports-litellm" else {}
         for option in ("ignore_imports", "allow_indirect_imports", "as_packages"):
-            assert option not in contract, f"{contract_id} sets {option}"
+            if option in allowed:
+                assert contract[option] == allowed[option], f"{contract_id} widens {option}"
+            else:
+                assert option not in contract, f"{contract_id} sets {option}"
 
 
 # --- the contracts pass on the repository and fail on wrong imports ----------------------------
@@ -186,6 +210,21 @@ VIOLATIONS: list[tuple[str, list[Plant], set[str]]] = [
         [("support_tools", "import hub_evals")],
         {"evals-mcp-independent"},
     ),
+    *[
+        (
+            f"{package}->litellm",
+            [(package, statement)],
+            {"only-gateway-imports-litellm"},
+        )
+        for package, statement in [
+            ("hub/llm", "import litellm"),  # another module of the same package
+            ("hub/graph", "from litellm import acompletion"),
+            ("hub/kb", "import litellm.main"),
+            ("hub", "import litellm"),
+            ("hub_evals", "import litellm"),
+            ("support_tools", "import litellm"),
+        ]
+    ],
 ]
 
 
@@ -217,6 +256,8 @@ def test_imports_the_design_allows_keep_every_contract(tmp_path: Path) -> None:
         # forbid that. _planted_6.py is the plant on the next line.
         ("hub/domain", "from hub.domain import _planted_6"),
         ("hub/domain", "X = 1"),
+        # Reaching litellm through the gateway is the point of the gateway.
+        ("hub/graph", "from hub.llm import gateway"),
     ]
     returncode, broken = _lint_copy(tmp_path, allowed)
     assert broken == set()

@@ -134,7 +134,7 @@ One execution of the workflow for one customer message.
 | total_cost_usd | numeric(10,6) | sum of `llm_calls` |
 | input_tokens, output_tokens | int | |
 | latency_ms | int null | until the customer got a message |
-| error | text null | |
+| error | text null | error class and status code only, never provider text (it can echo the request) |
 | trace_id | text null | Langfuse trace |
 | started_at, finished_at | timestamptz | |
 
@@ -165,16 +165,16 @@ Own record of every model call. Source of truth for cost.
 | Column | Type | Note |
 |---|---|---|
 | id | uuid PK | |
-| run_id | uuid FK null | null for eval judges and background calls |
+| run_id | uuid FK null | null for eval judges, embeddings and background calls. The foreign key to `runs` is added in P3-05 (the table did not exist in P3-01) |
 | context | text | `online` \| `eval` \| `memory` |
-| node | text | `triage`, `research`, `write`, `verify`, `handoff_prep`, `memory_summary`, `judge` |
+| node | text | `triage`, `research`, `write`, `verify`, `handoff_prep`, `memory_summary`, `judge`, `embedding` |
 | model | text | provider model id |
-| prompt_version | text | |
+| prompt_version | text null | null for embeddings (no prompt file) |
 | input_tokens, output_tokens, cached_tokens | int | |
 | cost_usd | numeric(10,6) | from `config/pricing.yaml` |
 | latency_ms | int | |
-| status | text | `ok` \| `retry` \| `error` \| `invalid_output` |
-| error | text null | |
+| status | text | `ok` \| `retry` \| `error` \| `invalid_output`. One row per attempt: a retried attempt is `retry`; a call blocked by G2 is `error` with `error = 'blocked: G2'` |
+| error | text null | error class and status code only, never provider text (it can echo the request) |
 
 Request and response bodies are **not** stored here. They are in the trace (masked, 30 days).
 

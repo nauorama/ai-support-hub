@@ -1,4 +1,4 @@
-"""SQLAlchemy models of the Postgres tables built in phase 2 (docs/data-model.md §1).
+"""SQLAlchemy models of the Postgres tables (docs/data-model.md §1): phase 2, `llm_calls` (P3-01).
 
 Conventions from the data model: primary keys are UUID v7 made in the application, timestamps
 are `timestamptz`, enums are text with a `CHECK` constraint, every table has `created_at`.
@@ -47,6 +47,9 @@ from hub.domain.enums import (
     CustomerTier,
     FeedbackRating,
     Intent,
+    LlmCallContext,
+    LlmCallStatus,
+    LlmNode,
     MessageRole,
     OperatorRole,
     Resolution,
@@ -367,3 +370,42 @@ class AuditLog(Base):
     )
     prev_hash: Mapped[str]
     hash: Mapped[str] = mapped_column(unique=True)
+
+
+class LlmCall(Base):
+    """One model call attempt, written by the LLM gateway (P3-01). Source of truth for cost.
+
+    Request and response bodies are never stored here (data model §1); `error` holds only the
+    error class and status code, never provider text, which can echo the request.
+    """
+
+    __tablename__ = "llm_calls"
+    __table_args__ = (
+        enum_check("context", LlmCallContext),
+        enum_check("node", LlmNode),
+        enum_check("status", LlmCallStatus),
+        CheckConstraint(
+            "input_tokens >= 0 AND output_tokens >= 0 AND cached_tokens >= 0", name="tokens"
+        ),
+        CheckConstraint("cost_usd >= 0", name="cost_usd"),
+        CheckConstraint("latency_ms >= 0", name="latency_ms"),
+        Index("ix_llm_calls_created_at", "created_at"),
+        Index("ix_llm_calls_run_id", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _id_column()
+    # No foreign key yet: `runs` is created in P3-05, whose migration adds it (build plan).
+    run_id: Mapped[uuid.UUID | None]
+    context: Mapped[LlmCallContext] = mapped_column(TextEnum(LlmCallContext))
+    node: Mapped[LlmNode] = mapped_column(TextEnum(LlmNode))
+    model: Mapped[str]
+    # Null for embeddings, which use no prompt file.
+    prompt_version: Mapped[str | None]
+    input_tokens: Mapped[int]
+    output_tokens: Mapped[int]
+    cached_tokens: Mapped[int]
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6))
+    latency_ms: Mapped[int]
+    status: Mapped[LlmCallStatus] = mapped_column(TextEnum(LlmCallStatus))
+    error: Mapped[str | None]
+    created_at: Mapped[datetime] = _created_at_column()

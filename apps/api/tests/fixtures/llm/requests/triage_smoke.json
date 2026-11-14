@@ -1,0 +1,7 @@
+{
+  "role": "triage",
+  "messages": [
+    {"role": "system", "content": "You sort support tickets of a payments company. Reply with one word: the topic of the ticket."},
+    {"role": "user", "content": "<ticket>How long does a SEPA withdrawal to my bank take?</ticket>"}
+  ]
+}
