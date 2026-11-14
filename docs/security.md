@@ -49,7 +49,7 @@ Method: for each data flow, what can go wrong (STRIDE as a checklist) plus the O
 | G6 | **Tool permissions** | `tools/permissions.py` | Allow-list per node, identity injection, argument validation, limits per ticket, approval requirement for side effects. |
 | G7 | **Output checks** | `guardrails/output_checks.py` | Citation validity, card patterns, placeholders, internal hashes and canaries, forbidden promises, prompt fragments, length, language. Runs on AI drafts **and** on operator-edited text (card patterns only). |
 | G8 | **Budget guard** | `llm/budget.py` | Sums today's `llm_calls.cost_usd`; when the limit is reached, online calls are refused. Evals have their own limit. |
-| G9 | **Log and trace filter** | `observability/` | The same masking function runs on every log record and trace payload. |
+| G9 | **Log and trace filter** | `observability/` | The same masking function runs on every log record and trace payload. A database error is logged only as its error class and constraint name: its text can hold row values (Postgres `DETAIL: Failing row contains (...)`), which no mask can clean. SQL parameters are hidden from error texts (`hide_parameters`). |
 
 Unit-test rule: G1, G2, G5, G6, G7 need ≥ 95% line coverage and property-based tests (Hypothesis) for masking: any valid Luhn number in any common format inside random text must be masked.
 
@@ -71,7 +71,7 @@ Unit-test rule: G1, G2, G5, G6, G7 need ≥ 95% line coverage and property-based
 
 ## 5. Audit log
 
-Events (each with actor, entity and masked details): `ticket.created`, `guardrail.masked`, `guardrail.blocked`, `triage.done`, `route.decided` (with reasons, confidence, features, versions), `tool.called`, `tool.denied`, `draft.created`, `draft.approved` / `edited` / `rejected`, `message.sent`, `ticket.claimed` / `closed`, `auth.login` / `login_failed` / `logout`, `settings.changed` (old and new value), `kb.reindexed`, `customer.erased`, `run.recovered`.
+Events (each with actor, entity and masked details): `ticket.created`, `message.received` (a customer message on an existing ticket), `feedback.created`, `auth.demo_session`, `guardrail.masked`, `guardrail.blocked`, `triage.done`, `route.decided` (with reasons, confidence, features, versions), `tool.called`, `tool.denied`, `draft.created`, `draft.approved` / `edited` / `rejected`, `message.sent`, `ticket.claimed` / `closed`, `auth.login` / `login_failed` / `logout`, `settings.changed` (old and new value), `kb.reindexed`, `customer.erased`, `run.recovered`.
 
 The hash chain makes changes visible: `GET /console/audit/verify` recomputes it. Masking (G1) covers the actor, action and entity fields as well as the details, numbers included. Only ids given as `uuid.UUID` objects are kept unmasked, so they stay searchable; a string is always masked, even one shaped like a UUID, because it can hold a card number (data model, `audit_log`). The log holds ids, codes and numbers — no names, no message text, no card data. It refers to a customer only by the internal UUID. Retention 5 years (configurable). Erasure does not touch the log: it anonymises the `customers` row, so the UUID no longer points to a person, and the hash chain stays valid.
 

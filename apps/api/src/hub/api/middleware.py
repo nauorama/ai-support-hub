@@ -31,13 +31,15 @@ def _reads_the_same_in_logs(request_id: str) -> bool:
     return not _LONG_DIGIT_RUN.search(request_id) and mask_text(request_id) == request_id
 
 
+# Hex digits 0-9a-f mapped to the letters a-p: a generated id has no digit at all.
+_HEX_TO_LETTERS = str.maketrans("0123456789abcdef", "abcdefghijklmnop")
+
+
 def _new_request_id() -> str:
-    # About 2% of uuid4 hex strings hold 13+ digits in a row, which api.md does not allow;
-    # draw again. Each draw fails with p ≈ 0.02, so this ends after one or two draws.
-    while True:
-        request_id = uuid.uuid4().hex
-        if _reads_the_same_in_logs(request_id):
-            return request_id
+    # Letters only: card masking (G1) and its failure fallback change digits, never letters, so
+    # a generated id always reads the same in the logs. No loop that waits for a lucky draw: one
+    # used to spin forever on the event loop when masking failed for every input.
+    return uuid.uuid4().hex.translate(_HEX_TO_LETTERS)
 
 
 def request_id_for(incoming: str | None) -> str:

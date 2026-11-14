@@ -12,6 +12,8 @@ import sys
 from collections.abc import MutableMapping
 from typing import Any
 
+import psycopg
+import sqlalchemy.exc
 import structlog
 import structlog.tracebacks
 from structlog.typing import EventDict, Processor, WrappedLogger
@@ -42,6 +44,61 @@ def mask_processor(_logger: WrappedLogger, _method: str, event_dict: EventDict) 
     return masked
 
 
+class DatabaseErrorSummary(Exception):
+    """Stands in for a database error in the logs: its class and constraint name only."""
+
+
+def _find_database_error(exc: BaseException | None, seen: set[int] | None = None) -> Any:  # noqa: ANN401
+    """The first database error in `exc`, its cause/context chain or exception groups."""
+    seen = set() if seen is None else seen
+    if exc is None or id(exc) in seen:
+        return None
+    seen.add(id(exc))
+    if isinstance(exc, sqlalchemy.exc.StatementError | psycopg.Error):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for inner in exc.exceptions:
+            found = _find_database_error(inner, seen)
+            if found is not None:
+                return found
+    return _find_database_error(exc.__cause__, seen) or _find_database_error(exc.__context__, seen)
+
+
+def _constraint_name(error: BaseException) -> str | None:
+    orig = error.orig if isinstance(error, sqlalchemy.exc.StatementError) else error
+    diag = getattr(orig, "diag", None)
+    name = getattr(diag, "constraint_name", None)
+    return name if isinstance(name, str) else None
+
+
+def database_error_processor(
+    _logger: WrappedLogger, _method: str, event_dict: EventDict
+) -> EventDict:
+    """Replace a database error with its class and constraint name before it is rendered.
+
+    The text of a database error can hold customer text: Postgres adds `DETAIL: Failing row
+    contains (...)` for CHECK and NOT NULL violations, with the values of the row, and
+    `hide_parameters` (hub/db/session.py) does not cover the server's detail. The frames stay
+    (file, line, function; locals are off), the messages of the whole chain go."""
+    exc_info = event_dict.get("exc_info")
+    if exc_info is True:
+        exc_info = sys.exc_info()
+    exc = exc_info if isinstance(exc_info, BaseException) else None
+    if isinstance(exc_info, tuple) and len(exc_info) == 3:
+        exc = exc_info[1]
+    error = _find_database_error(exc)
+    if error is None or exc is None:
+        return event_dict
+    error_class = f"{type(error).__module__}.{type(error).__qualname__}"
+    constraint = _constraint_name(error)
+    summary = DatabaseErrorSummary(f"{error_class} (constraint: {constraint or 'none'})")
+    summary.__suppress_context__ = True
+    event_dict["exc_info"] = (DatabaseErrorSummary, summary, exc.__traceback__)
+    event_dict["db_error_class"] = error_class
+    event_dict["db_constraint"] = constraint
+    return event_dict
+
+
 def _shared_processors() -> list[Processor]:
     return [
         structlog.contextvars.merge_contextvars,
@@ -63,6 +120,7 @@ def configure_logging(level: str) -> None:
         foreign_pre_chain=_shared_processors(),
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            database_error_processor,
             tracebacks,
             mask_processor,
             structlog.processors.JSONRenderer(),

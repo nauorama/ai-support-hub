@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from starlette.types import Message, Receive, Scope, Send
 
 from hub.api.middleware import RequestContextMiddleware, request_id_for
+from hub.guardrails import masking
+from hub.guardrails.masking import mask_text
 from hub.observability.logging import configure_logging
 
 MakeClient = Callable[..., TestClient]
@@ -19,7 +21,7 @@ LogLines = Callable[[], list[dict[str, Any]]]
 
 def test_request_id_is_generated(make_client: MakeClient) -> None:
     response = make_client().get("/health")
-    assert re.fullmatch(r"[0-9a-f]{32}", response.headers["x-request-id"])
+    assert re.fullmatch(r"[a-p]{32}", response.headers["x-request-id"])
 
 
 def test_each_request_gets_its_own_id(make_client: MakeClient) -> None:
@@ -50,7 +52,7 @@ def test_valid_incoming_id_is_kept(make_client: MakeClient) -> None:
     ],
 )
 def test_unsafe_incoming_id_is_replaced(incoming: str) -> None:
-    assert re.fullmatch(r"[0-9a-f]{32}", request_id_for(incoming))
+    assert re.fullmatch(r"[a-p]{32}", request_id_for(incoming))
 
 
 def test_log_line_names_the_request(make_client: MakeClient, log_lines: LogLines) -> None:
@@ -132,14 +134,28 @@ def test_error_after_the_response_started_is_logged_not_raised(
     assert (completed["status"], completed["outcome"]) == (200, "error")
 
 
-def test_generated_id_is_drawn_again_when_the_mask_would_change_it(
+def test_generated_id_has_no_digits_even_from_a_digit_heavy_uuid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     digit_heavy = uuid.UUID("12345678-9012-3456-7890-abcdefabcdef")  # 20 digits in a row
-    clean = uuid.UUID("abcdefab-cdef-4bcd-8fab-cdefabcdefab")
-    draws = iter([digit_heavy, clean])
-    monkeypatch.setattr(uuid, "uuid4", lambda: next(draws))
-    assert request_id_for(None) == clean.hex
+    monkeypatch.setattr(uuid, "uuid4", lambda: digit_heavy)
+    request_id = request_id_for(None)
+    assert request_id == "bcdefghijabcdefghijaklmnopklmnop"
+    assert mask_text(request_id) == request_id
+
+
+def test_requests_still_get_an_id_when_masking_fails_everywhere(
+    make_client: MakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The old id generator drew uuids until the mask left one unchanged; with masking failing
+    # for every input (every digit replaced) it never stopped and froze the worker.
+    def broken(_text: str, _counts: object) -> str:
+        raise RuntimeError("simulated masking bug")
+
+    monkeypatch.setattr(masking, "_mask_cards", broken)
+    response = make_client().get("/health", headers={"X-Request-ID": "has-digits-123"})
+    assert response.status_code == 200
+    assert re.fullmatch(r"[a-p]{32}", response.headers["x-request-id"])
 
 
 def test_ids_read_the_same_in_the_header_and_the_log(

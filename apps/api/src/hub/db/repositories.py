@@ -13,11 +13,19 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
-from hub.db.models import Customer, Feedback, Message, Operator, Setting, Ticket
+from hub.db.models import (
+    Customer,
+    Feedback,
+    Message,
+    Operator,
+    Setting,
+    Ticket,
+    approve_status_change,
+)
 from hub.domain.enums import FeedbackRating, MessageRole, SettingKey, TicketStatus
 from hub.domain.ticket_status import INITIAL_STATUS, check_transition
 
@@ -77,6 +85,17 @@ class TicketRepository:
     async def get(self, ticket_id: uuid.UUID) -> Ticket | None:
         return await self._session.get(Ticket, ticket_id)
 
+    async def list_for_customer(
+        self, customer_id: uuid.UUID, *, limit: int, before: uuid.UUID | None = None
+    ) -> Sequence[Ticket]:
+        """Newest first. Ordered by the UUID v7 id, which grows with creation time, so a page
+        cursor is just the last id (`before`)."""
+        statement = select(Ticket).where(Ticket.customer_id == customer_id)
+        if before is not None:
+            statement = statement.where(Ticket.id < before)
+        result = await self._session.execute(statement.order_by(Ticket.id.desc()).limit(limit))
+        return result.scalars().all()
+
     async def get_for_customer(self, ticket_id: uuid.UUID, customer_id: uuid.UUID) -> Ticket | None:
         """The ticket only when it belongs to this customer (customer isolation)."""
         result = await self._session.execute(
@@ -86,18 +105,28 @@ class TicketRepository:
 
     async def change_status(self, ticket: Ticket, target: TicketStatus) -> Ticket:
         """Move the ticket to `target`. Raises `InvalidTransitionError` before any SQL when the
-        state diagram forbids it, `ConcurrentUpdateError` when the stored version moved on."""
+        state diagram forbids it, `ConcurrentUpdateError` when the stored version moved on.
+
+        The only way to change a status: a flush with any other status change raises
+        `StatusChangeRefusedError` (`hub.db.models`)."""
         ticket.status = check_transition(ticket.status, target)
+        # connection() begins a transaction when none is open, so the approval below always
+        # belongs to one and is dropped with it.
+        await self._session.connection()
+        approve_status_change(self._session.sync_session, ticket.id, target)
         await self.save(ticket)
         return ticket
 
     async def save(self, ticket: Ticket) -> None:
         """Flush pending changes (of the ticket and anything else in the session); the version
-        check runs here."""
+        check runs here. A changed status is refused unless it came from `change_status`."""
+        # Read before the flush: a failed flush expires the object, and reading it then raises
+        # PendingRollbackError instead of the error below.
+        ticket_id = ticket.id
         try:
             await self._session.flush()
         except StaleDataError as exc:
-            raise ConcurrentUpdateError(f"ticket {ticket.id} was changed by someone else") from exc
+            raise ConcurrentUpdateError(f"ticket {ticket_id} was changed by someone else") from exc
 
 
 class MessageRepository:
@@ -146,6 +175,29 @@ class MessageRepository:
         )
         return result.scalars().all()
 
+    async def list_after(self, ticket_id: uuid.UUID, after: Message) -> Sequence[Message]:
+        """Messages of the ticket created after `after`, in the order of `list_for_ticket`."""
+        result = await self._session.execute(
+            select(Message)
+            .where(
+                Message.ticket_id == ticket_id,
+                tuple_(Message.created_at, Message.id) > tuple_(after.created_at, after.id),
+            )
+            .order_by(Message.created_at, Message.id)
+        )
+        return result.scalars().all()
+
+    async def get_in_ticket(
+        self, ticket_id: uuid.UUID, message_id: uuid.UUID, *, for_update: bool = False
+    ) -> Message | None:
+        """`for_update` locks the row until the transaction ends (serialises writers that
+        depend on this message, e.g. one feedback per message)."""
+        statement = select(Message).where(Message.id == message_id, Message.ticket_id == ticket_id)
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none()
+
 
 class SettingsRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -186,3 +238,13 @@ class FeedbackRepository:
         self._session.add(feedback)
         await self._session.flush()
         return feedback
+
+    async def get_for_message(self, message_id: uuid.UUID) -> Feedback | None:
+        """The first feedback on a message (the API stores at most one)."""
+        result = await self._session.execute(
+            select(Feedback)
+            .where(Feedback.message_id == message_id)
+            .order_by(Feedback.created_at, Feedback.id)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
