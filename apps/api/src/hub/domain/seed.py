@@ -80,17 +80,6 @@ Amount = Annotated[Decimal, Field(gt=0, max_digits=12, decimal_places=2)]
 Balance = Annotated[Decimal, Field(ge=0, max_digits=12, decimal_places=2)]
 Text = Annotated[str, Field(min_length=1, max_length=200)]
 
-# The error codes named in docs/tallybridge-world.md §7. The full list (about 40) arrives with
-# `data/kb/error_codes.csv` in P2-08; then the seed is checked against that file instead.
-KNOWN_ERROR_CODES = frozenset(
-    {
-        "ERR-1004", "ERR-1012", "ERR-1020",
-        "ERR-2001", "ERR-2003", "ERR-2010", "ERR-2015",
-        "ERR-3001", "ERR-3002", "ERR-3005", "ERR-3009", "ERR-3011",
-        "ERR-4001", "ERR-4002", "ERR-4006", "ERR-4010",
-        "ERR-5001", "ERR-5003", "ERR-5010",
-    }
-)  # fmt: skip
 HELD_FOR_REVIEW_CODE = "ERR-1012"
 RESTRICTED_CODE = "ERR-5010"
 
@@ -331,8 +320,6 @@ def transaction_errors(tx: Transaction) -> list[str]:
     if tx.status is TransactionStatus.RETURNED and tx.type not in WITHDRAWALS:
         errors.append("only withdrawals can be returned")
     if tx.error_code is not None:
-        if tx.error_code not in KNOWN_ERROR_CODES:
-            errors.append(f"{tx.error_code} is not in the world file")
         allowed = next((r for types, r in ERROR_RANGES.items() if tx.type in types), ())
         if not tx.error_code.startswith(allowed):
             errors.append(f"{tx.error_code} does not fit a {tx.type} transaction")
@@ -428,8 +415,12 @@ def _duplicates(values: list[str]) -> list[str]:
     return sorted(value for value, count in Counter(values).items() if count > 1)
 
 
-def validate_seed(seed: SeedData) -> list[str]:
-    """Rules across the files. Returns one message per problem; empty means valid."""
+def validate_seed(seed: SeedData, known_error_codes: frozenset[str]) -> list[str]:
+    """Rules across the files. Returns one message per problem; empty means valid.
+
+    `known_error_codes` is the full list from `data/kb/error_codes.csv` (world file §7); the
+    caller reads it, so this module stays free of I/O.
+    """
     errors: list[str] = []
     customers = {c.external_ref: c for c in seed.customers}
     cards = {c.card_ref: c for c in seed.cards}
@@ -449,10 +440,22 @@ def validate_seed(seed: SeedData) -> list[str]:
     if missing_roles:
         errors.append(f"no operator with role {', '.join(sorted(missing_roles))}")
 
+    errors.extend(_error_code_errors(seed, known_error_codes))
     errors.extend(_card_errors(seed, customers))
     errors.extend(_transaction_errors(seed, customers, cards))
     errors.extend(_scenario_errors(seed, customers))
     return errors
+
+
+def _error_code_errors(seed: SeedData, known: frozenset[str]) -> list[str]:
+    used = [(t.reference, t.error_code) for t in seed.transactions] + [
+        (c.external_ref, c.upgrade.error_code) for c in seed.customers if c.upgrade is not None
+    ]
+    return [
+        f"{ref}: {code} is not in data/kb/error_codes.csv"
+        for ref, code in used
+        if code is not None and code not in known
+    ]
 
 
 def _card_errors(seed: SeedData, customers: dict[str, Customer]) -> list[str]:

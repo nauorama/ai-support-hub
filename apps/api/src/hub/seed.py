@@ -26,6 +26,7 @@ from hub.db.models import Customer, Operator, Setting
 from hub.db.repositories import CustomerRepository, OperatorRepository
 from hub.db.session import connect
 from hub.domain.enums import ActorType, Intent, SettingKey
+from hub.domain.kb import ERROR_CODES_FILE, parse_error_codes
 from hub.domain.seed import SeedData, parse_seed, validate_seed
 
 ACTOR = "make-seed"
@@ -79,8 +80,13 @@ class SeedError(Exception):
     """The seed cannot run: invalid files or a missing setting. Nothing was written."""
 
 
-def read_seed(seed_dir: Path) -> SeedData:
-    """Read, parse and cross-check the seed files. Raises SeedError on any problem."""
+def read_seed(seed_dir: Path, error_codes: Path | None = None) -> SeedData:
+    """Read, parse and cross-check the seed files. Raises SeedError on any problem.
+
+    Error codes in the seed are checked against `error_codes.csv`, by default the one in the
+    `kb` folder next to `seed_dir` (`data/kb/`).
+    """
+    codes = read_error_codes(error_codes or seed_dir.parent / "kb" / ERROR_CODES_FILE)
     try:
         files = {name: (seed_dir / name).read_bytes() for name in SEED_FILES}
     except OSError as error:
@@ -89,9 +95,21 @@ def read_seed(seed_dir: Path) -> SeedData:
         seed = parse_seed(files)
     except ValueError as error:  # pydantic.ValidationError is a ValueError
         raise SeedError("the seed files are invalid; run `make data-check`") from error
-    if validate_seed(seed):
+    if validate_seed(seed, codes):
         raise SeedError("the seed files are inconsistent; run `make data-check`")
     return seed
+
+
+def read_error_codes(path: Path) -> frozenset[str]:
+    """The codes of `error_codes.csv`. Raises SeedError if the file is missing or invalid."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SeedError(f"cannot read the error codes in {path}: {error.strerror}") from error
+    try:
+        return frozenset(row.code for row in parse_error_codes(text))
+    except ValueError as error:
+        raise SeedError(f"{path} is invalid; run `make data-check`") from error
 
 
 async def load_seed(

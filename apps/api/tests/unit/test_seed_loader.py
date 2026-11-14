@@ -14,6 +14,9 @@ SEED_DIR = Path(__file__).resolve().parents[4] / "data" / "seed"
 
 @pytest.fixture
 def seed_dir(tmp_path: Path) -> Path:
+    """A copy of `data/seed/` next to a copy of `data/kb/error_codes.csv`."""
+    (tmp_path / "kb").mkdir()
+    shutil.copy(SEED_DIR.parent / "kb" / "error_codes.csv", tmp_path / "kb")
     return Path(shutil.copytree(SEED_DIR, tmp_path / "seed"))
 
 
@@ -39,6 +42,34 @@ def test_inconsistent_files_are_refused(seed_dir: Path) -> None:
     path.write_text(json.dumps(cards), encoding="utf-8")
     with pytest.raises(SeedError, match="inconsistent"):
         read_seed(seed_dir)
+
+
+def test_a_missing_error_codes_file_is_refused(seed_dir: Path) -> None:
+    (seed_dir.parent / "kb" / "error_codes.csv").unlink()
+    with pytest.raises(SeedError, match="cannot read the error codes"):
+        read_seed(seed_dir)
+
+
+def test_an_invalid_error_codes_file_is_refused(seed_dir: Path) -> None:
+    (seed_dir.parent / "kb" / "error_codes.csv").write_text("code\nERR-1\n", encoding="utf-8")
+    with pytest.raises(SeedError, match=r"error_codes\.csv is invalid"):
+        read_seed(seed_dir)
+
+
+def test_a_seed_code_missing_from_the_csv_is_refused(seed_dir: Path) -> None:
+    csv = seed_dir.parent / "kb" / "error_codes.csv"
+    lines = csv.read_text(encoding="utf-8").splitlines(keepends=True)
+    csv.write_text(
+        "".join(line for line in lines if not line.startswith("ERR-5010")), encoding="utf-8"
+    )
+    with pytest.raises(SeedError, match="inconsistent"):
+        read_seed(seed_dir)
+
+
+def test_an_explicit_error_codes_path_is_used(seed_dir: Path, tmp_path: Path) -> None:
+    moved = tmp_path / "codes.csv"
+    (seed_dir.parent / "kb" / "error_codes.csv").rename(moved)
+    assert len(read_seed(seed_dir, moved).customers) == 40
 
 
 def test_default_settings() -> None:

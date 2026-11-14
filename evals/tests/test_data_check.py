@@ -1,5 +1,6 @@
-"""`make data-check`: the layout rules (fail safe for files without a validator) and the seed
-validator (P2-05). Knowledge-base and evaluation validators come in P2-08 and P4-01."""
+"""`make data-check`: the layout rules (fail safe for files without a validator). The seed and
+knowledge-base validators are tested in test_data_check_seed.py and test_data_check_kb.py;
+evaluation validators come in P4-01."""
 
 from pathlib import Path
 
@@ -36,7 +37,8 @@ def test_os_noise_is_ignored(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "kb/refunds.md",
+        "kb/refunds.txt",
+        "kb/error_codes.json",
         "seed/accounts.json",
         "seed/old/customers.json",
         "eval/tickets.dev.jsonl",
@@ -46,6 +48,11 @@ def test_os_noise_is_ignored(tmp_path: Path) -> None:
 def test_a_data_file_without_a_validator_fails(tmp_path: Path, name: str) -> None:
     errors = check_layout(_layout(tmp_path, name))
     assert errors == [f"{tmp_path / 'data' / name}: no validator for this file yet"]
+
+
+@pytest.mark.parametrize("name", ["kb/refunds.md", "kb/error_codes.csv"])
+def test_kb_files_have_a_validator(tmp_path: Path, name: str) -> None:
+    assert check_layout(_layout(tmp_path, name)) == []
 
 
 def test_an_unknown_folder_fails(tmp_path: Path) -> None:
@@ -68,7 +75,7 @@ def test_main_exit_codes_and_messages(tmp_path: Path, capsys: pytest.CaptureFixt
     assert main([str(good)]) == 0
     assert "data-check: OK" in capsys.readouterr().out
 
-    bad = _layout(tmp_path / "bad", "kb/refunds.md")
+    bad = _layout(tmp_path / "bad", "kb/refunds.txt")
     assert main([str(bad)]) == 1
     err = capsys.readouterr().err
     assert "no validator for this file yet" in err
