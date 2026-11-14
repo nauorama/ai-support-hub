@@ -48,10 +48,26 @@ _ENCODED = re.compile(_ENCODED_SEPARATOR)
 _DIGIT = re.compile(r"\d")
 
 # IBAN: country code, 2 check digits, then letters and digits, in groups or written together.
-_IBAN_MIN = 15
-_IBAN_MAX = 34
 _IBAN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,40}")
 _IBAN_GROUP = re.compile(r"[ ]?[A-Z0-9]+")
+# IBAN length by country (ISO 13616). A run is an IBAN only with a listed country code and
+# exactly that length; "YZ" + a card number passing mod 97 is not one (ADR-0017).
+# Source: SWIFT IBAN Registry release 101, via python-stdnum 2.2 ``stdnum/iban.dat``
+# (tag 2.2, commit 6070c60, 2026-01-04). The registry itself refuses automated downloads.
+# fmt: off
+_IBAN_LENGTHS: dict[str, int] = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22, "BH": 22,
+    "BI": 27, "BR": 29, "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24, "DE": 22, "DJ": 27,
+    "DK": 18, "DO": 28, "EE": 20, "EG": 29, "ES": 24, "FI": 18, "FK": 18, "FO": 18, "FR": 27,
+    "GB": 22, "GE": 22, "GI": 23, "GL": 18, "GR": 27, "GT": 28, "HN": 28, "HR": 21, "HU": 28,
+    "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27, "JO": 30, "KW": 30, "KZ": 20, "LB": 28,
+    "LC": 32, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25, "MC": 27, "MD": 24, "ME": 22,
+    "MK": 19, "MN": 20, "MR": 27, "MT": 31, "MU": 30, "NI": 28, "NL": 18, "NO": 15, "OM": 23,
+    "PK": 24, "PL": 28, "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "RU": 33, "SA": 24,
+    "SC": 31, "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28,
+    "TL": 23, "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30,
+}
+# fmt: on
 
 # Gap between a trigger word and its code: a few characters, no digits, no line break.
 _GAP_BEFORE = r"[^\d\n]{0,25}?"
@@ -199,26 +215,45 @@ def _iban_spans(text: str) -> list[tuple[int, int]]:
     """Start and end of each valid IBAN in the text.
 
     An IBAN is kept (ADR-0010: IBANs stay in the database; G3 replaces them in model input).
-    The longest valid IBAN ending at a group boundary wins.
+    Valid means a listed country code, that country's exact length, and the mod-97 check.
     """
     spans: list[tuple[int, int]] = []
     for candidate in _IBAN_CANDIDATE.finditer(text):
+        length = _IBAN_LENGTHS.get(candidate.group(0)[:2])
+        if length is None:
+            continue
         compact = ""
-        best_end: int | None = None
         for group in _IBAN_GROUP.finditer(candidate.group(0)):
             compact += group.group(0).strip()
-            if _IBAN_MIN <= len(compact) <= _IBAN_MAX and _iban_valid(compact):
-                best_end = candidate.start() + group.end()
-        if best_end is not None:
-            spans.append((candidate.start(), best_end))
+            if len(compact) >= length:
+                if len(compact) == length and _iban_valid(compact):
+                    spans.append((candidate.start(), candidate.start() + group.end()))
+                break
     return spans
+
+
+def _card_in_iban(part: str, *, starts_at_check_digits: bool) -> bool:
+    """Whether the digits of an IBAN read as a card number; a card wins over an IBAN (ADR-0017).
+
+    ``part`` is one digit run inside the IBAN. Its digits as a whole, or without the 2 check
+    digits when the run starts with them ("AT12" typed before a card), that form a Luhn-valid
+    13-19 digit number count as a card, even though some real IBANs are masked this way.
+    """
+    digits = "".join(_DIGIT.findall(part))
+    candidates = [digits, digits[2:]] if starts_at_check_digits else [digits]
+    return any(_MIN_PAN <= len(c) <= _MAX_PAN and luhn_valid(c) for c in candidates)
 
 
 def _mask_cards(text: str, counts: Counter[EntityType]) -> str:
     iban_spans = _iban_spans(text)
 
     def replace(match: re.Match[str]) -> str:
-        iban_end = next((end for start, end in iban_spans if start <= match.start() < end), None)
+        iban = next(((s, e) for s, e in iban_spans if s <= match.start() < e), None)
+        iban_end: int | None = None
+        if iban is not None:
+            part = match.group(0)[: iban[1] - match.start()]
+            if not _card_in_iban(part, starts_at_check_digits=match.start() == iban[0] + 2):
+                iban_end = iban[1]
         if iban_end is not None:
             # Keep the IBAN; a card typed right after it is still masked.
             cut = iban_end - match.start()

@@ -234,6 +234,79 @@ def test_invalid_iban_is_not_protected() -> None:
     assert mask("XX00 4111 1111 1111 1111").text == "XX[CARD ****1111]"
 
 
+def test_card_after_two_capital_letters_is_masked_even_when_mod_97_passes() -> None:
+    # Found by Hypothesis in test_audit_chain.py (P3-01 review): "YZ" + a 15-digit card passes
+    # the IBAN mod-97 check, but YZ is no IBAN country (ADR-0017).
+    assert masking._iban_valid("YZ178162840989986")
+    result = mask("YZ178162840989986")
+    assert result.text == "YZ[CARD ****9986]"
+    assert result.counts == {"PAN": 1}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "BE68 5390 0754 7034",  # SWIFT IBAN Registry examples, release 101
+        "NO93 8601 1117 947",
+        "EE38 2200 2210 2014 5685",
+        "SI56 2633 0001 2039 086",
+        "HR12 1001 0051 8630 0016 0",
+        "CH93 0076 2011 6238 5295 7",
+        "GB29 NWBK 6016 1331 9268 19",
+        "LT12 1000 0111 0100 1000",
+    ],
+)
+def test_registry_example_ibans_are_kept(text: str) -> None:
+    assert mask(text) == MaskResult(text=text, counts={})
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "XY12 3704 0044 0532 0130 00",  # no such country
+        "DE89 3704 0044 0532 0130",  # DE has 22 characters, not 18
+        "DE89 3704 0044 0532 0130 00 1",  # nor 23
+    ],
+)
+def test_iban_with_unknown_country_or_wrong_length_is_not_protected(text: str) -> None:
+    compact = text.replace(" ", "")
+    assert not masking._iban_spans(compact)
+
+
+def _mod_97_check_digits(country: str, bban: str) -> str:
+    """Check digits that make country + check digits + bban pass mod 97."""
+    return next(
+        f"{check:02d}" for check in range(100) if masking._iban_valid(f"{country}{check:02d}{bban}")
+    )
+
+
+def test_card_after_country_and_check_digits_is_masked_even_when_it_is_a_valid_iban() -> None:
+    # The old known limitation (docs/security.md): "AT12 4111 1111 1111 1111" kept as an IBAN.
+    check = _mod_97_check_digits("AT", VISA)
+    text = f"AT{check} 4111 1111 1111 1111"
+    assert masking._iban_spans(text)
+    result = mask(text)
+    assert VISA not in result.text.replace(" ", "")
+    assert result.counts == {"PAN": 1}
+
+
+def test_card_in_the_digits_of_an_iban_with_letters_is_masked() -> None:
+    # GB: 4 letters (bank code), then 14 digits; the 14 digits can be a Luhn-valid number.
+    card = "36227206271667"  # public Diners Club test number
+    assert luhn_valid(card)
+    check = _mod_97_check_digits("GB", f"WEST{card}")
+    result = mask(f"GB{check} WEST {card}")
+    assert card not in result.text
+    assert result.counts == {"PAN": 1}
+
+
+def test_a_real_iban_that_reads_as_a_card_is_masked() -> None:
+    # Accepted cost of ADR-0017: card numbers win, so some real IBANs are masked (no leak).
+    result = mask("AT61 1904 3002 3457 3201")
+    assert result.text.startswith("AT[CARD ****")
+    assert result.counts == {"PAN": 1}
+
+
 def test_card_and_cvv_together() -> None:
     result = mask("card 4111 1111 1111 1111 exp 12/28 cvv 737")
     assert result.text == "card [CARD ****1111] exp 12/28 cvv [REDACTED]"
