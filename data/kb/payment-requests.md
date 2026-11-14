@@ -28,5 +28,5 @@ Percentage fees are charged in the currency of the payment.
 
 ## When the money is available
 
-- **Paid by card:** you see the payment at once as *pending*. The money is available after 3 business days. For the first 3 card payments of a new account, it is available after 7 calendar days.
+- **Paid by card:** you see the payment at once as *pending*. The money is available after 3 business days. New accounts: for your first 3 Payment Requests paid by card, the money is available after 7 calendar days.
 - **Paid by bank transfer:** the normal time for the payment system applies. SEPA takes 1 business day, ACH (USD) takes 1–3 business days and Faster Payments (GBP) arrives on the same day.

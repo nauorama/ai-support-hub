@@ -13,7 +13,7 @@ Count in business days (Monday to Friday, without the closing days of the euro p
 - SEPA: 1 business day. SEPA Instant: under 1 minute.
 - ACH (USD): 1–3 business days.
 - Faster Payments (GBP): same day.
-- Payment Request paid by card: pending at once, available after 3 business days (first 3 payments of a new account: 7 calendar days).
+- Payment Request paid by card: pending at once, available after 3 business days (new accounts: 7 calendar days for your first 3 Payment Requests paid by card).
 
 If the normal time has not passed yet, please wait.
 
