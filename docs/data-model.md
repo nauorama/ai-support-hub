@@ -103,7 +103,7 @@ Closing: an operator closes a ticket by hand, or the scheduled job `close-stale`
 | author_operator_id | uuid FK null | |
 | run_id | uuid FK null | the foreign key is added with the `runs` table (phase 6) |
 | citations | jsonb | `[{"marker": 1, "chunk_id": "...", "doc_id": "...", "title": "...", "url": "..."}]` |
-| masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}` |
+| masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}`; `{"failed": 1}` when masking failed (every digit hidden, counts unknown) |
 | idempotency_key | text null unique | |
 
 ### runs
@@ -204,6 +204,8 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 | ticket_id, message_id | uuid FK | |
 | rating | text | `up` \| `down` |
 | comment | text null | masked |
+
+One feedback per AI message: only the first rating is kept (the API locks the message row, so a double click stores one row). No database constraint enforces this yet (deferred to P10-02).
 
 ### kb_documents and kb_chunks
 Postgres keeps the knowledge base as the source of truth for the index and for the operator UI.

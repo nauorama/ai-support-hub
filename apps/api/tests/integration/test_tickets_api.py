@@ -654,8 +654,11 @@ def test_failed_masking_is_audited_and_hands_the_new_ticket_to_a_human(
     events = _events(response)
     assert [name for name, _ in events] == ["ticket.created", "message", "ticket.status", "done"]
     assert events[2][1] == {"status": "handed_off"}
+    assert events[0][1]["message"]["masked"] is True  # the customer gets the "we hid" note
 
-    assert _sql(api_db, "SELECT body FROM messages") == [("card #### #### #### ####",)]
+    assert _sql(api_db, "SELECT body, masked_entities FROM messages") == [
+        ("card #### #### #### ####", {"failed": 1})
+    ]
     assert _sql(api_db, "SELECT status, last_route, route_reasons FROM tickets") == [
         ("handed_off", "handoff", ["system_error"])
     ]
@@ -793,3 +796,40 @@ def test_feedback_without_card_data_writes_no_masking_record(
     assert _sql(api_db, "SELECT count(*) FROM audit_log WHERE action = 'guardrail.masked'") == [
         (0,)
     ]
+
+
+def test_a_database_error_detail_is_logged_as_class_and_constraint_only(
+    capsys: pytest.CaptureFixture[str],
+    app_container: Container,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A CHECK violation: Postgres answers "Failing row contains (...)" with the row's values,
+    # the message body included. hide_parameters does not cover this server detail.
+    real_add = MessageRepository.add
+
+    async def add_breaking_a_check(self: MessageRepository, **kwargs: Any) -> Message:  # noqa: ANN401
+        # masked_entities must be a JSON object (ck_messages_masked_entities).
+        return await real_add(self, **{**kwargs, "masked_entities": ["not an object"]})
+
+    monkeypatch.setattr(MessageRepository, "add", add_breaking_a_check)
+    app = TestClient(
+        create_app(app_container), base_url="https://testserver", raise_server_exceptions=False
+    )
+    client = _login(app)
+    private_text = "please tell Philippa about the refund"
+    response = client.post("/api/v1/tickets", json={"message": private_text}, headers=_key())
+    assert response.status_code == 500
+
+    lines = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    error = next(line for line in lines if line["event"] == "request.unhandled_error")
+    logged = json.dumps(lines)
+    assert "Philippa" not in logged
+    assert "Failing row" not in logged
+    assert "DETAIL" not in logged
+    assert error["db_constraint"] == "ck_messages_masked_entities"
+    assert error["db_error_class"] == "sqlalchemy.exc.IntegrityError"
+    assert [e["exc_type"] for e in error["exception"]] == ["DatabaseErrorSummary"]

@@ -316,7 +316,11 @@ async def _save_or_replay(
 
 
 def _masked_entities(masked: MaskResult) -> dict[str, int]:
-    """Counts by type only, e.g. `{"PAN": 1}` (data model, `messages.masked_entities`)."""
+    """Counts by type only, e.g. `{"PAN": 1}` (data model, `messages.masked_entities`). After a
+    failed mask the counts are unknown but every digit was hidden: `{"failed": 1}`, so the
+    customer view still says that something was masked."""
+    if masked.failed:
+        return {"failed": 1}
     return {str(kind): count for kind, count in masked.counts.items()}
 
 

@@ -49,7 +49,7 @@ Method: for each data flow, what can go wrong (STRIDE as a checklist) plus the O
 | G6 | **Tool permissions** | `tools/permissions.py` | Allow-list per node, identity injection, argument validation, limits per ticket, approval requirement for side effects. |
 | G7 | **Output checks** | `guardrails/output_checks.py` | Citation validity, card patterns, placeholders, internal hashes and canaries, forbidden promises, prompt fragments, length, language. Runs on AI drafts **and** on operator-edited text (card patterns only). |
 | G8 | **Budget guard** | `llm/budget.py` | Sums today's `llm_calls.cost_usd`; when the limit is reached, online calls are refused. Evals have their own limit. |
-| G9 | **Log and trace filter** | `observability/` | The same masking function runs on every log record and trace payload. |
+| G9 | **Log and trace filter** | `observability/` | The same masking function runs on every log record and trace payload. A database error is logged only as its error class and constraint name: its text can hold row values (Postgres `DETAIL: Failing row contains (...)`), which no mask can clean. SQL parameters are hidden from error texts (`hide_parameters`). |
 
 Unit-test rule: G1, G2, G5, G6, G7 need ≥ 95% line coverage and property-based tests (Hypothesis) for masking: any valid Luhn number in any common format inside random text must be masked.
 
