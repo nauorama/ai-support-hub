@@ -21,11 +21,14 @@ PROBLEM_MEDIA_TYPE = "application/problem+json"
 class ProblemError(Exception):
     """Raised by endpoints for an expected error with a code from the API contract."""
 
-    def __init__(self, status: int, code: str, detail: str) -> None:
+    def __init__(
+        self, status: int, code: str, detail: str, *, headers: dict[str, str] | None = None
+    ) -> None:
         super().__init__(code)
         self.status = status
         self.code = code
         self.detail = detail
+        self.headers = headers
 
 
 def problem_response(
@@ -75,7 +78,7 @@ def _code_for_status(status: int) -> str:
 
 async def _problem_error_handler(_request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ProblemError)  # noqa: S101 - registered for this class only
-    return problem_response(exc.status, exc.code, exc.detail)
+    return problem_response(exc.status, exc.code, exc.detail, headers=exc.headers)
 
 
 async def _http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:

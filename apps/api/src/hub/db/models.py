@@ -15,17 +15,20 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Connection,
     Dialect,
     ForeignKey,
     Index,
     MetaData,
     Numeric,
     Text,
+    event,
     func,
+    inspect,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Mapper, mapped_column, object_session
 from sqlalchemy.types import TypeDecorator
 from uuid_utils.compat import uuid7
 
@@ -176,6 +179,45 @@ class Ticket(Base):
     # Optimistic lock: every ORM UPDATE checks and increments `version` (StaleDataError when
     # another transaction changed the row first).
     __mapper_args__ = {"version_id_col": version}  # noqa: RUF012 - SQLAlchemy mapper option
+
+
+# Status changes go only through `TicketRepository.change_status`, which checks the state diagram
+# and then records the approved target here (P2-02 review). Any other way of changing the
+# status - setting the attribute and calling `save()`, `flush()` or `commit()` - is refused at
+# flush time, so a forgotten check cannot slip through. Keyed by ticket id in `Session.info`,
+# which belongs to the session of the change and needs no extra attribute on the model.
+APPROVED_STATUS_KEY = "hub.approved_ticket_status"
+
+
+class StatusChangeRefusedError(Exception):
+    """A ticket status was changed without `TicketRepository.change_status`."""
+
+
+def approve_status_change(info: dict[Any, Any], ticket_id: uuid.UUID, target: TicketStatus) -> None:
+    info.setdefault(APPROVED_STATUS_KEY, {})[ticket_id] = target
+
+
+@event.listens_for(Ticket, "before_insert")
+def _refuse_initial_status(
+    _mapper: Mapper[Ticket], _connection: Connection, target: Ticket
+) -> None:
+    # None: the column default (INITIAL_STATUS) applies.
+    if target.status is not None and target.status != INITIAL_STATUS:
+        raise StatusChangeRefusedError(f"a new ticket starts in {INITIAL_STATUS}")
+
+
+@event.listens_for(Ticket, "before_update")
+def _refuse_unapproved_status(
+    _mapper: Mapper[Ticket], _connection: Connection, target: Ticket
+) -> None:
+    if not inspect(target).attrs.status.history.has_changes():
+        return
+    session = object_session(target)
+    approved = {} if session is None else session.info.get(APPROVED_STATUS_KEY, {})
+    if approved.pop(target.id, None) != target.status:
+        raise StatusChangeRefusedError(
+            f"ticket {target.id}: change the status with TicketRepository.change_status"
+        )
 
 
 class Message(Base):

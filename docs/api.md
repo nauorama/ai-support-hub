@@ -15,24 +15,25 @@ Base path `/api/v1`. JSON, `snake_case`. FastAPI generates the OpenAPI file; thi
   - `hub_operator` — operator session. State-changing console requests also need the `X-CSRF-Token` header.
 - **Scheduled jobs:** `POST /admin/jobs/{name}` accepts a bearer token (`JOBS_TOKEN`) instead of a session, because GitHub Actions calls it. The token works only for these endpoints.
 - **Roles:** `operator` < `lead` < `admin`; `compliance` can read tickets and the audit log, and cannot change anything.
-- **Idempotency:** `Idempotency-Key` header (UUID) on every POST that creates a message or runs an action. The same key returns the first result.
+- **Idempotency:** `Idempotency-Key` header (UUID) on every POST that creates a message or runs an action; a missing or malformed key is a `validation_error`. The same key returns the first result. Keys are scoped to the caller (a customer's key never returns another customer's result). The same key sent with a different request (other text, other ticket) returns `409 idempotency_key_reused`.
 - **Pagination:** `?limit=50&cursor=...`; response `{"items": [...], "next_cursor": "..."}`.
-- **Rate limits (demo):** customer endpoints 10 messages per minute per session and 60 per hour per IP; login 5 tries per 15 minutes. Over the limit → 429 with `Retry-After`.
+- **Rate limits (demo):** customer endpoints 10 messages per minute per session and 60 per hour per IP; login 5 tries per 15 minutes (for the demo session: 5 wrong access codes per 15 minutes per IP). Over the limit → 429 with `Retry-After`.
+- **Input limits:** a request body is at most 32 KB (`413 content_too_large`, checked before the body is parsed). A customer message is at most 4,000 characters (`422 validation_error`, checked before masking, security T9).
 - **Time:** ISO 8601 UTC.
 
 ## 2. Customer endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/demo/session` | Body `{"customer_ref": "CUS-0007", "access_code": "..."}`. Sets `hub_customer`. Returns the customer profile for the header of the chat. |
+| POST | `/demo/session` | Body `{"customer_ref": "CUS-0007", "access_code": "..."}`. Sets `hub_customer` (8 hours). Returns the customer profile for the header of the chat (`customer_ref`, `display_name`, `tier`). Wrong code → `401 invalid_access_code`; unknown or erased customer → 404; `SESSION_SECRET` or `DEMO_ACCESS_CODE` empty → `503 demo_unavailable`. |
 | GET | `/demo/customers` | List of demo customers for the picker (name, tier, short scenario hint). Needs the access code in the header `X-Demo-Access-Code`. |
 | POST | `/tickets` | Body `{"message": "..."}`. Creates a ticket and starts a run. **Response is an SSE stream** (section 4). |
 | POST | `/tickets/{id}/messages` | Body `{"message": "..."}`. Adds a message. SSE stream. Starts a run only when the AI owns the ticket. A closed ticket returns `409 ticket_closed`; the chat then opens a new ticket. |
-| GET | `/tickets` | The customer's own tickets. |
+| GET | `/tickets` | The customer's own tickets, newest first (pagination). |
 | GET | `/tickets/{id}` | Ticket with status and the AI disclosure text. |
 | GET | `/tickets/{id}/messages?after={message_id}` | New messages. The chat polls this every 3 s while the ticket is not closed and no stream is open. |
-| POST | `/tickets/{id}/request-human` | Immediate handoff with reason `customer_request`. |
-| POST | `/tickets/{id}/feedback` | Body `{"message_id": "...", "rating": "up" | "down", "comment": "..."}`. |
+| POST | `/tickets/{id}/request-human` | Immediate handoff with reason `customer_request`. Returns the ticket. A ticket that already waits for a human (`handed_off`, `pending_approval`) is returned unchanged; a closed ticket returns `409 ticket_closed`. |
+| POST | `/tickets/{id}/feedback` | Body `{"message_id": "...", "rating": "up" | "down", "comment": "..."}` (comment optional, max 1,000 characters, masked). 201 with `{"id"}`. Only AI messages of this ticket: another message → `422 not_ai_message`. |
 | GET | `/help/{doc_id}` | Public. One `external` knowledge-base article (title, sections with anchors). `internal` documents return 404. Target of citation links. |
 | GET | `/privacy` | Public. Short privacy text: what the AI sees, which providers process the data, how to reach a human. |
 
@@ -47,10 +48,13 @@ A customer can read only their own tickets (404 for others, not 403).
   "is_ai_generated": true,
   "body": "Your withdrawal of €420.00 from 9 November is still in progress… [1]",
   "citations": [{"marker": 1, "title": "How long does a withdrawal take?", "url": "/help/withdrawal-times#sepa-withdrawals"}],
+  "masked": false,
   "created_at": "2026-11-12T10:15:04Z"
 }
 ```
-Internal fields (chunk ids, scores, confidence, route reasons) are never in customer responses.
+`masked` is true when the server hid card data in the message (the chat shows a note, [UI](ui.md) §2). Internal fields (chunk ids, scores, confidence, route reasons) are never in customer responses.
+
+**Ticket object (customer view):** `id`, `status`, `ai_disclosure` (the text of [security](security.md) §7), `ai_disclosed_at`, `created_at`.
 
 ## 3. Console endpoints
 
@@ -98,6 +102,8 @@ Conflict rule: every state-changing draft or ticket request sends `ticket_versio
 | `ticket.status` | `{"status": "answered" \| "pending_approval" \| "handed_off"}` | |
 | `error` | problem details | the run failed; the ticket was handed off |
 | `done` | `{}` | always the last event |
+
+`POST /tickets/{id}/messages` also starts with `ticket.created`, carrying the new message. Until the workflow exists (phase 6), the stream is `ticket.created` → `message` (a placeholder system message, not stored) → `done`.
 
 The server sends a comment line (`: ping`) every 10 s to keep the connection open. If the stream breaks, the client falls back to polling `GET /tickets/{id}/messages`.
 

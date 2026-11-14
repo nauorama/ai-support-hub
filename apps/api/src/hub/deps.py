@@ -5,6 +5,8 @@ Built once in `create_app` and kept on `app.state.container`. Tests build their 
 
 from dataclasses import dataclass, field
 
+from hub.api.limits import RateLimits
+from hub.auth.customer_session import CustomerSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
 from hub.observability.readiness import (
@@ -21,6 +23,13 @@ class Container:
     readiness_checks: dict[str, ReadinessCheck] = field(default_factory=dict)
     # None in tests that need no database.
     database: Database | None = None
+    rate_limits: RateLimits = field(default_factory=RateLimits)
+
+    @property
+    def session_signer(self) -> CustomerSessionSigner | None:
+        """`None` while SESSION_SECRET is empty: then no customer session can be made or read."""
+        secret = self.settings.session_secret.get_secret_value()
+        return CustomerSessionSigner(secret) if secret else None
 
 
 def build_container(settings: Settings) -> Container:
