@@ -52,7 +52,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "context IN ('online', 'eval', 'memory')", name=op.f("ck_llm_calls_context")
+            "context IN ('online', 'eval', 'memory', 'record')", name=op.f("ck_llm_calls_context")
         ),
         sa.CheckConstraint(f"node IN ({NODES})", name=op.f("ck_llm_calls_node")),
         sa.CheckConstraint(

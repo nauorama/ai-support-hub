@@ -1,14 +1,13 @@
 """`make record-llm`: refresh the recorded model responses for fake mode (docs/operations.md §1).
 
-Reads every request file in `tests/fixtures/llm/requests/*.json`, sends it for real to the role's
-model and fallback (and the embedding model), and writes one fixture per model next to the
-request files. Needs real API keys and costs money; prints tokens and cost of every call.
+Reads every request file in `tests/fixtures/llm/requests/*.json` and sends it through the gateway
+in record mode (`Gateway.record_each_model` with a `RecordingProvider`): the role's model and
+its fallback are each called once, with the G2 scan, retries and one `llm_calls` row per attempt
+(context `record`), and every successful answer is written as a fixture. Needs real API keys and
+the database (`make dev`); costs money.
 
 A request file: {"role": "triage", "messages": [...], "tools": [...] (optional)}
-or {"role": "embedding", "texts": [...]}. Messages must already be masked: the outbound scan
-(G2) runs before every call and before every write.
-
-Recording writes no `llm_calls` rows: it runs outside the app, without a database.
+or {"role": "embedding", "texts": [...]}. Messages must already be masked.
 """
 
 import asyncio
@@ -19,10 +18,19 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from hub.config import load_settings
+from hub.db.session import connect
+from hub.domain.enums import LlmCallContext, LlmNode
 from hub.llm.config import load_models
-from hub.llm.gateway import FIXTURES_DIR, Gateway, LiteLLMProvider, scan_outbound, write_fixture
+from hub.llm.gateway import (
+    FIXTURES_DIR,
+    Gateway,
+    LiteLLMProvider,
+    Provider,
+    RecordingProvider,
+)
 from hub.llm.pricing import load_pricing
-from hub.llm.schemas import LlmCallRecord, OutboundCardDataError, ProviderRequest
+from hub.llm.recorder import CallRecorder, DbCallRecorder
+from hub.llm.schemas import CallContext
 
 
 class RequestSpec(BaseModel):
@@ -34,49 +42,69 @@ class RequestSpec(BaseModel):
     tools: list[dict[str, Any]] | None = None
 
 
-class _NoRecorder:
-    async def record(self, call: LlmCallRecord) -> None:
-        return None
-
-    async def record_blocked(self, call: LlmCallRecord, entities: dict[str, int]) -> None:
-        return None
-
-
-def requests_for(gateway: Gateway, spec: RequestSpec) -> list[ProviderRequest]:
-    if spec.texts:
-        return [gateway.embedding_request(spec.texts, spec.role)]
-    return gateway.chat_requests(spec.role, spec.messages, tools=spec.tools)
+def load_specs(directory: Path) -> list[tuple[Path, RequestSpec]]:
+    return [
+        (path, RequestSpec.model_validate_json(path.read_bytes()))
+        for path in sorted((directory / "requests").glob("*.json"))
+    ]
 
 
-async def record_all(directory: Path) -> int:
+def record_call(spec: RequestSpec) -> CallContext:
+    """The `llm_calls` context of a recording: context `record`, node named after the role."""
+    return CallContext(context=LlmCallContext.RECORD, node=LlmNode(spec.role))
+
+
+async def record_all(gateway: Gateway, directory: Path) -> int:
+    """Record every request file through the gateway. Returns the number of models called."""
+    called = 0
+    for _, spec in load_specs(directory):
+        requests = await gateway.record_each_model(
+            spec.role,
+            messages=spec.messages,
+            texts=spec.texts,
+            tools=spec.tools,
+            call=record_call(spec),
+        )
+        called += len(requests)
+    return called
+
+
+def recording_gateway(
+    provider: Provider, recorder: CallRecorder, directory: Path, models_config: Path
+) -> Gateway:
+    models = load_models(models_config)
+    pricing = load_pricing(models_config.parent / "pricing.yaml")
+    pricing.check_covers(models)
+    return Gateway(
+        models=models,
+        pricing=pricing,
+        provider=RecordingProvider(provider, directory),
+        recorder=recorder,
+    )
+
+
+async def _main() -> int:
     settings = load_settings()
-    models = load_models(settings.models_config)
-    pricing = load_pricing(settings.models_config.parent / "pricing.yaml")
-    provider = LiteLLMProvider(settings)
-    gateway = Gateway(models=models, pricing=pricing, provider=provider, recorder=_NoRecorder())
-    written = 0
-    for spec_path in sorted((directory / "requests").glob("*.json")):
-        spec = RequestSpec.model_validate_json(spec_path.read_bytes())
-        for request in requests_for(gateway, spec):
-            if scan_outbound(request):
-                raise OutboundCardDataError(f"{spec_path.name}: request contains card data")
-            send = provider.embed if request.kind == "embedding" else provider.complete
-            response = await send(request)
-            cost = pricing.cost(request.model, response.usage)
-            path = write_fixture(directory, request, response)
-            print(
-                f"{spec_path.name} {request.model}: {response.usage.input_tokens} in, "
-                f"{response.usage.output_tokens} out, ${cost} -> {path.name}"
-            )
-            written += 1
-    return written
+    database = connect(settings.database_url.get_secret_value())
+    try:
+        gateway = recording_gateway(
+            LiteLLMProvider(settings),
+            DbCallRecorder(database),
+            FIXTURES_DIR,
+            settings.models_config,
+        )
+        return await record_all(gateway, FIXTURES_DIR)
+    finally:
+        await database.dispose()
 
 
 def main() -> None:
-    written = asyncio.run(record_all(FIXTURES_DIR))
-    print(f"record-llm: {written} fixtures written")
-    if written == 0:
+    called = asyncio.run(_main())
+    if called == 0:
         sys.exit("record-llm: no request files found")
+    print(
+        f"record-llm: {called} fixtures written; tokens and cost are in llm_calls (context record)"
+    )
 
 
 if __name__ == "__main__":

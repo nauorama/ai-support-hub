@@ -83,8 +83,9 @@ dev:
 test-int:
 	uv run pytest apps/api/tests/integration
 
-# Real model calls (needs ANTHROPIC_API_KEY and OPENAI_API_KEY in .env; costs money). Rewrites the
-# recorded responses that fake mode (LLM_MODE=fake) serves to the tests.
+# Real model calls through the gateway (G2 scan, retries, llm_calls rows with context `record`):
+# needs ANTHROPIC_API_KEY and OPENAI_API_KEY in .env and the database (`make dev`); costs money.
+# Rewrites the recorded responses that fake mode (LLM_MODE=fake) serves to the tests.
 record-llm:
 	uv run python -m hub.llm.record
 

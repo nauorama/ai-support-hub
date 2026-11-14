@@ -92,16 +92,16 @@ name = "evals (hub_evals) and apps/mcp_server (support_tools) do not import each
 type = "independence"
 modules = ["hub_evals", "support_tools"]
 
+# `protected`: only the allowed importer may import litellm directly; every module of the three
+# root packages, new ones included, is checked. Reaching litellm through the gateway's own names
+# (`from hub.llm.gateway import litellm`) is outside import-linter's reach; a unit test
+# (test_litellm_is_not_reached_through_the_gateway_module) covers that.
 [[tool.importlinter.contracts]]
 id = "only-gateway-imports-litellm"
 name = "only hub.llm.gateway imports litellm"
-type = "forbidden"
-source_modules = ["hub", "support_tools", "hub_evals"]
-forbidden_modules = ["litellm"]
-# The one allowed direct import. Indirect imports are allowed because every caller of the gateway
-# reaches litellm through it; the rule is about who calls litellm, and that is only the gateway.
-ignore_imports = ["hub.llm.gateway -> litellm"]
-allow_indirect_imports = true
+type = "protected"
+protected_modules = ["litellm"]
+allowed_importers = ["hub.llm.gateway"]
 
 # A new tests folder must be added to mypy `files` and pytest `testpaths`.
 [tool.mypy]

@@ -6,6 +6,7 @@ there and runs `lint-imports` against the copy, so the repository itself is neve
 expected contract broken has therefore analysed the copy, not the original.
 """
 
+import ast
 import os
 import re
 import shutil
@@ -122,10 +123,11 @@ def test_litellm_rule_has_its_contract() -> None:
     assert "- Only `llm/gateway.py` imports `litellm`" in _module_rules()
     assert _config()["include_external_packages"] is True
     contract = _contracts()["only-gateway-imports-litellm"]
-    assert contract["type"] == "forbidden"
-    # Every root package, with all its descendants: a new module is covered without a change here.
-    assert set(contract["source_modules"]) == set(PACKAGES)
-    assert contract["forbidden_modules"] == ["litellm"]
+    # `protected` checks every module of the root packages, new ones included, and needs no
+    # ignored or indirect imports.
+    assert contract["type"] == "protected"
+    assert contract["protected_modules"] == ["litellm"]
+    assert contract["allowed_importers"] == ["hub.llm.gateway"]
 
 
 def test_every_contract_comes_from_a_design_rule() -> None:
@@ -139,24 +141,11 @@ def test_every_contract_comes_from_a_design_rule() -> None:
     }
 
 
-# The litellm rule is about direct imports: every caller of the gateway reaches litellm through
-# it, so indirect imports are allowed, and the gateway's own import is the one ignored import.
-# These exact values are the only exception; anything wider would switch the rule off.
-LITELLM_EXCEPTION = {
-    "ignore_imports": ["hub.llm.gateway -> litellm"],
-    "allow_indirect_imports": True,
-}
-
-
 def test_no_contract_is_weakened() -> None:
     # Ignored imports or allowed indirect imports would quietly switch a rule off (never-do 6).
     for contract_id, contract in _contracts().items():
-        allowed = LITELLM_EXCEPTION if contract_id == "only-gateway-imports-litellm" else {}
         for option in ("ignore_imports", "allow_indirect_imports", "as_packages"):
-            if option in allowed:
-                assert contract[option] == allowed[option], f"{contract_id} widens {option}"
-            else:
-                assert option not in contract, f"{contract_id} sets {option}"
+            assert option not in contract, f"{contract_id} sets {option}"
 
 
 # --- the contracts pass on the repository and fail on wrong imports ----------------------------
@@ -262,3 +251,76 @@ def test_imports_the_design_allows_keep_every_contract(tmp_path: Path) -> None:
     returncode, broken = _lint_copy(tmp_path, allowed)
     assert broken == set()
     assert returncode == 0
+
+
+# --- litellm through the gateway's own names --------------------------------------------------
+# import-linter sees module imports, not names: `from hub.llm.gateway import litellm` or
+# `gateway.litellm.acompletion(...)` would call litellm outside the gateway and still keep the
+# contract. This syntax check closes that; dynamic imports by string are refused too.
+
+GATEWAY = "hub.llm.gateway"
+
+
+def _is_gateway(node: ast.expr) -> bool:
+    """`gateway` (as imported from hub.llm) or the dotted `hub.llm.gateway`."""
+    if isinstance(node, ast.Name):
+        return node.id == "gateway"
+    return isinstance(node, ast.Attribute) and ast.unparse(node) == GATEWAY
+
+
+def litellm_reach(source: str) -> list[str]:
+    """Every way the source reaches litellm without an `import litellm` statement."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module == GATEWAY:
+            found += [f"import {a.name}" for a in node.names if a.name.startswith("litellm")]
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("litellm"):
+            if _is_gateway(node.value):
+                found.append(f"attribute {ast.unparse(node)}")
+        elif isinstance(node, ast.Call) and ast.unparse(node.func).endswith(
+            ("import_module", "__import__")
+        ):
+            first = node.args[0] if node.args else None
+            name = first.value if isinstance(first, ast.Constant) else None
+            if isinstance(name, str) and name.startswith("litellm"):
+                found.append(f"dynamic import {name}")
+    return found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from hub.llm.gateway import litellm",
+        "from hub.llm.gateway import litellm_errors as errors",
+        "from hub.llm import gateway\ngateway.litellm.acompletion()",
+        "import hub.llm.gateway\nhub.llm.gateway.litellm_errors.Timeout",
+        "import importlib\nimportlib.import_module('litellm')",
+        "__import__('litellm.main')",
+    ],
+)
+def test_reaching_litellm_through_the_gateway_is_found(source: str) -> None:
+    assert litellm_reach(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from hub.llm.gateway import Gateway, build_gateway",
+        "from hub.llm import gateway\ngateway.build_gateway",
+        "import importlib\nimportlib.import_module('hub.llm.gateway')",
+        "other.litellm_notes = 1",
+    ],
+)
+def test_normal_use_of_the_gateway_is_not_found(source: str) -> None:
+    assert litellm_reach(source) == []
+
+
+def test_litellm_is_not_reached_through_the_gateway_module() -> None:
+    gateway_file = PACKAGES["hub"] / "llm" / "gateway.py"
+    offenders = {
+        str(path.relative_to(ROOT)): found
+        for folder in PACKAGES.values()
+        for path in sorted(folder.rglob("*.py"))
+        if path != gateway_file and (found := litellm_reach(path.read_text(encoding="utf-8")))
+    }
+    assert offenders == {}

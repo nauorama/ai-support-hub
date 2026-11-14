@@ -31,7 +31,7 @@ from hub.llm.gateway import (
     _usage,
     write_fixture,
 )
-from hub.llm.record import RequestSpec, requests_for
+from hub.llm.record import RequestSpec, load_specs
 from hub.llm.schemas import (
     CallContext,
     FixtureMissingError,
@@ -335,6 +335,7 @@ async def test_provider_failures_become_provider_errors(monkeypatch: pytest.Monk
             True,
         ),
         (litellm_errors.InternalServerError(message="i", llm_provider="openai", model="m"), True),
+        (litellm_errors.BadGatewayError(message="g", llm_provider="openai", model="m"), True),
         (litellm_errors.BadRequestError(message="b", model="m", llm_provider="openai"), False),
         (litellm_errors.AuthenticationError(message="a", llm_provider="openai", model="m"), False),
         (ValueError("anything else"), False),
@@ -381,24 +382,31 @@ def test_a_request_with_card_data_is_never_recorded(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
-def _specs() -> list[Path]:
-    return sorted((FIXTURES_DIR / "requests").glob("*.json"))
+def _specs() -> list[tuple[Path, RequestSpec]]:
+    return load_specs(FIXTURES_DIR)
 
 
 def test_there_is_at_least_one_recorded_request() -> None:
     assert _specs()
 
 
-@pytest.mark.parametrize("spec_path", _specs(), ids=lambda path: path.stem)
-async def test_every_request_spec_has_a_fixture_for_each_of_its_models(spec_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("spec_path", "spec"), _specs(), ids=lambda item: getattr(item, "stem", "")
+)
+async def test_every_request_spec_has_a_fixture_for_each_of_its_models(
+    spec_path: Path, spec: RequestSpec
+) -> None:
     """Fake mode works end to end through the gateway for every request in the repository."""
-    spec = RequestSpec.model_validate_json(spec_path.read_bytes())
     recorder = MemoryRecorder()
     provider = FixtureProvider(FIXTURES_DIR)
-    gateway = make_gateway(ScriptedProvider({}), recorder)
-    for request in requests_for(gateway, spec):
-        assert provider.path(request).exists(), f"{spec_path.name}: no fixture for {request.model}"
     fake = make_gateway(ScriptedProvider({}), recorder)
+    requests = (
+        [fake.embedding_request(spec.texts, spec.role)]
+        if spec.texts
+        else fake.chat_requests(spec.role, spec.messages, tools=spec.tools)
+    )
+    for request in requests:
+        assert provider.path(request).exists(), f"{spec_path.name}: no fixture for {request.model}"
     fake = type(fake)(
         models=fake.models, pricing=fake.pricing, provider=provider, recorder=recorder
     )
@@ -426,3 +434,59 @@ def test_importing_the_gateway_loads_no_env_file_into_the_environment(tmp_path: 
 
 def test_a_response_without_usage_counts_zero_tokens() -> None:
     assert _usage(None) == Usage()
+
+
+class _StatusError(Exception):
+    def __init__(self, status_code: object) -> None:
+        super().__init__("provider said no")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize(
+    ("status_code", "transient"),
+    [(500, True), (502, True), (599, True), (499, False), ("x", False)],
+)
+def test_any_5xx_status_is_transient(status_code: object, transient: bool) -> None:
+    error = _provider_error(_StatusError(status_code))
+    assert error.transient is transient
+    assert error.status_code == (status_code if isinstance(status_code, int) else None)
+
+
+async def test_an_unreadable_answer_is_a_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Empty:
+        choices = ()
+        data = ({"no_embedding": 1},)
+        usage = None
+
+    async def empty(**kwargs: object) -> Empty:
+        return Empty()
+
+    monkeypatch.setattr(litellm, "acompletion", empty)
+    monkeypatch.setattr(litellm, "aembedding", empty)
+    provider = LiteLLMProvider(Settings(_env_file=None, openai_api_key=OPENAI_KEY))
+    chat = ProviderRequest(
+        kind="chat", model="openai/gpt-6-luna", messages=MESSAGES, max_tokens=5, timeout_s=5
+    )
+    embed = ProviderRequest(
+        kind="embedding", model="openai/text-embedding-3-small", texts=["a"], timeout_s=5
+    )
+    for call in (provider.complete(chat), provider.embed(embed)):
+        with pytest.raises(ProviderError) as raised:
+            await call
+        assert (raised.value.kind, raised.value.transient) == ("InvalidResponse", False)
+
+
+def test_litellm_switches_are_set_and_its_loggers_pinned_at_warning() -> None:
+    import logging
+    import os
+
+    from hub.llm.gateway import LITELLM_LOGGERS, LITELLM_SWITCHES
+
+    assert LITELLM_SWITCHES == {
+        "LITELLM_MODE": "PRODUCTION",
+        "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+        "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "True",
+    }
+    assert all(os.environ[name] == value for name, value in LITELLM_SWITCHES.items())
+    for name in LITELLM_LOGGERS:
+        assert logging.getLogger(name).level == logging.WARNING

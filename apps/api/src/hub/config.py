@@ -1,7 +1,11 @@
 """All settings of the Hub, read from the environment and `.env` (docs/operations.md §2).
 
-No other module reads environment variables. An unknown name in `.env` (a typo such as
-`DATBASE_URL`) stops the app at start, so a setting is never silently left at its default.
+No other module reads environment variables. One module sets some: `hub/llm/gateway.py` sets
+LiteLLM's switches (`LITELLM_SWITCHES`) before it imports LiteLLM, so LiteLLM loads no `.env`
+and fetches nothing from the network; no Hub setting is read from them.
+
+An unknown name in `.env` (a typo such as `DATBASE_URL`) stops the app at start, so a setting
+is never silently left at its default.
 Process environment variables have no common prefix, so pydantic-settings cannot tell an
 unknown one from `PATH` and ignores it; only `.env` is checked for unknown names.
 """

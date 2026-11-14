@@ -257,7 +257,48 @@ async def test_a_missing_fixture_is_raised_not_retried_or_sent_to_the_fallback()
     with pytest.raises(FixtureMissingError):
         await make_gateway(provider, recorder).complete("triage", user("hi"), call=CALL)
     assert len(provider.requests) == 1
-    assert recorder.rows == []
+    # Still one row for the attempt (one row per call, also for failures).
+    assert recorder.statuses() == [(HAIKU, LlmCallStatus.ERROR)]
+    assert recorder.rows[0].error == "FixtureMissing"
+
+
+async def test_an_unexpected_provider_failure_is_recorded_and_goes_to_the_fallback() -> None:
+    provider = ScriptedProvider({HAIKU: [IndexError("list index out of range")], LUNA: [ok()]})
+    recorder = MemoryRecorder()
+    sleeps = Sleeps()
+    result = await make_gateway(provider, recorder, sleeps).complete(
+        "triage", user("hi"), call=CALL
+    )
+    assert result.fallback_used
+    assert recorder.statuses() == [(HAIKU, LlmCallStatus.ERROR), (LUNA, LlmCallStatus.OK)]
+    assert recorder.rows[0].error == "IndexError"  # the class only, never the message
+    assert sleeps.waits == []
+
+
+async def test_a_paid_call_that_cannot_be_priced_is_recorded_with_its_tokens() -> None:
+    from hub.llm.gateway import Gateway
+
+    from ._llm import real_pricing
+
+    pricing = real_pricing()
+    without_haiku = {name: price for name, price in pricing.models.items() if name != HAIKU}
+    provider = ScriptedProvider({HAIKU: [ok(input_tokens=300, output_tokens=40)]})
+    recorder = MemoryRecorder()
+    gateway = Gateway(
+        models=real_models(),
+        pricing=pricing.model_copy(update={"models": without_haiku}),
+        provider=provider,
+        recorder=recorder,
+    )
+    with pytest.raises(ConfigError, match="no price"):
+        await gateway.complete("triage", user("hi"), call=CALL)
+    [row] = recorder.rows
+    assert (row.status, row.error, row.input_tokens, row.output_tokens) == (
+        LlmCallStatus.ERROR,
+        "PricingError",
+        300,
+        40,
+    )
 
 
 # --- records -------------------------------------------------------------------------------------

@@ -12,6 +12,7 @@ errors → fallback model, the same way → `LlmUnavailableError`. Every attempt
 
 import asyncio
 import json
+import logging
 import os
 import time
 from collections import Counter
@@ -47,29 +48,43 @@ from hub.llm.schemas import (
     Usage,
 )
 
-# Two switches LiteLLM reads at import (checked in LiteLLM 1.108.6, `litellm/__init__.py` and
-# `get_model_cost_map.py`):
-# - LITELLM_MODE: in its default "DEV" mode LiteLLM calls `load_dotenv()`, which copies the
-#   nearest `.env` (searched upward through parent folders) into `os.environ`. Settings are read
-#   only by hub/config.py; a `.env` copied into the environment would override and hide it.
-#   Outside the proxy server, "PRODUCTION" changes nothing else.
+# Switches LiteLLM reads from the environment (checked in LiteLLM 1.108.6). This is the one place
+# in the Hub that sets environment variables (hub/config.py). They are set before `import litellm`
+# and overwritten, not defaulted, so a stray value cannot turn the behaviour back on. Tests set
+# them in tests/conftest.py by importing this module before anything else loads.
+# - LITELLM_MODE: in its default "DEV" mode `litellm/__init__.py` calls `load_dotenv()`, which
+#   copies the nearest `.env` (searched upward through parent folders) into `os.environ`. Settings
+#   are read only by hub/config.py. Outside the proxy server, "PRODUCTION" changes nothing else.
 # - LITELLM_LOCAL_MODEL_COST_MAP: otherwise LiteLLM fetches its price map from GitHub at import.
-#   The Hub needs no network at import and takes prices from config/pricing.yaml.
-os.environ["LITELLM_MODE"] = "PRODUCTION"
-os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
-import litellm  # after the switch above
-from litellm import exceptions as litellm_errors
+#   The Hub takes prices from config/pricing.yaml.
+# - LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS: otherwise the first Anthropic call downloads, from
+#   LiteLLM's main branch, the file that decides which `anthropic-beta` headers are sent
+#   (`anthropic_beta_headers_manager.py`): unpinned remote input (threat T11).
+LITELLM_SWITCHES = {
+    "LITELLM_MODE": "PRODUCTION",
+    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+    "LITELLM_LOCAL_ANTHROPIC_BETA_HEADERS": "True",
+}
+os.environ.update(LITELLM_SWITCHES)
+import litellm  # noqa: E402 - must come after the switches above
+from litellm import exceptions as litellm_errors  # noqa: E402
 
 # Request and response bodies must never reach LiteLLM's logging callbacks or debug output.
+# LiteLLM's loggers propagate to the root logger with a DEBUG handler of their own; pinned at
+# WARNING, a DEBUG log level of the app cannot print request bodies.
 litellm.turn_off_message_logging = True
 litellm.suppress_debug_info = True
+LITELLM_LOGGERS = ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy")
+for _name in LITELLM_LOGGERS:
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 RETRIES = 2
 BACKOFF_S = 0.5  # waits 0.5 s, then 1 s
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "llm"
 
-# LiteLLM exceptions that are worth another attempt on the same model.
+# LiteLLM exceptions that are worth another attempt on the same model. Any status >= 500 is
+# transient too: LiteLLM maps a 502 to `BadGatewayError`, which is none of these classes.
 _TRANSIENT: tuple[type[Exception], ...] = (
     litellm_errors.Timeout,
     litellm_errors.RateLimitError,
@@ -169,15 +184,19 @@ class LiteLLMProvider:
             response = await litellm.acompletion(**kwargs)
         except Exception as exc:
             raise _provider_error(exc) from None
-        message = response.choices[0].message
-        return ProviderResponse(
-            content=message.content,
-            tool_calls=[
-                ToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments)
-                for call in (message.tool_calls or [])
-            ],
-            usage=_usage(response.usage),
-        )
+        try:
+            message = response.choices[0].message
+            return ProviderResponse(
+                content=message.content,
+                tool_calls=[
+                    ToolCall(id=call.id, name=call.function.name, arguments=call.function.arguments)
+                    for call in (message.tool_calls or [])
+                ],
+                usage=_usage(response.usage),
+            )
+        except Exception:
+            # An answer we cannot read (no choices, a tool call without id) is a failed call.
+            raise ProviderError("InvalidResponse", transient=False) from None
 
     async def embed(self, request: ProviderRequest) -> ProviderResponse:
         try:
@@ -191,20 +210,25 @@ class LiteLLMProvider:
             )
         except Exception as exc:
             raise _provider_error(exc) from None
-        return ProviderResponse(
-            vectors=[item["embedding"] for item in response.data],
-            usage=_usage(response.usage),
-        )
+        try:
+            return ProviderResponse(
+                vectors=[item["embedding"] for item in response.data],
+                usage=_usage(response.usage),
+            )
+        except Exception:
+            raise ProviderError("InvalidResponse", transient=False) from None
 
 
 def _provider_error(exc: Exception) -> ProviderError:
     """Only the class and status code: provider messages can echo the request."""
     if isinstance(exc, ProviderError):
         return exc
+    status_code = getattr(exc, "status_code", None)
+    status = status_code if isinstance(status_code, int) else None
     return ProviderError(
         type(exc).__name__,
-        transient=isinstance(exc, _TRANSIENT),
-        status_code=getattr(exc, "status_code", None),
+        transient=isinstance(exc, _TRANSIENT) or (status is not None and status >= 500),
+        status_code=status,
     )
 
 
@@ -258,6 +282,26 @@ class FixtureProvider:
 
     async def embed(self, request: ProviderRequest) -> ProviderResponse:
         return self._load(request)
+
+
+class RecordingProvider:
+    """Record mode (`make record-llm`): real calls, and every successful answer is written as a
+    fixture. Used inside a `Gateway`, so recording gets the G2 scan, retries and `llm_calls` rows
+    like any other call."""
+
+    def __init__(self, inner: Provider, directory: Path) -> None:
+        self._inner = inner
+        self._directory = directory
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        response = await self._inner.complete(request)
+        write_fixture(self._directory, request, response)
+        return response
+
+    async def embed(self, request: ProviderRequest) -> ProviderResponse:
+        response = await self._inner.embed(request)
+        write_fixture(self._directory, request, response)
+        return response
 
 
 def write_fixture(directory: Path, request: ProviderRequest, response: ProviderResponse) -> Path:
@@ -334,6 +378,27 @@ class Gateway:
             latency_ms=outcome.latency_ms,
         )
 
+    async def record_each_model(
+        self,
+        role: str,
+        *,
+        messages: Sequence[Message] = (),
+        texts: Sequence[str] = (),
+        tools: Sequence[dict[str, Any]] | None = None,
+        call: CallContext,
+    ) -> list[ProviderRequest]:
+        """Record mode: call the role's model and its fallback each once (with the usual G2 scan,
+        retries and rows), so fake mode has an answer for both. Returns the requests sent."""
+        if texts:
+            requests = [self.embedding_request(texts, role)]
+            send = self.provider.embed
+        else:
+            requests = self.chat_requests(role, messages, tools=tools)
+            send = self.provider.complete
+        for request in requests:
+            await self._run([request], call, send)
+        return requests
+
     def chat_requests(
         self,
         role: str,
@@ -399,9 +464,39 @@ class Gateway:
                     error = ProviderError("Timeout", transient=True)
                 except ProviderError as exc:
                     error = exc
+                except FixtureMissingError:
+                    # Fake mode without a recording: a test or setup mistake. Recorded, then
+                    # raised as it is, never sent to the fallback.
+                    await self.recorder.record(
+                        self._row(
+                            call,
+                            request.model,
+                            LlmCallStatus.ERROR,
+                            latency_ms=self._elapsed_ms(start),
+                            error="FixtureMissing",
+                        )
+                    )
+                    raise
+                except Exception as exc:
+                    # Any other failure of the provider: recorded, not retried, fallback next.
+                    error = ProviderError(type(exc).__name__, transient=False)
                 else:
                     latency_ms = self._elapsed_ms(start)
-                    cost = self.pricing.cost(request.model, response.usage)
+                    try:
+                        cost = self.pricing.cost(request.model, response.usage)
+                    except ConfigError:
+                        # The call happened and was paid: keep its tokens, then stop.
+                        await self.recorder.record(
+                            self._row(
+                                call,
+                                request.model,
+                                LlmCallStatus.ERROR,
+                                usage=response.usage,
+                                latency_ms=latency_ms,
+                                error="PricingError",
+                            )
+                        )
+                        raise
                     await self.recorder.record(
                         self._row(
                             call,

@@ -134,7 +134,7 @@ One execution of the workflow for one customer message.
 | total_cost_usd | numeric(10,6) | sum of `llm_calls` |
 | input_tokens, output_tokens | int | |
 | latency_ms | int null | until the customer got a message |
-| error | text null | error class and status code only, never provider text (it can echo the request) |
+| error | text null | |
 | trace_id | text null | Langfuse trace |
 | started_at, finished_at | timestamptz | |
 
@@ -166,7 +166,7 @@ Own record of every model call. Source of truth for cost.
 |---|---|---|
 | id | uuid PK | |
 | run_id | uuid FK null | null for eval judges, embeddings and background calls. The foreign key to `runs` is added in P3-05 (the table did not exist in P3-01) |
-| context | text | `online` \| `eval` \| `memory` |
+| context | text | `online` \| `eval` \| `memory` \| `record` (`make record-llm`) |
 | node | text | `triage`, `research`, `write`, `verify`, `handoff_prep`, `memory_summary`, `judge`, `embedding` |
 | model | text | provider model id |
 | prompt_version | text null | null for embeddings (no prompt file) |

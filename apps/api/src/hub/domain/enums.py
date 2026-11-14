@@ -102,6 +102,7 @@ class LlmCallContext(StrEnum):
     ONLINE = "online"
     EVAL = "eval"
     MEMORY = "memory"
+    RECORD = "record"  # `make record-llm`: refreshing the fake-mode recordings
 
 
 class LlmNode(StrEnum):
