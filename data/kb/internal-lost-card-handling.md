@@ -32,7 +32,7 @@ A card that has not arrived is not lost until the delivery time has passed.
 
 1. Check the delivery method and the order date.
 2. If the time has not passed, explain the delivery time.
-3. If the time has passed, freeze the card and discuss a replacement with the customer. Waiving the new delivery fee follows the goodwill rules above.
+3. If the time has passed, freeze the card and discuss a replacement with the customer. The operator decides about the delivery fee for this replacement.
 
 ## Card found again
 

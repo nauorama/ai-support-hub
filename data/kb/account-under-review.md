@@ -24,10 +24,6 @@ A person from our team handles your case.
 
 A review typically takes up to 10 business days. Business days are Monday to Friday, without the closing days of the euro payment system (TARGET calendar).
 
-## Information about the review
-
-Our support team cannot share more information about the review. We will contact you if we need documents from you.
-
 ## Is this the same as an unfinished identity check?
 
 No. If your identity check is not finished, the app shows ERR-5011, not ERR-5010. With ERR-5011 you can log in and upload documents to finish the check. See the article about accounts that are not verified yet.

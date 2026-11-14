@@ -25,7 +25,7 @@ A GBP payment by Faster Payments arrives on the same day. Receiving GBP by Faste
 
 When your payer pays a Payment Request by card, you see the payment at once as *pending*. The money is available after 3 business days.
 
-New accounts: for your first 3 card payments, the money is available after 7 calendar days.
+New accounts: for your first 3 Payment Requests paid by card, the money is available after 7 calendar days.
 
 ## What a business day is
 
