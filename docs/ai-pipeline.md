@@ -229,6 +229,8 @@ Decision table:
 | 8 | `confidence < confidence_threshold` | approval | `low_confidence` |
 | 9 | Otherwise | auto_reply | — |
 
+Outside the graph, one more reason code: **`operator_takeover`** (route handoff). An operator claims a ticket that is still in `processing` (`POST /console/tickets/{id}/claim`); the claim hands it off first (`processing → handed_off`), so the operator owns it like any other handoff. In phase 2 this is how a new ticket reaches a human, because no run exists yet. There is no direct operator reply on a `processing` ticket: from phase 6 it would let an operator and the AI answer the same ticket. (Phase 6 decides what a takeover does to a run that is still going.)
+
 Jira issues:
 - **Dispute tickets** go through research and writing (route: approval). The writer explains the dispute process and adds a `ProposedAction` of type `dispute` with the transaction from the account facts. The operator checks the draft, ticks the action and sends.
 - **Fraud handoffs** skip research, so there is no draft. The console pre-fills the action form (type `fraud`, summary = triage summary, customer reference); the operator sends it with `POST /console/tickets/{id}/actions`. No model output is needed for this.

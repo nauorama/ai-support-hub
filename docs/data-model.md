@@ -44,6 +44,9 @@ Mirror of the demo customers from the core mock. Only what the Hub needs.
 | role | text | `operator` \| `lead` \| `compliance` \| `admin` |
 | is_active | bool | |
 | last_login_at | timestamptz null | |
+| failed_logins | int | wrong passwords since the last success or lock; `CHECK >= 0` (security §4) |
+| locked_until | timestamptz null | login refused until then (10th wrong password → 15 minutes) |
+| session_version | int | starts at 1, `CHECK >= 1`; written into the signed session cookie. Logout and a password change increase it, which ends every session of the operator |
 
 ### tickets
 
@@ -89,6 +92,10 @@ stateDiagram-v2
 
 Ownership rule: after the first handoff or approval in a ticket, a human owns the ticket. New customer messages do not start a new AI run; they appear in the operator queue.
 
+`processing → answered` is the AI's auto-reply only; an operator never takes it. Until the workflow exists (phase 6) a ticket in `processing` has no run; it reaches the operators through the queue, and a claim hands it off first (`processing → handed_off`, reason `operator_takeover`, [ai-pipeline](ai-pipeline.md) §6). Then the operator replies (`handed_off → answered`).
+
+The status changes only through `TicketRepository.change_status`, which checks this diagram. A status set any other way is refused when the session flushes, and every `INSERT`, `UPDATE` or `DELETE` statement on `tickets` run with `Session.execute` (a bulk statement, which the flush checks never see) is refused too. Many tickets, such as the `close-stale` job, are changed one by one.
+
 Closing: an operator closes a ticket by hand, or the scheduled job `close-stale` closes `answered` tickets after 72 h without a customer message. Closing writes the memory summary ([ai-pipeline](ai-pipeline.md) §9).
 
 ### messages
@@ -105,6 +112,8 @@ Closing: an operator closes a ticket by hand, or the scheduled job `close-stale`
 | citations | jsonb | `[{"marker": 1, "chunk_id": "...", "doc_id": "...", "title": "...", "url": "..."}]` |
 | masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}`; `{"failed": 1}` when masking failed (every digit hidden, counts unknown) |
 | idempotency_key | text null unique | |
+
+Order of messages: `(created_at, id)`. The chat polls `?after=<message id>`, so a message must never be saved with a time earlier than one a client has already seen. `created_at` is therefore `clock_timestamp()` taken at the `INSERT`, after the writer has locked the ticket row (`SELECT … FOR UPDATE`, held until commit; `MessageRepository.add` does both). A second writer on the same ticket waits until the first one commits, so its time is later than every message already visible. The column default (`now()`, the transaction start) is not used for messages: a transaction that started earlier but committed later would sort its message before an anchor the client already has.
 
 ### runs
 One execution of the workflow for one customer message.

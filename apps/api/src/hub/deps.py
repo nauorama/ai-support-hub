@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from hub.api.limits import RateLimits
 from hub.auth.customer_session import CustomerSessionSigner
+from hub.auth.operator_session import OperatorSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
 from hub.observability.readiness import (
@@ -30,6 +31,12 @@ class Container:
         """`None` while SESSION_SECRET is empty: then no customer session can be made or read."""
         secret = self.settings.session_secret.get_secret_value()
         return CustomerSessionSigner(secret) if secret else None
+
+    @property
+    def operator_session_signer(self) -> OperatorSessionSigner | None:
+        """`None` while SESSION_SECRET is empty: then no operator can log in."""
+        secret = self.settings.session_secret.get_secret_value()
+        return OperatorSessionSigner(secret) if secret else None
 
 
 def build_container(settings: Settings) -> Container:

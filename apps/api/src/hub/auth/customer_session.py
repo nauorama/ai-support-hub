@@ -17,7 +17,7 @@ from itsdangerous import BadData, URLSafeTimedSerializer
 COOKIE_NAME = "hub_customer"
 # The same lifetime as an operator session (security §4).
 MAX_AGE_SECONDS = 8 * 60 * 60
-# Separates this signature from any other use of SESSION_SECRET (the operator session, P10).
+# Separates this signature from any other use of SESSION_SECRET (the operator session).
 _SALT = "hub-customer-session"
 
 

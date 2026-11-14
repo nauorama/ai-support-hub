@@ -33,8 +33,8 @@ lint:
 
 # Coverage gate for deterministic safety code (AGENTS.md, security §3): >= 95% line coverage.
 # hub.domain holds the ticket status transitions and the seed rules; hub.audit.chain the audit
-# hash chain and the masking of audit details; hub.auth the password hashing (login joins in
-# P2-07). Add tools/permissions here when it is built.
+# hash chain and the masking of audit details; hub.auth the password hashing, the operator
+# session and CSRF token, the role rules and the login lockout. Add tools/permissions here when it is built.
 SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov=hub.auth --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:

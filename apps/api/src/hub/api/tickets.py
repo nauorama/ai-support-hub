@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from hub.api.dependencies import ContainerDep, CustomerDep, SessionDep, client_ip
 from hub.api.errors import ProblemError
+from hub.api.message_helpers import SYSTEM_LABEL, audit_masking, author_label, masked_entities
 from hub.api.schemas import (
     FeedbackIn,
     FeedbackOut,
@@ -40,7 +41,6 @@ from hub.db.repositories import (
     ConcurrentUpdateError,
     FeedbackRepository,
     MessageRepository,
-    OperatorRepository,
     TicketRepository,
 )
 from hub.deps import Container
@@ -53,10 +53,6 @@ PLACEHOLDER_TEXT = (
     "Thanks, we have your message. Our support team will reply in this chat. "
     "You can close this window; the answer will wait for you here."
 )
-SYSTEM_LABEL = "Tallybridge"
-CUSTOMER_LABEL = "You"
-AI_LABEL = "AI assistant"
-OPERATOR_LABEL = "Support team"
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
 
@@ -86,31 +82,11 @@ def _ticket_out(ticket: Ticket) -> TicketOut:
     )
 
 
-async def _author_label(session: AsyncSession, message: Message) -> str:
-    match message.role:
-        case MessageRole.CUSTOMER:
-            return CUSTOMER_LABEL
-        case MessageRole.ASSISTANT:
-            return AI_LABEL
-        case MessageRole.SYSTEM:
-            return SYSTEM_LABEL
-        case MessageRole.OPERATOR:
-            # Security §7: the operator's first name and "Support team".
-            operator = (
-                await OperatorRepository(session).get(message.author_operator_id)
-                if message.author_operator_id
-                else None
-            )
-            if operator is None or not operator.name.strip():
-                return OPERATOR_LABEL
-            return f"{operator.name.split()[0]} · {OPERATOR_LABEL}"
-
-
 async def _message_out(session: AsyncSession, message: Message) -> MessageOut:
     return MessageOut(
         id=message.id,
         role=message.role,
-        author_label=await _author_label(session, message),
+        author_label=await author_label(session, message),
         is_ai_generated=message.is_ai_generated,
         body=message.body,
         citations=citations_for_customer(message.citations),
@@ -240,24 +216,7 @@ async def _audit_message(
         entity_id=ticket_id,
         details={"message_id": message_id},
     )
-    await _audit_masking(session, masked, entity_type="message", entity_id=message_id)
-
-
-async def _audit_masking(
-    session: AsyncSession, masked: MaskResult, *, entity_type: str, entity_id: uuid.UUID
-) -> None:
-    """`guardrail.masked` when something was masked, and also when masking failed: then every
-    digit was replaced and the counts are unknown, and the failure must leave a trace."""
-    if masked.counts or masked.failed:
-        await record(
-            session,
-            actor_type=ActorType.SYSTEM,
-            actor_id=None,
-            action="guardrail.masked",
-            entity_type=entity_type,
-            entity_id=entity_id,
-            details={"counts": dict(masked.counts), "failed": masked.failed},
-        )
+    await audit_masking(session, masked, entity_type="message", entity_id=message_id)
 
 
 async def _change_status_or_409(
@@ -315,15 +274,6 @@ async def _save_or_replay(
     return _stream(message.ticket_id, await _message_out(session, message), status)
 
 
-def _masked_entities(masked: MaskResult) -> dict[str, int]:
-    """Counts by type only, e.g. `{"PAN": 1}` (data model, `messages.masked_entities`). After a
-    failed mask the counts are unknown but every digit was hidden: `{"failed": 1}`, so the
-    customer view still says that something was masked."""
-    if masked.failed:
-        return {"failed": 1}
-    return {str(kind): count for kind, count in masked.counts.items()}
-
-
 def _human_owns(ticket: Ticket) -> bool:
     """After the first handoff or approval in a ticket, a human owns it (data model §1)."""
     return ticket.last_route in (Route.APPROVAL, Route.HANDOFF)
@@ -360,7 +310,7 @@ async def create_ticket(
             ticket_id=ticket.id,
             role=MessageRole.CUSTOMER,
             body=masked.text,
-            masked_entities=_masked_entities(masked),
+            masked_entities=masked_entities(masked),
             idempotency_key=scoped_key,
         )
         await _audit_message(
@@ -403,11 +353,15 @@ async def add_message(
     customer_id, ticket_id = customer.id, ticket.id
 
     async def save() -> tuple[Message, TicketStatus | None]:
+        # The check above ran before the lock: an operator may have closed the ticket since.
+        await TicketRepository(session).lock(ticket)
+        if ticket.status == TicketStatus.CLOSED:
+            raise ProblemError(409, "ticket_closed", "This ticket is closed. Start a new one.")
         message = await messages.add(
             ticket_id=ticket_id,
             role=MessageRole.CUSTOMER,
             body=masked.text,
-            masked_entities=_masked_entities(masked),
+            masked_entities=masked_entities(masked),
             idempotency_key=scoped_key,
         )
         status = await _hand_off_after_mask_failure(session, ticket, masked)
@@ -547,6 +501,6 @@ async def give_feedback(
         details={"feedback_id": feedback.id, "rating": body.rating.value},
     )
     if masked is not None:
-        await _audit_masking(session, masked, entity_type="feedback", entity_id=feedback.id)
+        await audit_masking(session, masked, entity_type="feedback", entity_id=feedback.id)
     await session.commit()
     return FeedbackOut(id=feedback.id)
