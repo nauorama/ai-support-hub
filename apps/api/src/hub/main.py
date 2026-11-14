@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from hub.api.auth import router as auth_router
+from hub.api.console import router as console_router
 from hub.api.demo import router as demo_router
 from hub.api.errors import install_error_handlers
 from hub.api.health import router as health_router
@@ -40,4 +42,6 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(health_router)
     app.include_router(demo_router)
     app.include_router(tickets_router)
+    app.include_router(auth_router)
+    app.include_router(console_router)
     return app

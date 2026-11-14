@@ -134,3 +134,6 @@ class RateLimits:
         self.messages_per_ip = RateLimiter(60, 60 * 60, clock)
         # Wrong demo access codes: the same limit as the operator login.
         self.access_code_failures_per_ip = RateLimiter(5, 15 * 60, clock)
+        # Operator login: 5 failed tries per 15 minutes per IP. The lockout of one account after
+        # 10 failures is kept in the database instead (`hub/auth/lockout.py`).
+        self.login_failures_per_ip = RateLimiter(5, 15 * 60, clock)

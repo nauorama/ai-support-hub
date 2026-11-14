@@ -10,11 +10,13 @@ before anything reaches this module.
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import ColumnElement, case, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm.exc import StaleDataError
 
 from hub.db.models import (
@@ -26,7 +28,14 @@ from hub.db.models import (
     Ticket,
     approve_status_change,
 )
-from hub.domain.enums import FeedbackRating, MessageRole, SettingKey, TicketStatus
+from hub.domain.enums import (
+    FeedbackRating,
+    Intent,
+    MessageRole,
+    SettingKey,
+    TicketStatus,
+    Urgency,
+)
 from hub.domain.ticket_status import INITIAL_STATUS, check_transition
 
 
@@ -65,9 +74,25 @@ class OperatorRepository:
     async def get(self, operator_id: uuid.UUID) -> Operator | None:
         return await self._session.get(Operator, operator_id)
 
-    async def get_by_email(self, email: str) -> Operator | None:
-        result = await self._session.execute(select(Operator).where(Operator.email == email))
+    async def get_by_email(self, email: str, *, for_update: bool = False) -> Operator | None:
+        """Case-insensitive. `for_update` locks the row, so two failed logins at the same time
+        both count (`failed_logins`)."""
+        statement = select(Operator).where(func.lower(Operator.email) == email.lower())
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self._session.execute(statement)
         return result.scalar_one_or_none()
+
+    async def change_password(self, operator: Operator, password_hash: str) -> None:
+        """Store a new hash and end every session of the operator (`session_version`)."""
+        operator.password_hash = password_hash
+        operator.session_version += 1
+        await self._session.flush()
+
+    async def end_sessions(self, operator: Operator) -> None:
+        """Logout: every cookie issued so far stops working, a copied one too."""
+        operator.session_version += 1
+        await self._session.flush()
 
 
 class TicketRepository:
@@ -129,6 +154,128 @@ class TicketRepository:
             raise ConcurrentUpdateError(f"ticket {ticket_id} was changed by someone else") from exc
 
 
+# Sort rank of urgency in the operator queue: high first. A ticket without urgency (no triage
+# yet, phase 2) ranks last.
+_URGENCY_RANK = case(
+    (Ticket.urgency == Urgency.HIGH, 3),
+    (Ticket.urgency == Urgency.NORMAL, 2),
+    (Ticket.urgency == Urgency.LOW, 1),
+    else_=0,
+)
+
+
+@dataclass(frozen=True)
+class QueueFilters:
+    """Filters of `GET /console/tickets` (api.md §3). `None` means "no filter"."""
+
+    statuses: frozenset[TicketStatus] | None = None
+    intent: Intent | None = None
+    urgency: Urgency | None = None
+    # A specific operator, or `UNASSIGNED`; `None` = any.
+    assigned_to: uuid.UUID | Literal["none"] | None = None
+    route_reason: str | None = None
+    q: str | None = None
+    ticket_id: uuid.UUID | None = None
+
+
+@dataclass(frozen=True)
+class QueueCursor:
+    """Keyset position in the queue order: urgency rank desc, waiting since asc, id asc."""
+
+    urgency_rank: int
+    waiting_since: datetime
+    ticket_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class QueueRow:
+    ticket: Ticket
+    customer: Customer
+    assignee: Operator | None
+    waiting_since: datetime
+    urgency_rank: int
+
+    @property
+    def cursor(self) -> QueueCursor:
+        return QueueCursor(self.urgency_rank, self.waiting_since, self.ticket.id)
+
+
+def _like_pattern(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+class QueueRepository:
+    """The operator queue (console list and the row of one ticket)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def page(
+        self, filters: QueueFilters, *, limit: int, after: QueueCursor | None = None
+    ) -> list[QueueRow]:
+        """Default order (api.md §3): urgency desc, waiting time desc. A ticket waits since the
+        last customer message (the ticket's creation when it has none)."""
+        last_customer_message = (
+            select(func.max(Message.created_at))
+            .where(Message.ticket_id == Ticket.id, Message.role == MessageRole.CUSTOMER)
+            .correlate(Ticket)
+            .scalar_subquery()
+        )
+        waiting_since = func.coalesce(last_customer_message, Ticket.created_at)
+        assignee = aliased(Operator)
+        statement = (
+            select(Ticket, Customer, assignee, waiting_since, _URGENCY_RANK)
+            .join(Customer, Customer.id == Ticket.customer_id)
+            .outerjoin(assignee, assignee.id == Ticket.assigned_operator_id)
+        )
+        statement = statement.where(*self._conditions(filters))
+        if after is not None:
+            # Row comparison: (-rank, waiting, id) ascending is the queue order.
+            statement = statement.where(
+                tuple_(-_URGENCY_RANK, waiting_since, Ticket.id)
+                > tuple_(-after.urgency_rank, after.waiting_since, after.ticket_id)
+            )
+        statement = statement.order_by(_URGENCY_RANK.desc(), waiting_since, Ticket.id).limit(limit)
+        result = await self._session.execute(statement)
+        return [
+            QueueRow(ticket, customer, operator, waited, rank)
+            for ticket, customer, operator, waited, rank in result
+        ]
+
+    async def get(self, ticket_id: uuid.UUID) -> QueueRow | None:
+        rows = await self.page(QueueFilters(ticket_id=ticket_id), limit=1)
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _conditions(filters: QueueFilters) -> list[ColumnElement[bool]]:
+        conditions: list[ColumnElement[bool]] = []
+        if filters.ticket_id is not None:
+            conditions.append(Ticket.id == filters.ticket_id)
+        if filters.statuses is not None:
+            conditions.append(Ticket.status.in_(sorted(filters.statuses)))
+        if filters.intent is not None:
+            conditions.append(Ticket.intent == filters.intent)
+        if filters.urgency is not None:
+            conditions.append(Ticket.urgency == filters.urgency)
+        if filters.assigned_to == "none":
+            conditions.append(Ticket.assigned_operator_id.is_(None))
+        elif filters.assigned_to is not None:
+            conditions.append(Ticket.assigned_operator_id == filters.assigned_to)
+        if filters.route_reason is not None:
+            conditions.append(Ticket.route_reasons.contains([filters.route_reason]))
+        if filters.q:
+            pattern = _like_pattern(filters.q)
+            conditions.append(
+                or_(
+                    Ticket.summary.ilike(pattern, escape="\\"),
+                    Customer.display_name.ilike(pattern, escape="\\"),
+                    Customer.external_ref.ilike(pattern, escape="\\"),
+                )
+            )
+        return conditions
+
+
 class MessageRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -146,6 +293,7 @@ class MessageRepository:
         masked_entities: dict[str, int] | None = None,
         idempotency_key: str | None = None,
     ) -> Message:
+        await self.lock_ticket(ticket_id)
         message = Message(
             ticket_id=ticket_id,
             role=role,
@@ -156,18 +304,39 @@ class MessageRepository:
             citations=citations or [],
             masked_entities=masked_entities or {},
             idempotency_key=idempotency_key,
+            # Taken at the INSERT, after the lock above: see `lock_ticket`.
+            created_at=func.clock_timestamp(),
         )
         self._session.add(message)
         await self._session.flush()
         return message
+
+    async def lock_ticket(self, ticket_id: uuid.UUID) -> None:
+        """Serialise message writes per ticket (P2-06 review, P2-07).
+
+        The chat polls `?after=<last message id>` and gets the messages ordered after it by
+        `(created_at, id)`. With `created_at = now()` (the transaction start), a message saved
+        by a transaction that began earlier but committed later sorts before an anchor the
+        client already has, and the client never sees it. A sequence or `clock_timestamp()`
+        alone does not help: both are taken at the INSERT, not at commit.
+
+        So every message write first locks the ticket row (`SELECT ... FOR UPDATE`, held until
+        the transaction ends) and only then takes `clock_timestamp()`. A second writer waits for
+        the first to commit, so its timestamp is later than every message already visible.
+        Called by `add`, so no caller can forget it. Lock order everywhere: ticket row first,
+        then the audit advisory lock (`hub/audit/log.py`), so the two cannot deadlock.
+        """
+        await self._session.execute(
+            select(Ticket.id).where(Ticket.id == ticket_id).with_for_update()
+        )
 
     async def get_by_idempotency_key(self, key: str) -> Message | None:
         result = await self._session.execute(select(Message).where(Message.idempotency_key == key))
         return result.scalar_one_or_none()
 
     async def list_for_ticket(self, ticket_id: uuid.UUID) -> Sequence[Message]:
-        # created_at is the transaction start, equal for messages of one transaction; the
-        # UUID v7 id breaks the tie in creation order.
+        # created_at is the INSERT time under the ticket lock (`lock_ticket`); the UUID v7 id
+        # breaks a tie in creation order.
         result = await self._session.execute(
             select(Message)
             .where(Message.ticket_id == ticket_id)

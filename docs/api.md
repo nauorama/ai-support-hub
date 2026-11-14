@@ -12,7 +12,7 @@ Base path `/api/v1`. JSON, `snake_case`. FastAPI generates the OpenAPI file; thi
 - **Request id:** every response has an `X-Request-ID` header. A caller's own `X-Request-ID` is kept when it has 1–64 characters from `A-Z a-z 0-9 . _ -`, no run of 13 or more digits, and nothing the card-data mask (G1, which also masks the logs) would change, so the id reads the same in the logs; otherwise the API generates one: 32 lowercase letters `a`–`p` (a random UUID's hex digits mapped to letters), so it has no digits and the mask can never change it. Every log line of the request carries it as `request_id`, exactly as in the header.
 - **Auth:** two cookie sessions, both `HttpOnly`, `Secure`, `SameSite=Lax`, signed.
   - `hub_customer` — demo customer session (stands for the login of the Tallybridge app).
-  - `hub_operator` — operator session. State-changing console requests also need the `X-CSRF-Token` header.
+  - `hub_operator` — operator session (8 hours from login). Every request that is not `GET`/`HEAD`/`OPTIONS` on `/console`, `/admin` and `/auth/logout` also needs the `X-CSRF-Token` header with the token from `POST /auth/login` or `GET /auth/me`. Answers: no or invalid session → `401 unauthorized`; missing or wrong token → `403 csrf_failed`; role not allowed → `403 forbidden` ([security](security.md) §4).
 - **Scheduled jobs:** `POST /admin/jobs/{name}` accepts a bearer token (`JOBS_TOKEN`) instead of a session, because GitHub Actions calls it. The token works only for these endpoints.
 - **Roles:** `operator` < `lead` < `admin`; `compliance` can read tickets and the audit log, and cannot change anything.
 - **Idempotency:** `Idempotency-Key` header (UUID) on every POST that creates a message or runs an action; a missing or malformed key is a `validation_error`. The same key returns the first result. Keys are scoped to the caller (a customer's key never returns another customer's result). The same key sent with a different request (other text, other ticket) returns `409 idempotency_key_reused`.
@@ -62,19 +62,19 @@ All need `hub_operator`. Minimum role in brackets.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/auth/login` | `{"email", "password"}` → sets cookie, returns operator + CSRF token. |
-| POST | `/auth/logout` | |
-| GET | `/auth/me` | Current operator. |
-| GET | `/console/tickets` [operator] | Filters: `status`, `intent`, `urgency`, `assigned=me\|none\|any`, `route_reason`, `q`. Default sort: urgency desc, waiting time desc. |
-| GET | `/console/tickets/{id}` [operator] | Full ticket: messages, latest run, draft, evidence, route reasons, confidence, customer profile, memory, tool calls, trace URL, `version`. |
-| POST | `/console/tickets/{id}/claim` [operator] | Assign to me. 409 when another operator has it (lead can override with `?force=true`). |
-| POST | `/console/tickets/{id}/release` [operator] | Unassign. |
+| POST | `/auth/login` | `{"email", "password"}` → sets cookie, returns `{"operator": {"id", "email", "name", "role"}, "csrf_token"}`. Every failure (unknown email, inactive, wrong password, locked account) → `401 invalid_credentials`; 5 failures per 15 minutes per IP → 429; `SESSION_SECRET` empty → `503 login_unavailable`. |
+| POST | `/auth/logout` | 204. Ends **every** session of this operator (the stored `session_version` moves on), not only this browser's. Needs the CSRF token. |
+| GET | `/auth/me` | Current operator, same shape as the login answer (`operator`, `csrf_token`), so the console gets the token again after a page reload. |
+| GET | `/console/tickets` [operator] | Filters: `status` (repeatable), `intent`, `urgency`, `assigned=me\|none\|any`, `route_reason`, `q` (summary, customer name or reference). Without `status` every status is listed, `processing` included. Default sort: urgency desc (none last), waiting time desc; a ticket waits since its last customer message. Pagination with an opaque cursor. Compliance can read. |
+| GET | `/console/tickets/{id}` [operator] | Full ticket: messages, latest run, draft, evidence, route reasons, confidence, customer profile, memory, tool calls, trace URL, `version`. Fields of later phases are `null` or `[]` until then. Compliance can read. |
+| POST | `/console/tickets/{id}/claim` [operator] | Body `{"ticket_version"}`. Assign to me. 409 `conflict` when another operator has it (lead can override with `?force=true`; an operator with `force` → 403). A `processing` ticket is handed off first (reason `operator_takeover`, [ai-pipeline](ai-pipeline.md) §6). Closed → `409 ticket_closed`. |
+| POST | `/console/tickets/{id}/release` [operator] | Body `{"ticket_version"}`. Unassign. Only the operator who claimed it, or a lead. |
 | POST | `/console/drafts/{id}/approve` [operator] | Body `{"ticket_version": 7, "approved_actions": ["a1"]}`. Sends the draft unchanged, resumes the run. |
 | POST | `/console/drafts/{id}/edit` [operator] | Body `{"ticket_version", "body", "approved_actions"}`. Sends the edited text. The server masks card data and checks that citation markers still exist. |
 | POST | `/console/drafts/{id}/reject` [operator] | Body `{"ticket_version", "reason", "note", "reply_body": null}`. With `reply_body` the operator's own answer is sent; without it the ticket stays `handed_off`. |
-| POST | `/console/tickets/{id}/reply` [operator] | Free reply on a handed-off or answered ticket. The first reply on a handed-off ticket resumes the paused run ([ai-pipeline](ai-pipeline.md) §1); body may include `approved_actions`. |
+| POST | `/console/tickets/{id}/reply` [operator] | Body `{"ticket_version", "body"}`, `Idempotency-Key` required. Free reply on a handed-off or answered ticket (`handed_off → answered`); the text is masked (G1) and limited to 4,000 characters like a customer message. Returns the stored message. Another status → 409 (`processing`: claim first; `pending_approval`: use the draft endpoints); another operator's claim → `409 conflict`. The first reply on a handed-off ticket resumes the paused run ([ai-pipeline](ai-pipeline.md) §1, phase 6); body may include `approved_actions` (phase 7). |
 | POST | `/console/tickets/{id}/actions` [operator] | Run a tool action by hand: `{"type": "jira_create_issue", "params": {...}}`. |
-| POST | `/console/tickets/{id}/close` [operator] | |
+| POST | `/console/tickets/{id}/close` [operator] | Body `{"ticket_version"}`. Only `answered` or `handed_off` tickets (state diagram); another status → `409 conflict`. |
 | GET | `/console/kb/search?q=` [operator] | Hybrid search, includes `internal` articles. |
 | GET | `/console/kb/documents/{id}` [operator] | Article text. |
 | GET | `/console/metrics/summary?from=&to=` [lead] | Numbers for the dashboard (section 5). |
@@ -88,7 +88,7 @@ All need `hub_operator`. Minimum role in brackets.
 | POST | `/admin/jobs/{name}` [job token] | `name` = `retention` \| `recover-runs` \| `close-stale` (close `answered` tickets after 72 h, write memory summaries) \| `ping` (touches Postgres and Qdrant so the free services stay awake). Returns a short report. |
 | DELETE | `/admin/customers/{id}/data` [admin] | Erasure (see [security](security.md) §6). |
 
-Conflict rule: every state-changing draft or ticket request sends `ticket_version`. If the ticket changed (for example the customer wrote again), the server returns `409 stale_draft`.
+Conflict rule: every state-changing draft or ticket request sends `ticket_version`. If the ticket changed (for example the customer wrote again), the server returns `409 stale_draft`. Claim, release and close answer with the ticket's queue row (with the new `version`); reply answers with the stored message.
 
 ## 4. SSE stream for a customer message
 

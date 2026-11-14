@@ -32,6 +32,7 @@ from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
     Mapper,
+    ORMExecuteState,
     Session,
     SessionTransaction,
     mapped_column,
@@ -133,7 +134,11 @@ class Customer(Base):
 
 class Operator(Base):
     __tablename__ = "operators"
-    __table_args__ = (enum_check("role", OperatorRole),)
+    __table_args__ = (
+        enum_check("role", OperatorRole),
+        CheckConstraint("failed_logins >= 0", name="failed_logins"),
+        CheckConstraint("session_version >= 1", name="session_version"),
+    )
 
     id: Mapped[uuid.UUID] = _id_column()
     email: Mapped[str] = mapped_column(unique=True)
@@ -142,6 +147,13 @@ class Operator(Base):
     role: Mapped[OperatorRole] = mapped_column(TextEnum(OperatorRole))
     is_active: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
     last_login_at: Mapped[datetime | None]
+    # Lockout after repeated wrong passwords (security §4), kept in the database so that it
+    # survives a restart or a scale-to-zero (migration 0004).
+    failed_logins: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    locked_until: Mapped[datetime | None]
+    # Written into the signed session cookie; logout and a password change increase it, which
+    # ends every session of this operator (`hub/auth/operator_session.py`).
+    session_version: Mapped[int] = mapped_column(default=1, server_default=text("1"))
     created_at: Mapped[datetime] = _created_at_column()
 
 
@@ -248,6 +260,36 @@ def _forget_approvals_on_rollback(session: Session, _previous: SessionTransactio
 @event.listens_for(Session, "after_commit")
 def _forget_approvals_on_commit(session: Session) -> None:
     _forget_approvals(session)
+
+
+class BulkTicketWriteRefusedError(StatusChangeRefusedError):
+    """An INSERT, UPDATE or DELETE statement on `tickets` was run with `Session.execute`."""
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _refuse_bulk_ticket_writes(state: ORMExecuteState) -> None:
+    """The mapper events above do not see statements run with `Session.execute`:
+    `update(Ticket).values(status=...)` would change a status without `change_status`, skip the
+    `version` check, and an `insert(Ticket)` could start a ticket in any status (P2-06 review).
+    So every DML statement on `tickets` through a session is refused; ticket rows change only
+    through the ORM unit of work. Many tickets (e.g. `close-stale`, P8-05) are changed one by
+    one with `change_status`.
+
+    `do_orm_execute` fires for every `Session.execute`, Core `update(tickets_table)` included.
+    Plain SQL text cannot be inspected and is out of reach; the app never writes tickets that way.
+    """
+    if not (state.is_insert or state.is_update or state.is_delete):
+        return
+    statement = state.statement
+    # `select(Ticket).from_statement(update(Ticket)...)` wraps the DML statement.
+    dml = getattr(statement, "element", statement)
+    # By name: an ORM statement carries an annotated copy of the table, not the table object.
+    table = getattr(dml, "table", None)
+    if getattr(table, "name", None) == Ticket.__tablename__:
+        raise BulkTicketWriteRefusedError(
+            "tickets are written through the ORM only; change a status with "
+            "TicketRepository.change_status"
+        )
 
 
 class Message(Base):
