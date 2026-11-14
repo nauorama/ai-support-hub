@@ -63,7 +63,12 @@ seed:
 	uv run python -m hub.seed data/seed
 
 # operations §1: dev = up + migrate + seed + kb-load. kb-load joins here when it is built (P2-09).
-dev: up migrate seed
+# The check runs first and alone: with required settings empty (SEED_OPERATOR_PASSWORD,
+# SESSION_SECRET, DEMO_ACCESS_CODE) it lists them all and stops before anything starts. The
+# steps run through a sub-make, in this order, so the check always comes before them.
+dev:
+	uv run python -m hub.dev_check
+	$(MAKE) --no-print-directory up migrate seed
 	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
 
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).
