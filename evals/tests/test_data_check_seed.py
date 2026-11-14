@@ -18,11 +18,11 @@ SEED = ROOT / "data" / "seed"
 
 @pytest.fixture
 def data(tmp_path: Path) -> Path:
-    """A copy of the repository's `data/` folder with the real seed files."""
+    """A copy of the repository's `data/` folder with the real seed and KB files."""
     target = tmp_path / "data"
-    for folder in ("kb", "eval"):
-        (target / folder).mkdir(parents=True)
+    (target / "eval").mkdir(parents=True)
     shutil.copytree(SEED, target / "seed")
+    shutil.copytree(ROOT / "data" / "kb", target / "kb")
     return target
 
 
@@ -64,6 +64,30 @@ def test_invalid_json_is_reported(data: Path) -> None:
     (data / "seed" / "operators.json").write_text("[{", encoding="utf-8")
     errors = check_seed(data / "seed")
     assert any("Invalid JSON" in e or "json_invalid" in e or "EOF" in e for e in errors)
+
+
+def test_a_seed_code_missing_from_the_csv_fails(data: Path) -> None:
+    csv = data / "kb" / "error_codes.csv"
+    lines = csv.read_text(encoding="utf-8").splitlines(keepends=True)
+    csv.write_text(
+        "".join(line for line in lines if not line.startswith("ERR-5010")), encoding="utf-8"
+    )
+    errors = check_seed(data / "seed")
+    assert errors
+    assert all("ERR-5010 is not in data/kb/error_codes.csv" in e for e in errors)
+
+
+def test_without_the_csv_the_seed_codes_cannot_be_checked(data: Path) -> None:
+    (data / "kb" / "error_codes.csv").unlink()
+    assert check_seed(data / "seed") == [
+        "seed: error codes cannot be checked: error_codes.csv missing or invalid"
+    ]
+
+
+def test_without_the_csv_other_seed_rules_still_run(data: Path) -> None:
+    (data / "kb" / "error_codes.csv").unlink()
+    _edit(data, "cards.json", 0, customer_ref="CUS-9999")
+    assert any("unknown customer CUS-9999" in e for e in check_seed(data / "seed"))
 
 
 def test_a_cross_file_error_is_reported(data: Path) -> None:

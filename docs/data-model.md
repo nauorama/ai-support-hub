@@ -305,7 +305,7 @@ updated_at: 2026-10-01
 ...
 ```
 
-Rules: one topic per article; 150–600 words; `##` sections that make sense alone; every number comes from [the world file](tallybridge-world.md); about 10 articles are `internal` (operator procedures, escalation rules, compliance wording). `error_codes.csv` has the columns `code, title, customer_explanation, customer_action, visibility` — each row becomes one chunk.
+Rules: one topic per article; 150–600 words; the body starts with a `##` section (no `#` heading; the title is in the front matter) and `##` sections make sense alone; `id` equals the file name; every number comes from [the world file](tallybridge-world.md); about 10 articles are `internal` (operator procedures, escalation rules, compliance wording). `error_codes.csv` has the columns `code, title, customer_explanation, customer_action, visibility` — each row becomes one chunk. The seed may use only codes from this file. External articles and external CSV rows must not contain internal-only phrases (restriction reasons, goodwill, escalation channels; the list is `INTERNAL_ONLY_PHRASES` in `hub/domain/kb.py`). `make data-check` checks all of this.
 
 ### `data/seed/` — demo data
 `customers.json`, `cards.json`, `transactions.json` (40 customers, 5–40 transactions each, including pending, failed-with-error-code and under-review cases), `operators.json` (demo operators, one per role; passwords come from `SEED_OPERATOR_PASSWORD`, not from the file). Each file is a JSON array. The schemas (Pydantic, unknown fields refused) and the rules across files are in `hub/domain/seed.py`; `make data-check` runs them.

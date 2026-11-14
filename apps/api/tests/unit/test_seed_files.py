@@ -14,7 +14,7 @@ from hub.domain.seed import (
     resolve_offset,
     validate_seed,
 )
-from hub.seed import read_seed
+from hub.seed import read_error_codes, read_seed
 
 ROOT = Path(__file__).resolve().parents[4]
 SEED_DIR = ROOT / "data" / "seed"
@@ -40,7 +40,7 @@ def _all_dates(seed: SeedData, anchor: date) -> list[datetime]:
 
 
 def test_the_seed_files_are_valid() -> None:
-    assert validate_seed(_seed()) == []
+    assert validate_seed(_seed(), read_error_codes(ROOT / "data" / "kb" / "error_codes.csv")) == []
 
 
 def test_every_intent_has_at_least_three_customers() -> None:

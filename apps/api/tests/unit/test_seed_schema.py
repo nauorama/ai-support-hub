@@ -23,10 +23,18 @@ from hub.domain.seed import (
     parse_offset,
     parse_seed,
     resolve_offset,
-    validate_seed,
 )
+from hub.domain.seed import validate_seed as validate_with_codes
 
 INTENTS = list(Intent)
+# Stands in for `data/kb/error_codes.csv`: the codes the synthetic dataset and the tests use.
+KNOWN_CODES = frozenset(
+    {"ERR-1004", "ERR-1012", "ERR-2001", "ERR-2003", "ERR-2010", "ERR-3001", "ERR-4001", "ERR-5010"}
+)
+
+
+def validate_seed(seed: SeedData) -> list[str]:
+    return validate_with_codes(seed, KNOWN_CODES)
 
 
 def _customer(i: int, **changes: Any) -> Customer:  # noqa: ANN401
@@ -293,7 +301,6 @@ def test_a_virtual_card_has_no_delivery() -> None:
         ({"status": "failed"}, "error_code is required"),
         ({"error_code": "ERR-1004"}, "error_code is required"),
         ({"status": "held_for_review", "error_code": "ERR-1004"}, "held_for_review uses"),
-        ({"status": "failed", "error_code": "ERR-1999"}, "not in the world file"),
         ({"status": "failed", "error_code": "ERR-2001"}, "does not fit"),
         ({"status": "returned", "error_code": "ERR-1004"}, "only withdrawals"),
         ({"type": "incoming_ach"}, "carries USD"),
@@ -362,6 +369,29 @@ def test_restricted_code_fits_withdrawals_and_cards() -> None:
 
 
 # --- cross-file rules -------------------------------------------------------------------------
+
+
+def test_a_transaction_code_missing_from_the_csv_is_reported() -> None:
+    seed = _valid_seed()
+    tx = _tx(900_100, 1, type="withdrawal_sepa", status="failed", error_code="ERR-2999")
+    errors = validate_seed(_replace(seed, transactions=[*seed.transactions, tx]))
+    assert errors == ["TX-900100: ERR-2999 is not in data/kb/error_codes.csv"]
+
+
+def test_an_upgrade_code_missing_from_the_csv_is_reported() -> None:
+    seed = _valid_seed()
+    rejected = {"target_tier": "business", "status": "rejected", "submitted_at": "-2d 10:00",
+                "error_code": "ERR-4999"}  # fmt: skip
+    customers = [_customer(1, upgrade=rejected), *seed.customers[1:]]
+    errors = validate_seed(_replace(seed, customers=customers))
+    assert "CUS-0001: ERR-4999 is not in data/kb/error_codes.csv" in errors
+
+
+def test_every_code_is_accepted_when_the_csv_has_it() -> None:
+    seed = _valid_seed()
+    tx = _tx(900_100, 1, type="withdrawal_sepa", status="failed", error_code="ERR-2999")
+    broken = _replace(seed, transactions=[*seed.transactions, tx])
+    assert validate_with_codes(broken, KNOWN_CODES | {"ERR-2999"}) == []
 
 
 def test_duplicates_are_reported() -> None:

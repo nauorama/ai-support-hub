@@ -7,7 +7,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test data-check up down dev test-int migrate seed
+BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed
 NOT_IMPLEMENTED := kb-load test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
 	record-llm leak-scan export-review-candidates rollback
@@ -42,6 +42,11 @@ test:
 
 data-check:
 	uv run python -m hub_evals.data_check data
+
+# Report, not a gate (P2-08): numbers in data/kb/ that are not in the world file. The list must be
+# empty or each item explained in the pull request.
+kb-numbers:
+	uv run python -m hub_evals.kb_numbers data/kb docs/tallybridge-world.md
 
 COMPOSE := docker compose -f infra/docker-compose.yml
 

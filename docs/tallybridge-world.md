@@ -113,6 +113,37 @@ Error codes are shown in the app as `ERR-####`. The full list (about 40 codes) i
 
 Withdrawals are allowed only to a bank account **in the customer's own name** (ERR-2015). Blocked merchant categories for the card: gambling, crypto exchanges, adult content.
 
+The other codes of the full list (owner-approved in P2-08). Each one follows from a fact above; the code number is only an identifier. Mass Payouts use the ERR-2xxx range.
+
+| Code | Meaning | Based on |
+|---|---|---|
+| ERR-1001 | currency not supported (only EUR, USD and GBP can be received) | §2 |
+| ERR-1008 | account not verified, so the payment cannot be received | §3 |
+| ERR-2002 | monthly withdrawal limit reached | §3 |
+| ERR-2004 | balance too low for the withdrawal and its fee | §4 |
+| ERR-2011 | SWIFT/BIC details invalid | §2 |
+| ERR-2012 | SEPA not available for this currency or country (SEPA is for EUR in the EU) | §2 |
+| ERR-2020 | withdrawal returned by the receiving bank | §4, §5 |
+| ERR-2030 | Mass Payouts need the Business tier | §2, §3 |
+| ERR-2031 | mass payout file has more than 500 recipients | §2 |
+| ERR-3003 | card PIN blocked after 3 wrong PINs | §6 |
+| ERR-3004 | card cancelled | §6 |
+| ERR-3007 | wrong PIN | §6 |
+| ERR-3012 | daily ATM withdrawal limit reached | §3 |
+| ERR-4003 | ID document type not supported | §6 |
+| ERR-4004 | driving licence not from the EU or UK | §6 |
+| ERR-4011 | proof of address is not a utility bill or bank statement | §6 |
+| ERR-4012 | proof of source of income missing | §3 |
+| ERR-4015 | company documents or owner details incomplete (KYB) | §3 |
+| ERR-4020 | country not supported: Tallybridge cannot open or serve accounts there (the customer text does not mention sanctions) | §6 |
+| ERR-5002 | wrong password | §6 |
+| ERR-5004 | 2FA not set up | §6 |
+| ERR-5011 | identity check not finished: the customer can only log in and upload documents | §3 |
+| ERR-5012 | account cannot be closed while it has a balance | §5 |
+| ERR-5020 | limit increase not available on the Starter tier | §3 |
+
+All codes are shown to customers. ERR-5010 (account restricted) uses only the allowed message of §6, never a reason.
+
 ## 8. Support today (before the AI Hub)
 
 | Fact | Value |
