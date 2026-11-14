@@ -25,7 +25,7 @@ Do not:
 
 1. Repeat that Tallybridge cannot open or serve accounts in that country.
 2. Do not argue about the list.
-3. If the customer says their country is wrong in the application (for example, they moved), ask them to contact support with proof of address: a utility bill or bank statement not older than 3 months. Pass the case to Compliance in Jira Service Management. Compliance decides.
+3. If the customer says their country is wrong in the application (for example, they moved), ask them to contact support with proof of address: a utility bill or bank statement not older than 3 months. Hand the case to a human operator, who passes it to the Compliance team. Compliance decides.
 
 ## Help-centre article
 

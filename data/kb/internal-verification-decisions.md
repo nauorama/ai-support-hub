@@ -26,11 +26,13 @@ Verification decisions (KYC and KYB) are made by the Compliance team, never by t
 
 ## When to involve Compliance
 
-Escalate to Compliance in Jira Service Management (a case that needs work by another team) when:
+Hand the case to a human operator, who passes it to the Compliance team, when:
 
 1. the review time has passed (more than 2 business days for KYC, more than 5 for KYB) and there is no decision,
 2. the customer says a rejection is wrong and the documents meet the rules,
 3. the app shows an error the customer cannot fix with a new upload.
+
+Compliance decides.
 
 ## Document rules for reference
 

@@ -96,6 +96,8 @@ References: [design](design.md), [data model](data-model.md), [API](api.md) §1�
 | P2-09 | **KB loader.** `kb/loader.py` + `kb/chunker.py`: files → `kb_documents` and `kb_chunks` (section chunking, [ADR-0006](adr/0006-section-chunking.md)). Skips unchanged files by hash, bumps `version` on change, removes deleted documents. `make kb-load` (Postgres part). | S | Loading twice changes nothing. Editing one article updates only its chunks. Chunker tests cover: no sections, long section split, error-code rows. | `make kb-load && make test-int` |
 | P2-10 | **Compose and integration setup.** `infra/docker-compose.yml`, dev Dockerfiles, `make dev`. Testcontainers fixtures for Postgres (and Qdrant, used later). **Note:** `make dev` needs `SEED_OPERATOR_PASSWORD` (since P2-05), `SESSION_SECRET` and `DEMO_ACCESS_CODE` (since P2-06) in `.env`; its first step lists every empty one and stops before anything starts. | S | Clean clone → `make dev` → the curl example from P2-06 works. | `make dev` |
 
+**Follow-up from P2-08 (separate small PR):** masking must not redact an exact `ERR-\d{4}` code as a PIN or 2FA code; tests: 'ERR-3007 wrong PIN' keeps the code, 'my PIN is 3007' is still masked. Found while writing the KB: `mask_text("ERR-3007 wrong PIN")` returns `ERR-[REDACTED] wrong PIN` (also ERR-3003, ERR-5003, ERR-5004), so triage would lose the code.
+
 **Gate 2:** with `make dev`, a customer message with a card number is stored masked, an operator answers it through the API, the audit chain verifies, CI is green. Walkthrough written.
 
 ---

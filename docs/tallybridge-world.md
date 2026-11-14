@@ -158,6 +158,7 @@ All codes are shown to customers. ERR-5010 (account restricted) uses only the al
 | Customer satisfaction (CSAT) | 78% |
 | Urgent cases outside support hours | an on-call fraud analyst reads `#support-escalations`; target: first human response within 60 minutes |
 | Human SLA after the Hub is live | standard: first human response within 4 business hours; urgent (fraud, lost card, restricted account): within 30 minutes |
+| AI notice after the Hub is live | every chat starts with: "You are chatting with Tallybridge's AI assistant. It can make mistakes. You can ask for a human at any time." ([security](security.md) §7) |
 
 Tools: Jira Service Management for cases that need work by another team (disputes, fraud, bugs, limit requests). Slack channel `#support-escalations` for urgent cases. A real company of this size also has a helpdesk product (for example Zendesk or Intercom); in this project the Hub is its own small helpdesk, so that the demo is complete without a paid product.
 
