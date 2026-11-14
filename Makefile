@@ -7,10 +7,10 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed
+BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed record-llm
 NOT_IMPLEMENTED := kb-load test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
-	record-llm leak-scan export-review-candidates rollback
+	leak-scan export-review-candidates rollback
 
 .PHONY: help $(BUILT) $(NOT_IMPLEMENTED)
 
@@ -34,8 +34,11 @@ lint:
 # Coverage gate for deterministic safety code (AGENTS.md, security §3): >= 95% line coverage.
 # hub.domain holds the ticket status transitions and the seed rules; hub.audit.chain the audit
 # hash chain and the masking of audit details; hub.auth the password hashing, the operator
-# session and CSRF token, the role rules and the login lockout. Add tools/permissions here when it is built.
-SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov=hub.auth --cov-report=term-missing:skip-covered --cov-fail-under=95
+# session and CSRF token, the role rules and the login lockout; hub.llm.gateway the outbound card
+# scan (G2), retries and fallback; hub.llm.pricing the cost of every call. Add tools/permissions
+# here when it is built.
+SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov=hub.auth \
+	--cov=hub.llm.gateway --cov=hub.llm.pricing --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:
 	uv run pytest $(SAFETY_COVERAGE)
@@ -79,6 +82,12 @@ dev:
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).
 test-int:
 	uv run pytest apps/api/tests/integration
+
+# Real model calls through the gateway (G2 scan, retries, llm_calls rows with context `record`):
+# needs ANTHROPIC_API_KEY and OPENAI_API_KEY in .env and the database (`make dev`); costs money.
+# Rewrites the recorded responses that fake mode (LLM_MODE=fake) serves to the tests.
+record-llm:
+	uv run python -m hub.llm.record
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"

@@ -16,6 +16,9 @@ from hub.domain.enums import (
     CustomerTier,
     FeedbackRating,
     Intent,
+    LlmCallContext,
+    LlmCallStatus,
+    LlmNode,
     MessageRole,
     OperatorRole,
     Resolution,
@@ -39,12 +42,24 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("settings", "key", SettingKey),
     ("feedback", "rating", FeedbackRating),
     ("audit_log", "actor_type", ActorType),
+    ("llm_calls", "context", LlmCallContext),
+    ("llm_calls", "node", LlmNode),
+    ("llm_calls", "status", LlmCallStatus),
 ]
 
 # The dialect the app uses (psycopg 3), without a database.
 DIALECT = make_url("postgresql+psycopg://").get_dialect()()
 
-TABLES = {"customers", "operators", "tickets", "messages", "settings", "feedback", "audit_log"}
+TABLES = {
+    "customers",
+    "operators",
+    "tickets",
+    "messages",
+    "settings",
+    "feedback",
+    "audit_log",
+    "llm_calls",
+}
 
 
 def _table(name: str) -> Table:
@@ -58,7 +73,7 @@ def _check(table: str, name: str) -> CheckConstraint:
     raise AssertionError(f"no CHECK constraint {name} on {table}")
 
 
-def test_phase_2_tables_exist() -> None:
+def test_all_tables_exist() -> None:
     assert set(Base.metadata.tables) == TABLES
 
 

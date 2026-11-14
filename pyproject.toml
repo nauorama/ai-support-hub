@@ -53,9 +53,10 @@ known-first-party = ["hub", "support_tools", "hub_evals"]
 
 # Module rules from docs/design.md §8. Each contract has an id: the unit tests check that every
 # rule of the document has its contract and plant a wrong import to prove each one fails.
-# The litellm rule ("only hub.llm.gateway imports litellm") is added with the gateway in P3-01.
 [tool.importlinter]
 root_packages = ["hub", "support_tools", "hub_evals"]
+# Needed so a contract can name `litellm`. External packages are not analysed, only imports of them.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 id = "domain-imports-nothing"
@@ -90,6 +91,17 @@ id = "evals-mcp-independent"
 name = "evals (hub_evals) and apps/mcp_server (support_tools) do not import each other"
 type = "independence"
 modules = ["hub_evals", "support_tools"]
+
+# `protected`: only the allowed importer may import litellm directly; every module of the three
+# root packages, new ones included, is checked. Reaching litellm through the gateway's own names
+# (`from hub.llm.gateway import litellm`) is outside import-linter's reach; a unit test
+# (test_litellm_is_not_reached_through_the_gateway_module) covers that.
+[[tool.importlinter.contracts]]
+id = "only-gateway-imports-litellm"
+name = "only hub.llm.gateway imports litellm"
+type = "protected"
+protected_modules = ["litellm"]
+allowed_importers = ["hub.llm.gateway"]
 
 # A new tests folder must be added to mypy `files` and pytest `testpaths`.
 [tool.mypy]

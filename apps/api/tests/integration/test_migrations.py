@@ -13,7 +13,7 @@ from hub.observability.readiness import libpq_url
 
 from ._db import alembic_config, as_user, migrate
 
-PHASE_2_TABLES = {
+TABLES = {
     "customers",
     "operators",
     "tickets",
@@ -21,6 +21,7 @@ PHASE_2_TABLES = {
     "settings",
     "feedback",
     "audit_log",
+    "llm_calls",
 }
 
 
@@ -47,13 +48,13 @@ def _tables(url: str) -> set[str]:
 
 def test_upgrade_downgrade_upgrade(fresh_db_url: str) -> None:
     migrate(fresh_db_url)
-    assert _tables(fresh_db_url) == PHASE_2_TABLES
+    assert _tables(fresh_db_url) == TABLES
 
     command.downgrade(alembic_config(fresh_db_url), "base")
     assert _tables(fresh_db_url) == set()
 
     migrate(fresh_db_url)
-    assert _tables(fresh_db_url) == PHASE_2_TABLES
+    assert _tables(fresh_db_url) == TABLES
 
 
 def test_migrated_schema_matches_the_models(fresh_db_url: str) -> None:
@@ -77,3 +78,10 @@ def test_tables_created_by_later_migrations_get_the_app_privileges(fresh_db_url:
         ).fetchone()
         connection.rollback()
     assert row == (True, True)
+
+
+def test_there_is_exactly_one_head() -> None:
+    from alembic.script import ScriptDirectory
+
+    heads = ScriptDirectory.from_config(alembic_config("postgresql://unused")).get_heads()
+    assert heads == ["0005"]

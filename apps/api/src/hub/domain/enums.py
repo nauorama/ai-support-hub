@@ -94,3 +94,36 @@ class ActorType(StrEnum):
     OPERATOR = "operator"
     CUSTOMER = "customer"
     SYSTEM = "system"
+
+
+class LlmCallContext(StrEnum):
+    """Why a model call was made (data model §1, `llm_calls.context`)."""
+
+    ONLINE = "online"
+    EVAL = "eval"
+    MEMORY = "memory"
+    RECORD = "record"  # `make record-llm`: refreshing the fake-mode recordings
+
+
+class LlmNode(StrEnum):
+    """The step that made a model call (data model §1, `llm_calls.node`)."""
+
+    TRIAGE = "triage"
+    RESEARCH = "research"
+    WRITE = "write"
+    VERIFY = "verify"
+    HANDOFF_PREP = "handoff_prep"
+    MEMORY_SUMMARY = "memory_summary"
+    JUDGE = "judge"
+    EMBEDDING = "embedding"
+
+
+class LlmCallStatus(StrEnum):
+    """`retry`: this attempt failed and the gateway tries again; `error`: it failed for good
+    (the gateway may still go on to the fallback model); `invalid_output`: the answer did not
+    match the schema (P3-02)."""
+
+    OK = "ok"
+    RETRY = "retry"
+    ERROR = "error"
+    INVALID_OUTPUT = "invalid_output"
