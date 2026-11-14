@@ -358,6 +358,9 @@ async def reply(
     if stored is not None:
         return await _replay(session, stored, ticket_id=ticket.id, masked_body=masked.text)
 
+    # Checked under the ticket row lock: a close that committed while this request waited is
+    # seen here, so the reply cannot land in a closed ticket.
+    await TicketRepository(session).lock(ticket)
     _check_not_closed(ticket)
     _check_version(ticket, body.ticket_version)
     if ticket.status not in _REPLYABLE:

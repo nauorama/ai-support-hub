@@ -4,10 +4,14 @@ release, reply, close; roles, CSRF, conflicts and audit records."""
 import asyncio
 import base64
 import json
+import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +21,7 @@ from hub.audit import ChainCheck, verify_chain
 from hub.db.models import Message, Ticket
 from hub.db.repositories import MessageRepository, TicketRepository
 from hub.main import create_app
+from hub.observability.readiness import libpq_url
 
 from . import _api
 from ._api import Urls, add_customer, add_operator, customer_client, key, new_ticket, run_sql
@@ -551,3 +556,78 @@ def test_a_cursor_without_a_time_zone_is_refused(staff: dict[str, TestClient]) -
     cursor = base64.urlsafe_b64encode(raw).decode()
     response = staff["operator"].get("/api/v1/console/tickets", params={"cursor": cursor})
     assert response.status_code == 422
+
+
+# --- a message must not land in a ticket closed by an overlapping transaction ---------------
+
+
+@contextmanager
+def _close_in_flight(urls: Urls, ticket_id: uuid.UUID) -> Iterator[psycopg.Connection]:
+    """An operator's close that has updated the ticket row but not committed yet: it holds the
+    row lock, and other transactions still read the old status. The caller commits."""
+    with psycopg.connect(libpq_url(urls[0])) as connection:
+        connection.execute(
+            b"UPDATE tickets SET status = 'closed', version = version + 1 WHERE id = %s",
+            (ticket_id,),
+        )
+        yield connection
+
+
+def _blocked_until_commit(request: Callable[[], Any], connection: psycopg.Connection) -> Any:  # noqa: ANN401
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(request)
+        time.sleep(0.5)
+        # The request read the old status and now waits for the row lock of the close.
+        assert not future.done()
+        connection.commit()
+        return future.result(timeout=10)
+
+
+def test_customer_message_overlapping_a_close_is_409_and_not_stored(
+    app: FastAPI, staff: dict[str, TestClient], urls: Urls
+) -> None:
+    customer = customer_client(app)
+    ticket_id = new_ticket(customer)
+    _post(staff["operator"], ticket_id, "claim")
+    before = run_sql(urls, "SELECT count(*) FROM messages")
+
+    with _close_in_flight(urls, ticket_id) as close:
+        response = _blocked_until_commit(
+            lambda: customer.post(
+                f"/api/v1/tickets/{ticket_id}/messages",
+                json={"message": "One more thing"},
+                headers=key(),
+            ),
+            close,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "ticket_closed"
+    assert run_sql(urls, "SELECT count(*) FROM messages") == before
+    assert "message.received" not in _actions(urls)
+
+
+def test_operator_reply_overlapping_a_close_is_409_and_not_stored(
+    app: FastAPI, staff: dict[str, TestClient], urls: Urls
+) -> None:
+    ticket_id = new_ticket(customer_client(app))
+    marta = staff["operator"]
+    _post(marta, ticket_id, "claim")
+    _post(marta, ticket_id, "reply", json={"body": "First."}, headers=key())
+    # An answered ticket: a second reply would not change the ticket row, so only the check
+    # under the lock can see the close.
+    version = _ticket(marta, ticket_id)["version"]
+
+    with _close_in_flight(urls, ticket_id) as close:
+        response = _blocked_until_commit(
+            lambda: marta.post(
+                f"/api/v1/console/tickets/{ticket_id}/reply",
+                json={"ticket_version": version, "body": "Second."},
+                headers=key(),
+            ),
+            close,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "ticket_closed"
+    assert run_sql(urls, "SELECT body FROM messages WHERE role = 'operator'") == [("First.",)]

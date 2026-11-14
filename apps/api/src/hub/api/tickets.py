@@ -353,6 +353,10 @@ async def add_message(
     customer_id, ticket_id = customer.id, ticket.id
 
     async def save() -> tuple[Message, TicketStatus | None]:
+        # The check above ran before the lock: an operator may have closed the ticket since.
+        await TicketRepository(session).lock(ticket)
+        if ticket.status == TicketStatus.CLOSED:
+            raise ProblemError(409, "ticket_closed", "This ticket is closed. Start a new one.")
         message = await messages.add(
             ticket_id=ticket_id,
             role=MessageRole.CUSTOMER,

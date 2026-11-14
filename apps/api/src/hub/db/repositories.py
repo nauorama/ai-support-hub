@@ -128,6 +128,21 @@ class TicketRepository:
         )
         return result.scalar_one_or_none()
 
+    async def lock(self, ticket: Ticket) -> Ticket:
+        """Lock the ticket row until the transaction ends and reload it from the database.
+
+        A check made before the lock (e.g. "not closed") may be stale by now: another
+        transaction can have closed the ticket and committed while this one waited. Callers
+        re-check after this call. The same lock as `MessageRepository.lock_ticket`, so a message
+        write and a status change on one ticket are serialised."""
+        await self._session.execute(
+            select(Ticket)
+            .where(Ticket.id == ticket.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return ticket
+
     async def change_status(self, ticket: Ticket, target: TicketStatus) -> Ticket:
         """Move the ticket to `target`. Raises `InvalidTransitionError` before any SQL when the
         state diagram forbids it, `ConcurrentUpdateError` when the stored version moved on.
