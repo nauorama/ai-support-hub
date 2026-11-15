@@ -184,6 +184,15 @@ def test_error_codes_next_to_pin_or_2fa_words_are_kept(text: str) -> None:
         ("XERR-3007 PIN", "XERR-[REDACTED] PIN", {"PIN": 1}),  # "ERR" inside a longer word
         ("ERR 3007 PIN", "ERR [REDACTED] PIN", {"PIN": 1}),  # no dash
         ("ERR3007 PIN", "ERR[REDACTED] PIN", {"PIN": 1}),
+        # Only ASCII digits make an error code (review round 1).
+        ("ERR-\uff11\uff12\uff13\uff14 PIN", "ERR-[REDACTED] PIN", {"PIN": 1}),  # full-width
+        ("ERR-\u0661\u0662\u0663\u0664 PIN", "ERR-[REDACTED] PIN", {"PIN": 1}),  # Arabic-Indic
+        ("ERR-\u0967\u0968\u0969\u096a OTP", "ERR-[REDACTED] OTP", {"2FA": 1}),  # Devanagari
+        ("ERR-1234\u0665 PIN", "ERR-[REDACTED] PIN", {"PIN": 1}),  # a fifth, non-ASCII digit
+        # No word character directly before "ERR" (review round 1).
+        ("foo_ERR-1234 PIN", "foo_ERR-[REDACTED] PIN", {"PIN": 1}),
+        ("_ERR-1234 PIN", "_ERR-[REDACTED] PIN", {"PIN": 1}),
+        ("9ERR-1234 PIN", "9ERR-[REDACTED] PIN", {"PIN": 1}),
         (
             "ERR-3007 wrong PIN, my PIN is 1234",
             "ERR-3007 wrong PIN, my PIN is [REDACTED]",
@@ -198,6 +207,43 @@ def test_codes_that_are_not_exact_error_codes_are_still_masked(
     text: str, expected: str, counts: dict[str, int]
 ) -> None:
     assert mask(text) == MaskResult(text=expected, counts=counts)
+
+
+# Interactions with the other rules (review round 1).
+@pytest.mark.parametrize(
+    ("text", "expected", "counts"),
+    [
+        (
+            "DE89 3704 0044 0532 0130 00 ERR-1234 PIN",
+            "[IBAN DE89 \u20263000] ERR-1234 PIN",
+            {"IBAN": 1},
+        ),
+        ("ERR-4111 1111 1111 1111 PIN", "ERR-[CARD ****1111] PIN", {"PAN": 1}),
+        ("card ending ERR-1234 PIN", "card ending ERR-1234 PIN", {}),
+        ("card ending 1234 PIN", "card ending [REDACTED] PIN", {"PIN": 1}),
+        # Known limitation (security §3): a trigger reaches only the first number after it.
+        ("PIN ERR-1234 5678", "PIN ERR-1234 5678", {}),
+    ],
+)
+def test_error_codes_with_other_rules(text: str, expected: str, counts: dict[str, int]) -> None:
+    result = mask(text)
+    assert result == MaskResult(text=expected, counts=counts)
+    assert mask(result.text).text == result.text  # masking twice changes nothing
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ERR-3007 wrong PIN",
+        "ERR-30071 PIN",
+        "ERR-\uff11\uff12\uff13\uff14 PIN",
+        "_ERR-1234 PIN",
+        "ERR-3007 wrong PIN, my PIN is 1234",
+    ],
+)
+def test_error_code_inputs_mask_the_same_twice(text: str) -> None:
+    once = mask(text).text
+    assert mask(once).text == once
 
 
 @settings(max_examples=200)

@@ -98,9 +98,10 @@ _LAST_DIGITS_BEFORE = re.compile(
 
 
 # An exact error code such as "ERR-3007" is not a PIN or 2FA code, even next to "PIN": triage
-# needs it (pre-H2 #2). Uppercase only, and "ERR" not the end of a longer word; "ERR-30071"
-# is not an error code, so its digits are still masked.
-_NOT_AN_ERROR_CODE = r"(?!(?<=(?<![^\W\d_])(?-i:ERR)-)\d{4}(?!\d))"
+# needs it (pre-H2 #2). Uppercase "ERR" with no word character (letter, digit, "_") before it,
+# and exactly 4 ASCII digits: real codes are ASCII, so full-width or Arabic-Indic digits are
+# still masked, and so is "ERR-30071" or a fifth digit of any script after the four.
+_NOT_AN_ERROR_CODE = r"(?!(?<=(?<!\w)(?-i:ERR)-)[0-9]{4}(?!\d))"
 
 
 def _code_patterns(
