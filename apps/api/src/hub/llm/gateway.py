@@ -48,6 +48,7 @@ from hub.llm.schemas import (
     OutboundBlockedError,
     OutboundCardDataError,
     OutboundIbanError,
+    OutputCheckError,
     ProviderError,
     ProviderRequest,
     ProviderResponse,
@@ -568,7 +569,26 @@ class Gateway:
                         raise
                     # A paid answer that fails the schema is not a provider failure: no retry and
                     # no fallback here; complete_structured decides about the repair call.
-                    invalid = check(response) if check is not None else None
+                    try:
+                        invalid = check(response) if check is not None else None
+                    except Exception as exc:
+                        # The call was paid: keep its row, then stop. Only the class is kept;
+                        # the message may quote the answer.
+                        kind = type(exc).__name__
+                        await self.recorder.record(
+                            self._row(
+                                call,
+                                request.model,
+                                LlmCallStatus.ERROR,
+                                usage=response.usage,
+                                cost=cost,
+                                latency_ms=latency_ms,
+                                error=f"CheckFailed ({kind})",
+                            )
+                        )
+                        raise OutputCheckError(
+                            f"node {call.node.value}: the answer check failed ({kind})"
+                        ) from None
                     await self.recorder.record(
                         self._row(
                             call,

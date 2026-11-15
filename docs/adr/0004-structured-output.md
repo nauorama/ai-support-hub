@@ -1,6 +1,7 @@
 # ADR-0004: Structured output with provider JSON schema and Pydantic validation
 
 - Status: accepted
+- Note (P3-02): the tool-call fallback for models without native structured output is provided by LiteLLM 1.108.6, not by our gateway.
 - Date: 2026-11-12
 
 ## Context

@@ -38,7 +38,19 @@ _MOVED_CONSTRAINTS = {
 # Keywords that only describe the schema for people, or that a strict schema must not carry.
 _DROPPED = ("title", "default", "examples")
 # Keywords the strict schema cannot express; a schema using them is refused, not loosened.
-_REFUSED = ("oneOf", "allOf", "not", "if", "then", "else", "patternProperties")
+# `uniqueItems` comes from `set[...]`, `prefixItems` from `tuple[...]`: OpenAI strict mode does
+# not list them and LiteLLM strips them for Anthropic, so the model would not see the rule.
+_REFUSED = {
+    "oneOf": "",
+    "allOf": "",
+    "not": "",
+    "if": "",
+    "then": "",
+    "else": "",
+    "patternProperties": "",
+    "uniqueItems": " (a set[...] field; use list[...])",
+    "prefixItems": " (a tuple[...] field; use list[...] or a model)",
+}
 
 MAX_ERRORS_SHOWN = 10
 
@@ -62,9 +74,11 @@ def _strict(node: JsonValue, name: str, path: str) -> JsonValue:
 
 
 def _strict_object(node: dict[str, Any], name: str, path: str) -> dict[str, Any]:
-    for keyword in _REFUSED:
+    for keyword, hint in _REFUSED.items():
         if keyword in node:
-            raise SchemaNotSupportedError(f"{name}: `{keyword}` at {path} is not supported")
+            raise SchemaNotSupportedError(
+                f"{name}: `{keyword}` at {path}{hint} is not supported in strict mode"
+            )
     notes: list[str] = []
     result: dict[str, Any] = {}
     for key, value in node.items():
@@ -97,8 +111,10 @@ def _strict_object(node: dict[str, Any], name: str, path: str) -> dict[str, Any]
 
 @dataclass(frozen=True)
 class Invalid:
-    """Why an answer does not match the schema. Locations and messages only, never the input
-    values: they go into `llm_calls.error` (the count) and into the repair request."""
+    """Why an answer does not match the schema: location and message of each error, without the
+    input values. A location can still hold model text: the name of an extra key the model made
+    up (`extra="forbid"`). The errors go only into the repair request, which G2 scans;
+    `llm_calls.error` gets only the count (`summary`)."""
 
     errors: tuple[str, ...]
 

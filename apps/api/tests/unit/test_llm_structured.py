@@ -7,12 +7,13 @@ import json
 from typing import Any, Literal
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hub.domain.enums import LlmCallStatus
 from hub.llm.schemas import (
     LlmUnavailableError,
     OutboundCardDataError,
+    OutputCheckError,
     ProviderError,
     ProviderResponse,
     StructuredOutputError,
@@ -163,12 +164,22 @@ class Tagged(BaseModel):
     item: Choice | Other = Field(discriminator="kind")
 
 
+class Tags(BaseModel):
+    tags: set[str]
+
+
+class Pair(BaseModel):
+    pair: tuple[str, int]
+
+
 @pytest.mark.parametrize(
     ("model", "match"),
     [
         pytest.param(OpenMap, "open object", id="dict-of-floats"),
         pytest.param(Untyped, "open object", id="dict-any"),
         pytest.param(Tagged, "oneOf", id="discriminated-union"),
+        pytest.param(Tags, r"`uniqueItems` at #/properties/tags \(a set\[\.\.\.\] field", id="set"),
+        pytest.param(Pair, r"`prefixItems` at #/properties/pair \(a tuple\[", id="tuple"),
     ],
 )
 def test_schemas_strict_mode_cannot_express_are_refused(model: type[BaseModel], match: str) -> None:
@@ -355,6 +366,8 @@ async def test_a_repair_with_no_model_left_is_unavailable() -> None:
     provider = ScriptedProvider({HAIKU: [BAD_REQUEST], LUNA: [ok(WRONG_ENUM), BAD_REQUEST]})
     with pytest.raises(LlmUnavailableError):
         await make_gateway(provider).complete_structured("triage", messages(), Triage, call=CALL)
+    # The repair went to Luna, which wrote the invalid answer, and never back to Haiku.
+    assert [request.model for request in provider.requests] == [HAIKU, LUNA, LUNA]
 
 
 async def test_card_data_in_the_invalid_answer_blocks_the_repair() -> None:
@@ -380,3 +393,45 @@ async def test_complete_with_a_schema_does_not_validate() -> None:
     )
     assert completion.content == "not json"
     assert recorder.statuses() == [(HAIKU, LlmCallStatus.OK)]
+
+
+class Crashy(BaseModel):
+    note: str
+
+    @field_validator("note")
+    @classmethod
+    def crash(cls, value: str) -> str:
+        # Not a ValueError or AssertionError: Pydantic lets it through unwrapped.
+        raise RuntimeError(f"bug while checking {value}")
+
+
+async def test_a_crashing_check_still_records_the_paid_call() -> None:
+    answer = "Ms Example's refund"
+    provider = ScriptedProvider({HAIKU: [ok(json.dumps({"note": answer}))]})
+    recorder = MemoryRecorder()
+    with pytest.raises(
+        OutputCheckError, match=r"triage: the answer check failed \(RuntimeError\)"
+    ) as caught:
+        await make_gateway(provider, recorder).complete_structured(
+            "triage", messages(), Crashy, call=CALL
+        )
+    assert answer not in str(caught.value)
+    assert caught.value.__cause__ is None
+    [row] = recorder.rows
+    assert (row.status, row.error) == (LlmCallStatus.ERROR, "CheckFailed (RuntimeError)")
+    assert (row.input_tokens, row.output_tokens) == (100, 20)
+    assert row.cost_usd > 0
+    assert len(provider.requests) == 1  # a bug in our check is neither repaired nor retried
+
+
+@pytest.mark.parametrize(("first_index", "fallback_used"), [(0, False), (1, True)])
+async def test_the_outcome_names_the_model_by_its_place_in_the_role(
+    first_index: int, fallback_used: bool
+) -> None:
+    # The repair of a fallback answer is sent as a one-request list that starts at the fallback;
+    # `first_index` keeps the outcome saying "fallback".
+    provider = ScriptedProvider({LUNA: [ok(VALID)]})
+    gateway = make_gateway(provider)
+    requests = gateway.chat_requests("triage", messages(), Triage)[1:]
+    outcome = await gateway._run(requests, CALL, provider.complete, first_index=first_index)
+    assert (outcome.index, outcome.fallback_used) == (first_index, fallback_used)

@@ -204,6 +204,12 @@ class StructuredOutputError(LlmError):
         super().__init__(f"{schema_name}: invalid after one repair ({errors} errors)")
 
 
+class OutputCheckError(LlmError):
+    """The check of an answer crashed (e.g. a custom validator raised something Pydantic does
+    not wrap). A programming error; the paid call is recorded with status `error`. Names the
+    exception class only, never its message, which may quote the answer."""
+
+
 class ToolsNotAllowedError(LlmError):
     """Tools were passed to a role that is not configured for tools."""
 
