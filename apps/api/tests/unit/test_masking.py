@@ -4,6 +4,7 @@ Only public test card numbers are used.
 """
 
 import re
+import unicodedata
 
 import pytest
 from hypothesis import given, settings
@@ -293,8 +294,11 @@ def test_iban_with_unknown_country_or_wrong_length_is_checked_as_digits(text: st
 
 
 def test_digits_after_an_iban_hide_its_last_four() -> None:
-    # A valid IBAN, then " 1": digits follow, so the last 4 are hidden; "1" is no card.
-    assert mask("DE89 3704 0044 0532 0130 00 1").text == "[IBAN DE89 \u2026] 1"
+    # A valid IBAN, then " 1": digits follow, so the last 4 are hidden. Fewer than 5 digits
+    # follow, so no card across the IBAN's end is looked for and "1" stays (round 2, N3).
+    assert mask("DE89 3704 0044 0532 0130 00 1") == MaskResult(
+        text="[IBAN DE89 \u2026] 1", counts={"IBAN": 1}
+    )
 
 
 def test_an_invalid_candidate_does_not_hide_a_valid_iban_inside_it() -> None:
@@ -313,14 +317,99 @@ def test_an_invalid_candidate_does_not_hide_a_valid_iban_inside_it() -> None:
         # Amex inside a valid CZ IBAN.
         ("CZ3437828224631000500000", "[IBAN CZ34 \u20260000]"),
         ("CZ3000000378282246310005", "[IBAN CZ30 \u20260005]"),
-        # A card that starts in the IBAN's last group and goes on after it.
-        ("AT77 1234 5678 9012 4111 1111 1111 1111", "[IBAN AT77 \u2026] [CARD ****1111]"),
-        ("AT86 0000 0000 0000 4111 1111 1111 1111", "[IBAN AT86 \u2026] [CARD ****1111]"),
+        # A card that starts in the IBAN's last group and goes on after it: shown without
+        # digits, since its last 4 cannot be told apart (round 2, B2).
+        ("AT77 1234 5678 9012 4111 1111 1111 1111", "[IBAN AT77 \u2026] [CARD ****]"),
+        ("AT86 0000 0000 0000 4111 1111 1111 1111", "[IBAN AT86 \u2026] [CARD ****]"),
     ],
 )
 def test_card_inside_or_across_an_iban_never_survives(text: str, expected: str) -> None:
     assert mask(text).text == expected
     assert mask(expected).text == expected
+
+
+# Every example input of the PR #14 review, round 2 (B1, B2, N2, N3).
+_A = "\u0661"  # ARABIC-INDIC DIGIT ONE
+_F = "\uff11"  # FULLWIDTH DIGIT ONE
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "counts"),
+    [
+        # B1: non-ASCII digits right after an IBAN belong to the same number.
+        (
+            f"AT77 1234 5678 9012 4111{_A * 12}",
+            "[IBAN AT77 \u2026][CARD ****]",
+            {"IBAN": 1, "PAN": 1},
+        ),
+        (
+            f"AT77 1234 5678 9012 4111{_F * 12}",
+            "[IBAN AT77 \u2026][CARD ****]",
+            {"IBAN": 1, "PAN": 1},
+        ),
+        (
+            f"AT77 1234 5678 9012 4111{_F * 4} {_F * 4} {_F * 4}",
+            "[IBAN AT77 \u2026][CARD ****]",
+            {"IBAN": 1, "PAN": 1},
+        ),
+        (f"AT771234567890124111{_A * 12}", "[IBAN AT77 \u2026][CARD ****]", {"IBAN": 1, "PAN": 1}),
+        (f"x 4111{_A * 12}", f"x [CARD ****{_A * 4}]", {"PAN": 1}),  # the same without an IBAN
+        # B2: a code after an IBAN is a code, not a card; no IBAN or code digits are shown.
+        (
+            "DE89 3704 0044 0532 0130 00 1234 pin",
+            "[IBAN DE89 \u2026] [REDACTED] pin",
+            {"IBAN": 1, "PIN": 1},
+        ),
+        (
+            "DE89 3704 0044 0532 0130 00 482913 is my OTP",
+            "[IBAN DE89 \u2026] [REDACTED] is my OTP",
+            {"IBAN": 1, "2FA": 1},
+        ),
+        ("482913 is my OTP", "[REDACTED] is my OTP", {"2FA": 1}),
+        (
+            "IBAN DE89 3704 0044 0532 0130 00 - 250 EUR",
+            "IBAN [IBAN DE89 \u2026] - 250 EUR",
+            {"IBAN": 1},
+        ),
+        # N2: only exactly 4 characters and "]" after "[IBAN XX00 \u2026" are a masked IBAN.
+        ("[IBAN DE89 \u2026123456] otp", "[IBAN DE89 \u2026[REDACTED]] otp", {"2FA": 1}),
+        ("[IBAN DE89 \u2026737] cvv", "[IBAN DE89 \u2026[REDACTED]] cvv", {"CVV": 1}),
+        (
+            "card 4111 1111 1111 1111 [IBAN DE89 \u2026737]",
+            "card [CARD ****1111] [IBAN DE89 \u2026737]",
+            {"PAN": 1},
+        ),
+        # N3
+        ("DE89 3704 0044 0532 0130 00 1", "[IBAN DE89 \u2026] 1", {"IBAN": 1}),
+    ],
+)
+def test_review_round_2_examples(text: str, expected: str, counts: dict[str, int]) -> None:
+    assert mask(text) == MaskResult(text=expected, counts=counts)
+    assert mask(expected).text == expected
+
+
+def test_a_masked_card_without_digits_still_marks_a_cvv_next_to_it() -> None:
+    assert (
+        mask("[IBAN AT77 \u2026] [CARD ****] 737").text
+        == "[IBAN AT77 \u2026] [CARD ****] [REDACTED]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("digits", "expected"),
+    [
+        ("12345", "[CARD ****]"),  # Luhn-valid numbers cross the IBAN's end
+        ("48291337", "[CARD ****]"),
+        ("123456789012", "[CARD ****]"),
+        ("00010", "00010"),  # none does
+        ("1234", "1234"),  # fewer than 5 digits: not looked for
+        ("0", "0"),  # a single "0" passes Luhn on its own; it is no card
+    ],
+)
+def test_digits_after_an_iban_are_a_card_only_when_luhn_crosses_the_end(
+    digits: str, expected: str
+) -> None:
+    assert mask(f"DE89 3704 0044 0532 0130 00 {digits}").text == f"[IBAN DE89 \u2026] {expected}"
 
 
 def test_masked_iban_is_not_masked_again() -> None:
@@ -507,6 +596,14 @@ def test_card_with_digits_around_it_is_masked_whole(
 # length, computed check digits), possibly running past its end, never survives (finding 3 of
 # the P3-01 masking review, round 1).
 _DIGITS = "0123456789"
+_DIGIT_SCRIPTS = {
+    "ascii": str.maketrans("", ""),
+    "arabic-indic": str.maketrans(_DIGITS, "".join(chr(0x0660 + i) for i in range(10))),
+    "fullwidth": str.maketrans(_DIGITS, "".join(chr(0xFF10 + i) for i in range(10))),
+}
+_IBAN_JOINERS = [" ", "-", "/", "", "  ", "\u00a0", "%20", "\u200b", "\u200d"]
+# Separators a card may be written with; removed before looking for visible card digits.
+_VISIBLE_SEPARATORS = re.compile(r"%20|[\s\-/\u200b\u200d]")
 
 
 @st.composite
@@ -525,7 +622,13 @@ def ibans_with_a_card(draw: st.DrawFn) -> tuple[str, str]:
     iban = f"{country}{_mod_97_check_digits(country, bban)}{bban}"
     if draw(st.booleans()):
         iban = " ".join(iban[i : i + 4] for i in range(0, len(iban), 4))
-    joiner = draw(st.sampled_from([" ", "-", "/", "", "  "])) if outside else ""
+    if outside:
+        # Round 2, N1: other scripts and joiners, and digits glued straight to the IBAN.
+        script = draw(st.sampled_from(sorted(_DIGIT_SCRIPTS)))
+        outside = outside.translate(_DIGIT_SCRIPTS[script])
+        joiner = draw(st.sampled_from(_IBAN_JOINERS))
+    else:
+        joiner = ""
     return card, f"{iban}{joiner}{outside}"
 
 
@@ -543,6 +646,11 @@ def test_a_card_hidden_anywhere_in_a_valid_iban_never_survives(
 ) -> None:
     card, iban = case
     result = mask(f"{head} {iban} {tail}")
-    assert card not in re.sub(r"\D", "", result.text), result.text
+    # No 5 or more card digits in a row survive, in any script, with any separators between.
+    visible = _VISIBLE_SEPARATORS.sub("", result.text)
+    ascii_runs = re.findall(r"\d+", "".join(str(unicodedata.digit(c, c)) for c in visible))
+    for run in ascii_runs:
+        for start in range(len(run) - 4):
+            assert run[start : start + 5] not in card, result.text
     assert result.counts.get("IBAN", 0) + result.counts.get("PAN", 0) >= 1
     assert mask(result.text).text == result.text

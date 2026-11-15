@@ -132,7 +132,7 @@ Where data lives at each step:
 
 | Step | Data | Store |
 |---|---|---|
-| Message arrives | text with card data masked | `messages.body` (Postgres). The raw text exists only in memory during the request. |
+| Message arrives | text with card data masked and IBANs partly masked (ADR-0017) | `messages.body` (Postgres). The raw text exists only in memory during the request. |
 | Model calls | masked text + placeholders for email, phone, IBAN | sent to the provider; metadata in `llm_calls`; trace in Langfuse (masked) |
 | Research | chunk ids and scores; tool results | workflow state (checkpoint in Postgres); `tool_calls` |
 | Draft | text, citations, proposed actions | `drafts` |

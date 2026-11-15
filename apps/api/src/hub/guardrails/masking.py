@@ -55,8 +55,13 @@ _DIGIT = re.compile(r"\d")
 _IBAN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,40}")
 _IBAN_GROUP = re.compile(r"[ ]?[A-Z0-9]+")
 _IBAN_START = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}")
-# Digits joined to the end of an IBAN by a separator, as in a card number.
-_AFTER_IBAN = re.compile(rf"{_SEPARATOR}(?P<run>\d(?:{_SEPARATOR}?\d)*)")
+# Digits joined to the end of an IBAN, as in a card number: after a separator, or directly. An
+# IBAN group holds only ASCII characters, so "4111" + Arabic-Indic or full-width digits ends
+# the IBAN right before them; they still belong to the same number.
+_AFTER_IBAN = re.compile(rf"{_SEPARATOR}?(?P<run>\d(?:{_SEPARATOR}?\d)*)")
+# A card that crosses the IBAN's end is checked only when this many digits follow it: with
+# fewer, no more than 4 card digits can be visible, as in "[CARD ****1111]" (ADR-0017).
+_MIN_DIGITS_AFTER_IBAN = 5
 # IBAN length by country (ISO 13616). A run is an IBAN only with a listed country code and
 # exactly that length; "YZ" + a card number passing mod 97 is not one (ADR-0017).
 # Source: SWIFT IBAN Registry release 101, via python-stdnum 2.2 ``stdnum/iban.dat``
@@ -80,8 +85,8 @@ _IBAN_LENGTHS: dict[str, int] = {
 _GAP_BEFORE = r"[^\d\n]{0,25}?"
 _GAP_AFTER = r"[^\d\n]{0,15}?"
 # A code is not part of a longer number and not the last 4 digits after "****".
-# ... nor the last 4 characters of a masked IBAN ("[IBAN DE89 \u20263000]").
-_CODE_START = r"(?<!\d)(?<!\*\*\*\*)(?<!\[IBAN [A-Z]{2}\d{2} \u2026)"
+# ... nor the last 4 characters of a masked IBAN: exactly "[IBAN DE89 \u20263000]".
+_CODE_START = r"(?<!\d)(?<!\*\*\*\*)(?!(?<=\[IBAN [A-Z]{2}\d{2} \u2026)[A-Z0-9]{4}\])"
 # ... and not followed by more digits or a decimal part ("250.00" is an amount).
 _CODE_END = r"(?!\d)(?![.,]\d)"
 # "card ending 1111", "last 4 digits: 1111": these digits are not a code.
@@ -126,7 +131,7 @@ _CODE_RULES: tuple[tuple[EntityType, tuple[re.Pattern[str], re.Pattern[str]]], .
 # Expiry: MM/YY or MM/YYYY anywhere, but not as part of a full date ("03/14/2026"); MM-YY and
 # MMYY only right after "exp", "expiry" or "valid until". "code" right after a masked card is
 # a CVV word.
-_MASKED_CARD = r"\[CARD \*{4}\d{4}\](?:[^\w\n]{0,3}code(?![^\W\d_]))?"
+_MASKED_CARD = r"\[CARD \*{4}(?:\d{4})?\](?:[^\w\n]{0,3}code(?![^\W\d_]))?"
 _SLASH_EXPIRY = r"(?<![\d/])(?<!/ )(?:0[1-9]|1[0-2])\s?/\s?(?:\d{4}|\d{2})(?!\d)(?!\s?/\s?\d)"
 _WORD_EXPIRY = (
     r"(?<![^\W\d_])(?:exp(?:iry)?\.?|valid\s+until)\s*:?\s*"
@@ -256,25 +261,36 @@ def _valid_iban_at(text: str, start: int) -> tuple[int, str] | None:
     return None
 
 
-def _card_across_iban_end(tail: str, run: str) -> str | None:
-    """Last 4 digits of a Luhn-valid 13-19 digit number made of the IBAN's last digits and the
-    first digits of the run right after it, if there is one."""
+def _card_across_iban_end(tail: str, run: str) -> bool:
+    """Whether the IBAN's last digits and the first digits of the run right after it form a
+    Luhn-valid 13-19 digit number."""
     for take in range(1, min(len(run), _MAX_PAN - 1) + 1):  # at least 1 digit of the IBAN
         for length in _WINDOW_LENGTHS:
             need = length - take
-            window = tail[-need:] + run[:take] if 1 <= need <= len(tail) else ""
-            if window and luhn_valid(window):
-                return window[-4:]
-    return None
+            if 1 <= need <= len(tail) and luhn_valid(tail[-need:] + run[:take]):
+                return True
+    return False
+
+
+def _is_a_code(text: str, start: int, end: int) -> bool:
+    """Whether a PIN, 2FA or CVV rule takes exactly ``text[start:end]`` as its code, with the
+    trigger word after it ("482913 is my OTP"). A trigger before it cannot reach past the
+    IBAN's digits. The code rules mask it later, so it is not taken for a card here."""
+    for _entity, (_before, after) in _CODE_RULES:
+        match = after.match(text, start)
+        if match is not None and match.end("code") == end:
+            return True
+    return False
 
 
 def _mask_iban(text: str, end: int, compact: str, counts: Counter[EntityType]) -> tuple[str, int]:
     """Masked IBAN plus the digit run joined to it; returns the text and where it stops.
 
     The IBAN keeps its country code, check digits and last 4 characters (ADR-0017). When more
-    digits follow with only a separator between, the last 4 are hidden too: they could be the
-    first digits of a card that goes on after the IBAN; that run is masked as a card when a
-    Luhn-valid number crosses the IBAN's end.
+    digits follow, the last 4 are hidden too: they could be the first digits of a card that
+    goes on after the IBAN. The run is masked as a card when it holds one itself, or, when it
+    has at least 5 digits and is not a PIN, 2FA or CVV code, when a Luhn-valid number crosses
+    the IBAN's end; that card is shown as ``[CARD ****]``, without digits.
     """
     counts["IBAN"] += 1
     joined = _AFTER_IBAN.match(text, end)
@@ -282,12 +298,16 @@ def _mask_iban(text: str, end: int, compact: str, counts: Counter[EntityType]) -
         return f"[IBAN {compact[:4]} \u2026{compact[-4:]}]", end
     run = joined.group("run")
     digits = "".join(_DIGIT.findall(_ENCODED.sub("", run)))
-    tail = re.sub(r"^.*\D", "", compact)  # the IBAN's last digits, after its last letter
-    masked_run, found = _mask_run(run)
+    # _mask_run expects a run of at least 13 digits: a shorter one ("0") can pass Luhn alone.
+    masked_run, found = _mask_run(run) if len(digits) >= _MIN_PAN else (run, 0)
     if not found:
-        last4 = _card_across_iban_end(tail, digits)
-        if last4 is not None:
-            masked_run, found = _card(last4), 1
+        tail = re.sub(r"^.*\D", "", compact)  # the IBAN's last digits, after its last letter
+        if (
+            len(digits) >= _MIN_DIGITS_AFTER_IBAN
+            and not _is_a_code(text, joined.start("run"), joined.end("run"))
+            and _card_across_iban_end(tail, digits)
+        ):
+            masked_run, found = "[CARD ****]", 1
     if found:
         counts["PAN"] += found
     separator = text[end : joined.start("run")]
