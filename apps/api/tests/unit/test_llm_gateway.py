@@ -443,7 +443,12 @@ async def test_a_schema_is_passed_as_json_schema() -> None:
     await make_gateway(provider).complete("triage", user("hi"), schema=Answer, call=CALL)
     [request] = provider.requests
     assert request.schema_name == "Answer"
-    assert request.json_schema == Answer.model_json_schema()
+    assert request.json_schema == {
+        "type": "object",
+        "properties": {"intent": {"type": "string"}},
+        "required": ["intent"],
+        "additionalProperties": False,
+    }
 
 
 async def test_unknown_role_and_wrong_kind_are_config_errors() -> None:

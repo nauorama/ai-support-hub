@@ -177,7 +177,7 @@ Each decision has an ADR with alternatives.
 │   │   │   ├── domain/          # enums and Pydantic models shared by all modules
 │   │   │   ├── guardrails/      # masking.py, injection.py, output_checks.py, policy.py
 │   │   │   ├── kb/              # loader.py, chunker.py, index.py, retriever.py
-│   │   │   ├── llm/             # gateway.py, prompts.py, pricing.py, budget.py, schemas.py
+│   │   │   ├── llm/             # gateway.py, structured.py, prompts.py, pricing.py, budget.py, schemas.py
 │   │   │   ├── graph/           # state.py, build.py, nodes/, routing.py, confidence.py
 │   │   │   ├── tools/           # mcp_client.py, registry.py, permissions.py
 │   │   │   ├── memory/  audit/  metrics/  privacy/  observability/

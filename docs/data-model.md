@@ -173,7 +173,7 @@ Own record of every model call. Source of truth for cost.
 | input_tokens, output_tokens, cached_tokens | int | |
 | cost_usd | numeric(10,6) | from `config/pricing.yaml` |
 | latency_ms | int | |
-| status | text | `ok` \| `retry` \| `error` \| `invalid_output`. One row per attempt: a retried attempt is `retry`; a call blocked by G2 is `error` with `error = 'blocked: G2'` (card data) or `'blocked: G2 IBAN'` (a raw IBAN, ADR-0017) |
+| status | text | `ok` \| `retry` \| `error` \| `invalid_output`. One row per attempt: a retried attempt is `retry`; a call blocked by G2 is `error` with `error = 'blocked: G2'` (card data) or `'blocked: G2 IBAN'` (a raw IBAN, ADR-0017); an answer that does not match the schema is `invalid_output` with `error = 'ValidationError (n)'` (n = number of errors; tokens and cost are kept) |
 | error | text null | error class and status code only, never provider text (it can echo the request) |
 
 Request and response bodies are **not** stored here. They are in the trace (masked, 30 days).

@@ -4,13 +4,17 @@ The recorder commits (a failed call must stay recorded when the caller rolls bac
 use a database of their own, like test_audit_log.py.
 """
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Literal
 
 import psycopg
 import pytest
 from psycopg import sql
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -27,6 +31,10 @@ from hub.llm.schemas import (
     LlmCallRecord,
     OutboundCardDataError,
     OutboundIbanError,
+    ProviderRequest,
+    ProviderResponse,
+    StructuredOutputError,
+    Usage,
 )
 from hub.observability.readiness import libpq_url
 
@@ -176,3 +184,78 @@ async def test_a_call_blocked_for_a_raw_iban_says_so_in_its_row_and_audit_record
     assert audit.details["reason"] == "iban"
     assert audit.details["entities"] == {"IBAN": 1}
     assert "37040044" not in str(audit.details)
+
+
+# --- structured output (P3-02): invalid answers are rows with status invalid_output ----------
+
+
+class _Verdict(BaseModel):
+    urgency: Literal["low", "normal", "high"]
+
+
+@dataclass
+class _Answers:
+    """Answers the chat calls in order, whatever the model."""
+
+    contents: list[str]
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            content=self.contents.pop(0), usage=Usage(input_tokens=100, output_tokens=20)
+        )
+
+    async def embed(self, request: ProviderRequest) -> ProviderResponse:
+        raise AssertionError("no embeddings here")
+
+
+def _structured_gateway(database: Database, *contents: str) -> Gateway:
+    return Gateway(
+        models=load_models(ROOT / "config" / "models.yaml"),
+        pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
+        provider=_Answers(list(contents)),
+        recorder=DbCallRecorder(database),
+    )
+
+
+async def _rows(database: Database) -> list[LlmCall]:
+    async with database.sessions() as session:
+        return list((await session.scalars(select(LlmCall).order_by(LlmCall.id))).all())
+
+
+async def test_an_invalid_answer_and_its_repair_are_both_recorded(database: Database) -> None:
+    run_id = uuid.uuid4()
+    call = CallContext(
+        context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, run_id=run_id, prompt_version="v1"
+    )
+    gateway = _structured_gateway(
+        database, json.dumps({"urgency": "panic"}), json.dumps({"urgency": "high"})
+    )
+
+    result = await gateway.complete_structured(
+        "triage", [{"role": "user", "content": "help"}], _Verdict, call=call
+    )
+
+    assert result.value.urgency == "high"
+    invalid, valid = await _rows(database)
+    assert (invalid.status, valid.status) == (LlmCallStatus.INVALID_OUTPUT, LlmCallStatus.OK)
+    assert invalid.error == "ValidationError (1)"
+    assert "panic" not in (invalid.error or "")
+    assert invalid.cost_usd > 0  # the invalid answer was paid for and counts in the budget
+    assert invalid.input_tokens == 100
+    assert {row.run_id for row in (invalid, valid)} == {run_id}
+    assert {row.prompt_version for row in (invalid, valid)} == {"v1"}
+    assert result.cost_usd == invalid.cost_usd + valid.cost_usd
+
+
+async def test_two_invalid_answers_leave_two_invalid_output_rows(database: Database) -> None:
+    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, run_id=uuid.uuid4())
+    gateway = _structured_gateway(database, "not json", json.dumps({"urgency": "panic"}))
+
+    with pytest.raises(StructuredOutputError):
+        await gateway.complete_structured(
+            "triage", [{"role": "user", "content": "help"}], _Verdict, call=call
+        )
+
+    rows = await _rows(database)
+    assert [row.status for row in rows] == [LlmCallStatus.INVALID_OUTPUT] * 2
+    assert all(row.error and row.error.startswith("ValidationError") for row in rows)
