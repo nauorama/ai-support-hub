@@ -1,5 +1,6 @@
 """The SQLAlchemy models follow the data model: enum CHECKs list exactly the enum values,
-constraints have predictable names, ids are UUID v7. No database needed."""
+constraints have predictable names, ids are UUID v7 (the KB tables use text ids). No database
+needed."""
 
 import re
 import uuid
@@ -27,6 +28,7 @@ from hub.domain.enums import (
     TicketStatus,
     Urgency,
 )
+from hub.domain.kb import Product, Visibility
 
 ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("customers", "tier", CustomerTier),
@@ -45,6 +47,8 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("llm_calls", "context", LlmCallContext),
     ("llm_calls", "node", LlmNode),
     ("llm_calls", "status", LlmCallStatus),
+    ("kb_documents", "product", Product),
+    ("kb_documents", "visibility", Visibility),
 ]
 
 # The dialect the app uses (psycopg 3), without a database.
@@ -59,7 +63,11 @@ TABLES = {
     "feedback",
     "audit_log",
     "llm_calls",
+    "kb_documents",
+    "kb_chunks",
 }
+# Tables whose primary key is text (the KB slug and `<doc_id>#<n>`, data model §1).
+TEXT_KEY_TABLES = {"kb_documents", "kb_chunks"}
 
 
 def _table(name: str) -> Table:
@@ -113,7 +121,7 @@ def test_every_table_has_a_creation_time(table: str) -> None:
     assert not column.nullable
 
 
-@pytest.mark.parametrize("table", sorted(TABLES - {"settings", "audit_log"}))
+@pytest.mark.parametrize("table", sorted(TABLES - {"settings", "audit_log"} - TEXT_KEY_TABLES))
 def test_uuid_primary_keys_are_made_in_the_application(table: str) -> None:
     column = _table(table).c["id"]
     assert column.primary_key

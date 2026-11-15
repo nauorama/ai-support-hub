@@ -1,4 +1,5 @@
-"""SQLAlchemy models of the Postgres tables (docs/data-model.md §1): phase 2, `llm_calls` (P3-01).
+"""SQLAlchemy models of the Postgres tables (docs/data-model.md §1): phase 2, `llm_calls` (P3-01),
+`kb_documents` and `kb_chunks` (P2-09).
 
 Conventions from the data model: primary keys are UUID v7 made in the application, timestamps
 are `timestamptz`, enums are text with a `CHECK` constraint, every table has `created_at`.
@@ -58,6 +59,7 @@ from hub.domain.enums import (
     TicketStatus,
     Urgency,
 )
+from hub.domain.kb import Product, Visibility
 from hub.domain.ticket_status import INITIAL_STATUS
 
 # Every constraint gets a predictable name, so later migrations can alter or drop it.
@@ -408,4 +410,52 @@ class LlmCall(Base):
     latency_ms: Mapped[int]
     status: Mapped[LlmCallStatus] = mapped_column(TextEnum(LlmCallStatus))
     error: Mapped[str | None]
+    created_at: Mapped[datetime] = _created_at_column()
+
+
+class KbDocument(Base):
+    """One knowledge-base file of `data/kb/`, written only by `make kb-load` (P2-09).
+
+    `id` is the slug of the file name, or `error-codes` for `error_codes.csv`. `version` counts
+    the changes of the file's SHA-256 (`content_hash`).
+    """
+
+    __tablename__ = "kb_documents"
+    __table_args__ = (
+        enum_check("product", Product),
+        enum_check("visibility", Visibility),
+        CheckConstraint("jsonb_typeof(intents) = 'array'", name="intents"),
+        CheckConstraint("version >= 1", name="version"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    title: Mapped[str]
+    product: Mapped[Product] = mapped_column(TextEnum(Product))
+    visibility: Mapped[Visibility] = mapped_column(TextEnum(Visibility))
+    intents: Mapped[list[Any]]
+    url: Mapped[str]
+    content_hash: Mapped[str]
+    version: Mapped[int]
+    updated_at: Mapped[datetime]
+    created_at: Mapped[datetime] = _created_at_column()
+
+
+class KbChunk(Base):
+    """One section of an article, or one error-code row (ADR-0006). Id: `<doc_id>#<ordinal>`,
+    for error codes `error-codes#<code>` (data model §1)."""
+
+    __tablename__ = "kb_chunks"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 0", name="ordinal"),
+        CheckConstraint("token_count >= 0", name="token_count"),
+        Index("ix_kb_chunks_doc_id", "doc_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    doc_id: Mapped[str] = mapped_column(ForeignKey("kb_documents.id", ondelete="CASCADE"))
+    ordinal: Mapped[int]
+    section: Mapped[str]
+    text: Mapped[str]
+    token_count: Mapped[int]
+    content_hash: Mapped[str]
     created_at: Mapped[datetime] = _created_at_column()
