@@ -105,6 +105,8 @@ References: [design](design.md), [data model](data-model.md), [API](api.md) §1�
 
 **Open question for P5-01 (from the P2-09 review):** `make kb-load` skips a file whose SHA-256 is unchanged, so a change to the chunker or to `MAX_CHUNK_TOKENS` does not reach unchanged files: their old chunks stay in Postgres, and from P5 in Qdrant, until each file is edited. P5-01 needs a way to force a full reload (for example a `--force` option, or a chunker version stored with each document that triggers a reload when it differs).
 
+**From the P2-09 review (deferred):** a first `##` heading indented by 1–3 spaces passes `make data-check` (`article_errors` checks `body.lstrip()`), but the chunker (`hub/kb/chunker.py`, `_HEADING`) does not take it as a heading, so that section is cited under the article title (`sections('   ## Indented\nx\n## A\ny', 'T')` gives `[('T', '## Indented\nx'), ('A', 'y')]`); make the two agree (the chunker accepts the indent, or data-check refuses it). No article in `data/kb` has one today.
+
 **Gate 2:** with `make dev`, a customer message with a card number is stored masked, an operator answers it through the API, the audit chain verifies, CI is green. Walkthrough written.
 
 ---
