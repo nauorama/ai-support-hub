@@ -110,7 +110,7 @@ Closing: an operator closes a ticket by hand, or the scheduled job `close-stale`
 | author_operator_id | uuid FK null | |
 | run_id | uuid FK null | the foreign key is added with the `runs` table (phase 6) |
 | citations | jsonb | `[{"marker": 1, "chunk_id": "...", "doc_id": "...", "title": "...", "url": "..."}]` |
-| masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}`; `{"failed": 1}` when masking failed (every digit hidden, counts unknown) |
+| masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}` or `{"IBAN": 1}` (ADR-0017; an IBAN is not card data and does not set the customer's `masked` flag); `{"failed": 1}` when masking failed (every digit hidden, counts unknown) |
 | idempotency_key | text null unique | |
 
 Order of messages: `(created_at, id)`. The chat polls `?after=<message id>`, so a message must never be saved with a time earlier than one a client has already seen. `created_at` is therefore `clock_timestamp()` taken at the `INSERT`, after the writer has locked the ticket row (`SELECT … FOR UPDATE`, held until commit; `MessageRepository.add` does both). A second writer on the same ticket waits until the first one commits, so its time is later than every message already visible. The column default (`now()`, the transaction start) is not used for messages: a transaction that started earlier but committed later would sort its message before an anchor the client already has.
@@ -173,7 +173,7 @@ Own record of every model call. Source of truth for cost.
 | input_tokens, output_tokens, cached_tokens | int | |
 | cost_usd | numeric(10,6) | from `config/pricing.yaml` |
 | latency_ms | int | |
-| status | text | `ok` \| `retry` \| `error` \| `invalid_output`. One row per attempt: a retried attempt is `retry`; a call blocked by G2 is `error` with `error = 'blocked: G2'` |
+| status | text | `ok` \| `retry` \| `error` \| `invalid_output`. One row per attempt: a retried attempt is `retry`; a call blocked by G2 is `error` with `error = 'blocked: G2'` (card data) or `'blocked: G2 IBAN'` (a raw IBAN, ADR-0017) |
 | error | text null | error class and status code only, never provider text (it can echo the request) |
 
 Request and response bodies are **not** stored here. They are in the trace (masked, 30 days).

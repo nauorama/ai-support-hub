@@ -43,7 +43,7 @@ class TicketState(TypedDict, total=False):
     customer_ref: str
     # input
     message_masked: str            # card data removed
-    message_for_llm: str           # + placeholders for email, phone, IBAN
+    message_for_llm: str           # + placeholders for email, phone, IBAN (IBAN already partly masked by G1)
     history: list[ChatTurn]        # earlier messages of this ticket, masked, max 10 turns
     customer_context: CustomerContext   # tier, country, restricted flag, memory items
     input_flags: InputFlags        # pan_found, injection_score, injection_patterns, language
@@ -68,7 +68,7 @@ Keep the state small: chunk texts are stored once in `evidence`; nodes do not co
 
 | Node | Kind | Input → output | Fails into |
 |---|---|---|---|
-| `intake` | code | Detect language. Run the injection heuristics. Replace email, phone, IBAN with placeholders (`<EMAIL_1>`). Load the customer profile (tool `core_get_customer`), up to 5 memory items and the customer's other open tickets (id, intent, status). | continues with flags |
+| `intake` | code | Detect language. Run the injection heuristics. Replace email, phone, IBAN with placeholders (`<EMAIL_1>`; the IBAN is already partly masked by G1, ADR-0017). Load the customer profile (tool `core_get_customer`), up to 5 memory items and the customer's other open tickets (id, intent, status). | continues with flags |
 | `triage` | LLM, role `triage` | `TriageResult` | handoff `system_error` |
 | `policy_gate` | code | Applies `config/policy.yaml` (section 6). Sets route and reasons when a hard rule matches. | — |
 | `research` | LLM tool loop, role `research` | `Evidence`. Step 0 is always a hybrid search with the ticket text (not chosen by the model). Then the model may call read tools, at most 5 calls, 20 s total. | continues with what it has, reason `degraded` |

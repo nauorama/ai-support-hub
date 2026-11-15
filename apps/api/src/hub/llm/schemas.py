@@ -6,6 +6,7 @@ The gateway works with these models only; `litellm` types never leave `hub/llm/g
 import hashlib
 import json
 import uuid
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -147,8 +148,31 @@ class ProviderError(LlmError):
         return self.kind if self.status_code is None else f"{self.kind} ({self.status_code})"
 
 
-class OutboundCardDataError(LlmError):
+class OutboundBlockedError(LlmError):
+    """G2 blocked the call and audited it."""
+
+
+class OutboundCardDataError(OutboundBlockedError):
     """G2: the request contains card data. The call was blocked and audited."""
+
+
+class OutboundIbanError(OutboundBlockedError):
+    """G2: the request contains a raw IBAN, which G3 should have replaced. The call was blocked
+    and audited; no card data was found."""
+
+
+BlockedReason = Literal["card_data", "iban"]
+
+
+def blocked_reason(entities: Mapping[str, int]) -> BlockedReason:
+    """Why G2 blocked a call: card data whenever anything other than an IBAN was found (a
+    failed scan counts as card data), so an IBAN never hides a card hit."""
+    return "iban" if set(entities) == {"IBAN"} else "card_data"
+
+
+def blocked_error(reason: BlockedReason) -> str:
+    """What `llm_calls.error` stores for a G2 block."""
+    return "blocked: G2" if reason == "card_data" else "blocked: G2 IBAN"
 
 
 class LlmUnavailableError(LlmError):

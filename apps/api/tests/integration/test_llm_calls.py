@@ -22,7 +22,12 @@ from hub.llm.config import load_models
 from hub.llm.gateway import FixtureProvider, Gateway
 from hub.llm.pricing import load_pricing
 from hub.llm.recorder import BLOCKED_ACTION, DbCallRecorder
-from hub.llm.schemas import CallContext, LlmCallRecord, OutboundCardDataError
+from hub.llm.schemas import (
+    CallContext,
+    LlmCallRecord,
+    OutboundCardDataError,
+    OutboundIbanError,
+)
 from hub.observability.readiness import libpq_url
 
 from ._compose import ROOT
@@ -140,6 +145,34 @@ async def test_a_blocked_call_writes_its_row_and_a_chained_audit_record(
     assert audit.details["guardrail"] == "G2"
     assert audit.details["node"] == "write"
     assert audit.details["entities"] == {"PAN": 1}
+    assert audit.details["reason"] == "card_data"
     assert audit.details["run_id"] == str(run_id)
     assert "4111" not in str(audit.details)
     assert chain == ChainCheck(ok=True, checked=1)
+
+
+async def test_a_call_blocked_for_a_raw_iban_says_so_in_its_row_and_audit_record(
+    database: Database,
+) -> None:
+    gateway = Gateway(
+        models=load_models(ROOT / "config" / "models.yaml"),
+        pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
+        provider=FixtureProvider(ROOT / "apps" / "api" / "tests" / "fixtures" / "llm"),
+        recorder=DbCallRecorder(database),
+    )
+    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.WRITE, run_id=uuid.uuid4())
+
+    with pytest.raises(OutboundIbanError):
+        await gateway.complete(
+            "write", [{"role": "user", "content": "refund to DE89370400440532013000"}], call=call
+        )
+
+    async with database.sessions() as session:
+        [row] = (await session.scalars(select(LlmCall))).all()
+        [audit] = (await session.scalars(select(AuditLog))).all()
+
+    assert row.error == "blocked: G2 IBAN"
+    assert audit.action == BLOCKED_ACTION
+    assert audit.details["reason"] == "iban"
+    assert audit.details["entities"] == {"IBAN": 1}
+    assert "37040044" not in str(audit.details)

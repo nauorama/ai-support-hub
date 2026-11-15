@@ -135,7 +135,7 @@ Every number has a reason. "Target" is the goal for the MVP. "Red line" means: b
 ## 8. Regulatory constraints
 
 - **Card data.** No full card number, CVV, PIN or 2FA code in the database, logs, traces or model requests. Masking happens before anything else.
-- **GDPR.** Data minimisation (emails, phone numbers and IBANs are replaced with placeholders before model calls), retention limits, deletion on request, no customer data in the evaluation sets (synthetic data only).
+- **GDPR.** Data minimisation (IBANs are stored only partly masked, ADR-0017; emails, phone numbers and IBANs are replaced with placeholders before model calls), retention limits, deletion on request, no customer data in the evaluation sets (synthetic data only).
 - **EU AI Act, Article 50** (the transparency duty for chatbots applies since 2 August 2026). The customer is told at the start that an AI system answers. AI-written messages are labelled. A customer-support chatbot is not a high-risk system, but the transparency duty applies.
 - **Tipping-off.** The AI never explains why an account is restricted.
 - **Anti-money-laundering rules.** Verification, restrictions and limit increases are human decisions. In a real payments company, legal record keeping (5 years) limits what can be deleted on a GDPR request; the erasure function of the Hub covers support data only.

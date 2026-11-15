@@ -20,5 +20,6 @@ One file per decision. To change a decision, add a new ADR that replaces the old
 | [0014](0014-observability.md) | Tracing with Langfuse plus an own `llm_calls` table |
 | [0015](0015-free-tier-deployment.md) | Free-tier deployment: Cloud Run + Neon + Qdrant Cloud |
 | [0016](0016-web-ui-and-auth.md) | React console served by the API; cookie sessions |
+| [0017](0017-ibans-always-partly-masked.md) | IBANs are always partly masked (replaces part of 0010) |
 
 Template: Context → Decision → Alternatives considered → Consequences. Half a page.

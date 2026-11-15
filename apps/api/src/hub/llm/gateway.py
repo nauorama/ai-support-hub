@@ -32,6 +32,7 @@ from hub.llm.config import ConfigError, ModelsConfig, RoleConfig, load_models
 from hub.llm.pricing import Pricing, load_pricing
 from hub.llm.recorder import CallRecorder
 from hub.llm.schemas import (
+    BlockedReason,
     CallContext,
     Completion,
     Embeddings,
@@ -39,13 +40,17 @@ from hub.llm.schemas import (
     LlmCallRecord,
     LlmUnavailableError,
     Message,
+    OutboundBlockedError,
     OutboundCardDataError,
+    OutboundIbanError,
     ProviderError,
     ProviderRequest,
     ProviderResponse,
     ToolCall,
     ToolsNotAllowedError,
     Usage,
+    blocked_error,
+    blocked_reason,
 )
 
 # Switches LiteLLM reads from the environment (checked in LiteLLM 1.108.6). This is the one place
@@ -116,8 +121,9 @@ def _strings(value: object) -> Iterator[str]:
 
 
 def scan_outbound(request: ProviderRequest) -> dict[str, int]:
-    """Card data (PAN, CVV, PIN, 2FA code) anywhere in what the model would see: messages,
-    texts, tool definitions, schema. Each string is scanned on its own, so digits of two
+    """Card data (PAN, CVV, PIN, 2FA code) and raw IBANs anywhere in what the model would see:
+    messages, texts, tool definitions, schema. G3 replaces IBANs before the model call, so a raw
+    IBAN here is a mistake too. Each string is scanned on its own, so digits of two
     neighbouring strings never join into one number. Fails closed: a masking error counts."""
     seen = request.model_dump(include={"messages", "texts", "tools", "json_schema"})
     counts: Counter[str] = Counter()
@@ -127,6 +133,12 @@ def scan_outbound(request: ProviderRequest) -> dict[str, int]:
             counts["MASKING_FAILED"] += 1
         counts.update(result.counts)
     return {entity: count for entity, count in counts.items() if count}
+
+
+def _blocked_error(reason: BlockedReason, message: str) -> OutboundBlockedError:
+    if reason == "iban":
+        return OutboundIbanError(f"{message}: raw IBAN")
+    return OutboundCardDataError(f"{message}: card data")
 
 
 # --- providers -----------------------------------------------------------------------------------
@@ -306,8 +318,9 @@ class RecordingProvider:
 
 def write_fixture(directory: Path, request: ProviderRequest, response: ProviderResponse) -> Path:
     """Used by `make record-llm`. The request is scanned again before it is written."""
-    if scan_outbound(request):
-        raise OutboundCardDataError("refusing to record a request with card data")
+    entities = scan_outbound(request)
+    if entities:
+        raise _blocked_error(blocked_reason(entities), "refusing to record the request")
     fixture = Fixture(
         request=request.model_dump(mode="json", exclude={"timeout_s"}),
         response=response,
@@ -448,11 +461,14 @@ class Gateway:
         # what every model would see.
         entities = scan_outbound(requests[0])
         if entities:
+            reason = blocked_reason(entities)
             await self.recorder.record_blocked(
-                self._row(call, requests[0].model, LlmCallStatus.ERROR, error="blocked: G2"),
+                self._row(
+                    call, requests[0].model, LlmCallStatus.ERROR, error=blocked_error(reason)
+                ),
                 entities,
             )
-            raise OutboundCardDataError(f"G2 blocked a call of node {call.node.value}")
+            raise _blocked_error(reason, f"G2 blocked a call of node {call.node.value}")
 
         for index, request in enumerate(requests):
             for attempt in range(RETRIES + 1):

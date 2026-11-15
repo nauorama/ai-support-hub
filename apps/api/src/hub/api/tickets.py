@@ -45,7 +45,7 @@ from hub.db.repositories import (
 )
 from hub.deps import Container
 from hub.domain.enums import ActorType, MessageRole, Route, TicketStatus
-from hub.guardrails.masking import MaskResult, mask
+from hub.guardrails.masking import CARD_ENTITIES, MaskResult, mask
 
 router = APIRouter(prefix="/api/v1/tickets", tags=["tickets"])
 
@@ -90,7 +90,12 @@ async def _message_out(session: AsyncSession, message: Message) -> MessageOut:
         is_ai_generated=message.is_ai_generated,
         body=message.body,
         citations=citations_for_customer(message.citations),
-        masked=any(count > 0 for count in message.masked_entities.values()),
+        # Card data only: the note says "We hid a card number" (docs/ui.md); an IBAN is not.
+        masked=any(
+            count > 0
+            for kind, count in message.masked_entities.items()
+            if kind in CARD_ENTITIES or kind == "failed"
+        ),
         created_at=message.created_at,
     )
 

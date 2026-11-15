@@ -1,6 +1,6 @@
 # ADR-0010: Mask card data before storage and before any model call
 
-- Status: accepted
+- Status: Superseded in part by ADR-0017 (IBAN rule)
 - Date: 2026-11-12
 
 ## Context
