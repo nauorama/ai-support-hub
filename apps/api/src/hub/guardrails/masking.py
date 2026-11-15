@@ -2,8 +2,9 @@
 
 Card numbers (PAN) become ``[CARD ****1111]``. CVV, PIN and 2FA codes next to their trigger
 words, and CVV-like numbers directly next to a masked card or an expiry date, become
-``[REDACTED]``. A valid IBAN keeps only its country code, check digits and last 4 characters,
-``[IBAN DE89 …3000]`` (ADR-0017), so no card digits hidden in it are stored. The same function
+``[REDACTED]``; an exact error code such as ``ERR-3007`` is not a PIN or 2FA code. A valid
+IBAN keeps only its country code, check digits and last 4 characters, ``[IBAN DE89 …3000]``
+(ADR-0017), so no card digits hidden in it are stored. The same function
 masks customer text, operator text, log records and traces (G9), so it must never raise: on an
 internal error it masks every digit instead.
 
@@ -96,8 +97,18 @@ _LAST_DIGITS_BEFORE = re.compile(
 )
 
 
-def _code_patterns(triggers: str, digits: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
-    code = rf"{_CODE_START}\d{{{digits}}}{_CODE_END}"
+# An exact error code such as "ERR-3007" is not a PIN or 2FA code, even next to "PIN": triage
+# needs it (pre-H2 #2). Uppercase "ERR" with no word character (letter, digit, "_") before it,
+# and exactly 4 ASCII digits: real codes are ASCII, so full-width or Arabic-Indic digits are
+# still masked, and so is "ERR-30071" or a fifth digit of any script after the four.
+_NOT_AN_ERROR_CODE = r"(?!(?<=(?<!\w)(?-i:ERR)-)[0-9]{4}(?!\d))"
+
+
+def _code_patterns(
+    triggers: str, digits: str, *, keep_error_codes: bool = False
+) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    start = _CODE_START + (_NOT_AN_ERROR_CODE if keep_error_codes else "")
+    code = rf"{start}\d{{{digits}}}{_CODE_END}"
     # Not inside a longer word, but "cvv737" and "OTP482913" still count.
     trigger = rf"(?<![^\W\d_])(?:{triggers})(?![^\W\d_])"
     before = re.compile(rf"(?P<lead>{trigger}{_GAP_BEFORE})(?P<code>{code})", re.IGNORECASE)
@@ -115,13 +126,14 @@ _CODE_RULES: tuple[tuple[EntityType, tuple[re.Pattern[str], re.Pattern[str]]], .
             "3,4",
         ),
     ),
-    ("PIN", _code_patterns(r"pin(?:\s+code)?", "4,6")),
+    ("PIN", _code_patterns(r"pin(?:\s+code)?", "4,6", keep_error_codes=True)),
     (
         "2FA",
         _code_patterns(
             r"2fa|otp|one[\s-]time\s+(?:code|password|passcode)|verification\s+code"
             r"|sms\s+code|auth(?:entication|enticator)?\s+code",
             "4,8",
+            keep_error_codes=True,
         ),
     ),
 )
