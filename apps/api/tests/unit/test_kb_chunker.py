@@ -2,6 +2,7 @@
 
 import hashlib
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -72,6 +73,30 @@ def test_subheadings_and_closing_hashes() -> None:
     assert sections(body, default_heading=TITLE) == [
         ("Steps", "### Step one\nDo it.\n#### Detail\nMore.")
     ]
+
+
+def test_a_hash_without_a_space_before_it_belongs_to_the_heading() -> None:
+    body = "## Pay in C#\nx\n## Tabs ##   \ny\n"
+    assert sections(body, default_heading=TITLE) == [("Pay in C#", "x"), ("Tabs", "y")]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # A tilde line does not close a backtick fence (and the other way round).
+        ("## A\n```\n~~~\n## B\n```\ny\n", [("A", "```\n~~~\n## B\n```\ny")]),
+        ("## A\n~~~\n```\n## B\n~~~\n", [("A", "~~~\n```\n## B\n~~~")]),
+        # A shorter fence does not close a longer one.
+        ("## A\n````\n```\n## B\n````\n## C\nz", [("A", "````\n```\n## B\n````"), ("C", "z")]),
+        # A fence line with an info string does not close a fence.
+        ("## A\n```\n```python\n## B\n```\n", [("A", "```\n```python\n## B\n```")]),
+        # Fences indented by up to 3 spaces count; 4 spaces is an indented code line.
+        ("## A\nx\n   ```\n## B\n   ```\n## C\nz", [("A", "x\n   ```\n## B\n   ```"), ("C", "z")]),
+        ("## A\n    ```\n## B\ny", [("A", "```"), ("B", "y")]),
+    ],
+)
+def test_fences_follow_commonmark(body: str, expected: list[tuple[str, str]]) -> None:
+    assert sections(body, default_heading=TITLE) == expected
 
 
 def test_a_heading_inside_a_code_fence_is_content() -> None:

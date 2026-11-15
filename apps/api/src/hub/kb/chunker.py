@@ -26,8 +26,13 @@ MAX_CHUNK_TOKENS = 400
 CHARS_PER_TOKEN = 4
 ERROR_CODES_TITLE = "Error codes"
 
-_HEADING = re.compile(r"^## +(?P<heading>.*?)[ #]*$")
-_FENCE = re.compile(r"^(```|~~~)")
+# CommonMark: an optional closing run of `#` counts only after a space, so `## Pay in C#` keeps
+# its `#` and `## Steps ##` becomes `Steps`.
+_HEADING = re.compile(r"^## +(?P<heading>.*?)(?: +#+)? *$")
+# CommonMark fences: up to 3 spaces of indent, 3 or more backticks or tildes. A fence is closed
+# only by the same character, at least as many, with nothing after it but spaces.
+_FENCE_OPEN = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
+_FENCE_CLOSE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,}) *$")
 _BLANK_LINES = re.compile(r"\n[ \t]*\n+")
 # Paragraphs first, then lines inside a paragraph that is too long on its own.
 _SEPARATORS = ("\n\n", "\n")
@@ -91,11 +96,16 @@ def sections(body: str, default_heading: str) -> list[tuple[str, str]]:
     A `## ` line inside a fenced code block is content, not a heading.
     """
     found: list[tuple[str, list[str]]] = [(default_heading, [])]
-    in_fence = False
+    fence = ""  # the opening fence while inside a fenced block
     for line in body.splitlines():
-        if _FENCE.match(line):
-            in_fence = not in_fence
-        match = None if in_fence else _HEADING.match(line)
+        match = None
+        if fence:
+            if _closes(fence, line):
+                fence = ""
+        elif opened := _FENCE_OPEN.match(line):
+            fence = opened["fence"]
+        else:
+            match = _HEADING.match(line)
         if match:
             found.append((match["heading"].strip(), []))
         else:
@@ -103,6 +113,15 @@ def sections(body: str, default_heading: str) -> list[tuple[str, str]]:
     result = [(heading, "\n".join(lines).strip()) for heading, lines in found]
     preamble = result[0]
     return ([preamble] if preamble[1] else []) + result[1:]
+
+
+def _closes(fence: str, line: str) -> bool:
+    closing = _FENCE_CLOSE.match(line)
+    return (
+        closing is not None
+        and closing["fence"][0] == fence[0]
+        and len(closing["fence"]) >= len(fence)
+    )
 
 
 def split_text(

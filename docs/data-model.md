@@ -236,7 +236,7 @@ Postgres keeps the knowledge base as the source of truth for the index and for t
 | id | text PK | `<doc_id>#<ordinal>`, e.g. `withdrawal-times#2`; error codes `error-codes#<code>`, e.g. `error-codes#ERR-2003` |
 | doc_id | text FK | `ON DELETE CASCADE`: a removed document takes its chunks |
 | ordinal | int | from 0, in file order; the pieces of a split section continue the count |
-| section | text | the `##` heading; for an error code `<code> <title>` |
+| section | text | the `##` heading (chunks are cut only at `##`, so `###` headings stay in the text and there is no deeper path); for an error code `<code> <title>` |
 | text | text | article title, section heading, blank line, section text ([ADR-0006](adr/0006-section-chunking.md)) |
 | token_count | int | estimate: `ceil(characters / 4)`, not a tokenizer; it decides only where a section over 400 is split |
 | content_hash | text | SHA-256 of `text` |

@@ -91,6 +91,11 @@ def test_the_real_knowledge_base_is_read_without_problems() -> None:
             CSV.replace(b"Ask the payer.,external", b"Ask the payer.,internal"),
             "ERR-1001: visibility must be external",
         ),
+        (
+            {"withdrawal-times": _article()},
+            CSV.replace(b"Ask the payer.", b"Ask a supervisor."),
+            "ERR-1001: external row contains internal-only phrase 'supervisor'",
+        ),
     ],
 )
 def test_a_bad_file_stops_the_load(articles: dict[str, bytes], csv: bytes, message: str) -> None:
