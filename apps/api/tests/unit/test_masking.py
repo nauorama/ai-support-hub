@@ -153,6 +153,63 @@ def test_codes_without_a_trigger_are_kept(text: str) -> None:
     assert mask(text) == MaskResult(text=text, counts={})
 
 
+# Pre-H2 #2: an exact error code next to a PIN or 2FA word is kept, so triage sees it.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ERR-3007 wrong PIN",
+        "Wrong PIN: ERR-3007",
+        "ERR-3003: after 3 wrong PINs the PIN is blocked",
+        "ERR-3003 PIN blocked",
+        "my pin code gives ERR-3003",
+        "ERR-5003 2FA code invalid",
+        "the OTP fails with ERR-5003",
+        "ERR-5004: 2FA not set up",
+        "(ERR-3007) PIN",
+        "ERR-3007 and ERR-3003 after a wrong PIN",
+    ],
+)
+def test_error_codes_next_to_pin_or_2fa_words_are_kept(text: str) -> None:
+    assert mask(text) == MaskResult(text=text, counts={})
+
+
+@pytest.mark.parametrize(
+    ("text", "expected", "counts"),
+    [
+        ("my PIN is 3007", "my PIN is [REDACTED]", {"PIN": 1}),
+        ("ERR-30071 PIN", "ERR-[REDACTED] PIN", {"PIN": 1}),  # 5 digits: not an error code
+        ("ERR-300712 OTP", "ERR-[REDACTED] OTP", {"2FA": 1}),
+        ("err-3007 wrong PIN", "err-[REDACTED] wrong PIN", {"PIN": 1}),  # uppercase only
+        ("Err-3007 PIN", "Err-[REDACTED] PIN", {"PIN": 1}),
+        ("XERR-3007 PIN", "XERR-[REDACTED] PIN", {"PIN": 1}),  # "ERR" inside a longer word
+        ("ERR 3007 PIN", "ERR [REDACTED] PIN", {"PIN": 1}),  # no dash
+        ("ERR3007 PIN", "ERR[REDACTED] PIN", {"PIN": 1}),
+        (
+            "ERR-3007 wrong PIN, my PIN is 1234",
+            "ERR-3007 wrong PIN, my PIN is [REDACTED]",
+            {"PIN": 1},
+        ),
+        ("OTP 482913, ERR-5003", "OTP [REDACTED], ERR-5003", {"2FA": 1}),
+        # The CVV rule has no error-code exception (owner decision, pre-H2 #2).
+        ("security code ERR-3007", "security code ERR-[REDACTED]", {"CVV": 1}),
+    ],
+)
+def test_codes_that_are_not_exact_error_codes_are_still_masked(
+    text: str, expected: str, counts: dict[str, int]
+) -> None:
+    assert mask(text) == MaskResult(text=expected, counts=counts)
+
+
+@settings(max_examples=200)
+@given(
+    digits=st.text(alphabet="0123456789", min_size=4, max_size=4),
+    trigger=st.sampled_from(["PIN", "pin code", "2FA", "OTP", "verification code"]),
+)
+def test_any_exact_error_code_is_kept_next_to_a_trigger(digits: str, trigger: str) -> None:
+    for text in (f"ERR-{digits} wrong {trigger}", f"{trigger} failed: ERR-{digits}"):
+        assert mask(text) == MaskResult(text=text, counts={})
+
+
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
