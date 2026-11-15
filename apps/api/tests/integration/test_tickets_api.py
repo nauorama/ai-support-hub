@@ -201,6 +201,30 @@ def test_card_number_is_stored_masked_and_never_in_the_database_or_logs(
     assert "charged twice" not in logs  # no message text in the logs at all
 
 
+def test_an_iban_is_stored_partly_masked_without_the_card_note(
+    app_client: TestClient, api_db: tuple[str, str], customers: dict[str, uuid.UUID]
+) -> None:
+    # ADR-0017: the IBAN count goes to masked_entities and the audit record; the customer's
+    # "masked" flag (the "We hid a card number" note) stays card-only.
+    client = _login(app_client)
+    created = _new_ticket(client, "Refund to DE89 3704 0044 0532 0130 00 please")
+    assert created["message"]["body"] == "Refund to [IBAN DE89 \u20263000] please"
+    assert created["message"]["masked"] is False
+    assert _sql(api_db, "SELECT body, masked_entities FROM messages") == [
+        ("Refund to [IBAN DE89 \u20263000] please", {"IBAN": 1})
+    ]
+    details = _sql(api_db, "SELECT details FROM audit_log WHERE action = 'guardrail.masked'")
+    assert details == [({"counts": {"IBAN": 1}, "failed": False},)]
+
+
+def test_an_iban_and_a_card_show_the_card_note(
+    app_client: TestClient, api_db: tuple[str, str], customers: dict[str, uuid.UUID]
+) -> None:
+    client = _login(app_client)
+    created = _new_ticket(client, f"Refund to DE89 3704 0044 0532 0130 00, card {TEST_CARD}")
+    assert created["message"]["masked"] is True
+
+
 def test_audit_records_ticket_message_and_masking_with_a_valid_chain(
     app_client: TestClient, api_db: tuple[str, str], customers: dict[str, uuid.UUID]
 ) -> None:

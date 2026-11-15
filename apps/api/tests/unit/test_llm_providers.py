@@ -36,6 +36,7 @@ from hub.llm.schemas import (
     CallContext,
     FixtureMissingError,
     OutboundCardDataError,
+    OutboundIbanError,
     ProviderError,
     ProviderRequest,
     ProviderResponse,
@@ -374,6 +375,12 @@ async def test_a_missing_or_broken_fixture_is_an_error(tmp_path: Path) -> None:
     provider.path(_request()).write_text("{}", encoding="utf-8")
     with pytest.raises(FixtureMissingError, match="invalid"):
         await provider.complete(_request())
+
+
+def test_a_request_with_a_raw_iban_is_never_recorded(tmp_path: Path) -> None:
+    with pytest.raises(OutboundIbanError):
+        write_fixture(tmp_path, _request("iban DE89 3704 0044 0532 0130 00"), ProviderResponse())
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_request_with_card_data_is_never_recorded(tmp_path: Path) -> None:

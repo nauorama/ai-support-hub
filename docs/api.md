@@ -52,7 +52,7 @@ A customer can read only their own tickets (404 for others, not 403).
   "created_at": "2026-11-12T10:15:04Z"
 }
 ```
-`masked` is true when the server hid card data in the message (the chat shows a note, [UI](ui.md) §2). Internal fields (chunk ids, scores, confidence, route reasons) are never in customer responses.
+`masked` is true when the server hid card data in the message (not for a partly masked IBAN, ADR-0017) (the chat shows a note, [UI](ui.md) §2). Internal fields (chunk ids, scores, confidence, route reasons) are never in customer responses.
 
 **Ticket object (customer view):** `id`, `status`, `ai_disclosure` (the text of [security](security.md) §7), `ai_disclosed_at`, `created_at`.
 

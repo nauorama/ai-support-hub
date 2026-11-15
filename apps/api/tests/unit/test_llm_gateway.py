@@ -19,12 +19,16 @@ from hub.llm.schemas import (
     CallContext,
     FixtureMissingError,
     LlmUnavailableError,
+    OutboundBlockedError,
     OutboundCardDataError,
+    OutboundIbanError,
     ProviderError,
     ProviderRequest,
     ProviderResponse,
     ToolsNotAllowedError,
     Usage,
+    blocked_error,
+    blocked_reason,
 )
 
 from ._llm import CALL, MemoryRecorder, ScriptedProvider, Sleeps, make_gateway, ok, real_models
@@ -101,6 +105,66 @@ async def test_a_request_with_card_data_is_blocked_and_audited(
     assert row.run_id == run_id
     assert (row.input_tokens, row.output_tokens, row.cost_usd) == (0, 0, Decimal(0))
     assert VISA.replace(" ", "") not in repr(recorder.blocked).replace(" ", "")
+
+
+IBAN = "DE89 3704 0044 0532 0130 00"  # public example IBAN
+
+
+async def test_a_request_with_a_raw_iban_is_blocked_with_its_own_reason() -> None:
+    # G3 replaces IBANs before the model call; a raw one here is a mistake (ADR-0017).
+    provider = ScriptedProvider({})
+    recorder = MemoryRecorder()
+    with pytest.raises(OutboundIbanError):
+        await make_gateway(provider, recorder).complete(
+            "triage", user(f"refund to {IBAN}"), call=CALL
+        )
+    assert provider.requests == []
+    [(row, entities)] = recorder.blocked
+    assert entities == {"IBAN": 1}
+    assert row.status is LlmCallStatus.ERROR
+    assert row.error == "blocked: G2 IBAN"
+    assert "3704" not in repr(recorder.blocked)
+
+
+async def test_card_data_next_to_an_iban_is_blocked_as_card_data() -> None:
+    provider = ScriptedProvider({})
+    recorder = MemoryRecorder()
+    with pytest.raises(OutboundCardDataError):
+        await make_gateway(provider, recorder).complete(
+            "triage", user(f"refund to {IBAN}, card {VISA}"), call=CALL
+        )
+    [(row, entities)] = recorder.blocked
+    assert entities == {"IBAN": 1, "PAN": 1}
+    assert row.error == "blocked: G2"
+
+
+def test_a_masked_iban_is_not_blocked() -> None:
+    request = ProviderRequest(
+        kind="chat",
+        model=HAIKU,
+        messages=[{"role": "user", "content": "refund to [IBAN DE89 \u20263000]"}],
+        timeout_s=5,
+    )
+    assert scan_outbound(request) == {}
+
+
+@pytest.mark.parametrize(
+    ("entities", "reason", "error"),
+    [
+        ({"IBAN": 1}, "iban", "blocked: G2 IBAN"),
+        ({"IBAN": 2, "CVV": 1}, "card_data", "blocked: G2"),
+        ({"PAN": 1}, "card_data", "blocked: G2"),
+        ({"MASKING_FAILED": 1}, "card_data", "blocked: G2"),
+    ],
+)
+def test_blocked_reason(entities: dict[str, int], reason: str, error: str) -> None:
+    assert blocked_reason(entities) == reason
+    assert blocked_error(blocked_reason(entities)) == error
+
+
+def test_both_block_errors_share_a_base() -> None:
+    assert issubclass(OutboundCardDataError, OutboundBlockedError)
+    assert issubclass(OutboundIbanError, OutboundBlockedError)
 
 
 async def test_embedding_texts_are_scanned_too() -> None:

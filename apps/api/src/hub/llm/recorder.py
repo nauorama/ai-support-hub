@@ -10,7 +10,7 @@ from hub.audit import record as audit_record
 from hub.db.models import LlmCall
 from hub.db.session import Database
 from hub.domain.enums import ActorType
-from hub.llm.schemas import LlmCallRecord
+from hub.llm.schemas import LlmCallRecord, blocked_reason
 
 BLOCKED_ACTION = "guardrail.blocked"
 
@@ -47,10 +47,11 @@ class DbCallRecorder:
 
 
 def blocked_details(call: LlmCallRecord, entities: dict[str, int]) -> dict[str, object]:
-    """Audit details of a G2 block: which guardrail, where, and how many entities of each type.
-    Never the request text."""
+    """Audit details of a G2 block: which guardrail, why (card data or a raw IBAN), where, and
+    how many entities of each type. Never the request text."""
     return {
         "guardrail": "G2",
+        "reason": blocked_reason(entities),
         "node": call.node.value,
         "context": call.context.value,
         "model": call.model,

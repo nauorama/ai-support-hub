@@ -2,8 +2,10 @@
 
 Card numbers (PAN) become ``[CARD ****1111]``. CVV, PIN and 2FA codes next to their trigger
 words, and CVV-like numbers directly next to a masked card or an expiry date, become
-``[REDACTED]``. The same function masks customer text, operator text, log records and traces
-(G9), so it must never raise: on an internal error it masks every digit instead.
+``[REDACTED]``. A valid IBAN keeps only its country code, check digits and last 4 characters,
+``[IBAN DE89 …3000]`` (ADR-0017), so no card digits hidden in it are stored. The same function
+masks customer text, operator text, log records and traces (G9), so it must never raise: on an
+internal error it masks every digit instead.
 
 Pure functions; no imports from the rest of the project.
 """
@@ -15,7 +17,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-EntityType = Literal["PAN", "CVV", "PIN", "2FA"]
+EntityType = Literal["PAN", "CVV", "PIN", "2FA", "IBAN"]
+# Card data in the sense of the customer's "masked" note (docs/api.md); an IBAN is not.
+CARD_ENTITIES: frozenset[str] = frozenset({"PAN", "CVV", "PIN", "2FA"})
 
 REDACTED = "[REDACTED]"
 
@@ -50,6 +54,9 @@ _DIGIT = re.compile(r"\d")
 # IBAN: country code, 2 check digits, then letters and digits, in groups or written together.
 _IBAN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,40}")
 _IBAN_GROUP = re.compile(r"[ ]?[A-Z0-9]+")
+_IBAN_START = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}")
+# Digits joined to the end of an IBAN by a separator, as in a card number.
+_AFTER_IBAN = re.compile(rf"{_SEPARATOR}(?P<run>\d(?:{_SEPARATOR}?\d)*)")
 # IBAN length by country (ISO 13616). A run is an IBAN only with a listed country code and
 # exactly that length; "YZ" + a card number passing mod 97 is not one (ADR-0017).
 # Source: SWIFT IBAN Registry release 101, via python-stdnum 2.2 ``stdnum/iban.dat``
@@ -73,7 +80,8 @@ _IBAN_LENGTHS: dict[str, int] = {
 _GAP_BEFORE = r"[^\d\n]{0,25}?"
 _GAP_AFTER = r"[^\d\n]{0,15}?"
 # A code is not part of a longer number and not the last 4 digits after "****".
-_CODE_START = r"(?<!\d)(?<!\*\*\*\*)"
+# ... nor the last 4 characters of a masked IBAN ("[IBAN DE89 \u20263000]").
+_CODE_START = r"(?<!\d)(?<!\*\*\*\*)(?<!\[IBAN [A-Z]{2}\d{2} \u2026)"
 # ... and not followed by more digits or a decimal part ("250.00" is an amount).
 _CODE_END = r"(?!\d)(?![.,]\d)"
 # "card ending 1111", "last 4 digits: 1111": these digits are not a code.
@@ -211,59 +219,106 @@ def _iban_valid(compact: str) -> bool:
     return int(number) % 97 == 1
 
 
-def _iban_spans(text: str) -> list[tuple[int, int]]:
-    """Start and end of each valid IBAN in the text.
+def _iban_spans(text: str) -> list[tuple[int, int, str]]:
+    """Start, end and compact form of each valid IBAN in the text.
 
-    An IBAN is kept (ADR-0010: IBANs stay in the database; G3 replaces them in model input).
     Valid means a listed country code, that country's exact length, and the mod-97 check.
+    A candidate is tried at every possible start, so an invalid one ("XY12 DE89 ...") cannot
+    hide a valid IBAN that starts inside it.
     """
-    spans: list[tuple[int, int]] = []
-    for candidate in _IBAN_CANDIDATE.finditer(text):
-        length = _IBAN_LENGTHS.get(candidate.group(0)[:2])
-        if length is None:
+    spans: list[tuple[int, int, str]] = []
+    position = 0
+    while (start := _IBAN_START.search(text, position)) is not None:
+        found = _valid_iban_at(text, start.start())
+        if found is None:
+            position = start.start() + 1
             continue
-        compact = ""
-        for group in _IBAN_GROUP.finditer(candidate.group(0)):
-            compact += group.group(0).strip()
-            if len(compact) >= length:
-                if len(compact) == length and _iban_valid(compact):
-                    spans.append((candidate.start(), candidate.start() + group.end()))
-                break
+        spans.append((start.start(), found[0], found[1]))
+        position = found[0]
     return spans
 
 
-def _card_in_iban(part: str, *, starts_at_check_digits: bool) -> bool:
-    """Whether the digits of an IBAN read as a card number; a card wins over an IBAN (ADR-0017).
+def _valid_iban_at(text: str, start: int) -> tuple[int, str] | None:
+    """End and compact form of a valid IBAN starting at ``start``, if there is one."""
+    candidate = _IBAN_CANDIDATE.match(text, start)
+    if candidate is None:
+        return None
+    length = _IBAN_LENGTHS.get(candidate.group(0)[:2])
+    if length is None:
+        return None
+    compact = ""
+    for group in _IBAN_GROUP.finditer(candidate.group(0)):
+        compact += group.group(0).strip()
+        if len(compact) >= length:
+            if len(compact) == length and _iban_valid(compact):
+                return start + group.end(), compact
+            return None
+    return None
 
-    ``part`` is one digit run inside the IBAN. Its digits as a whole, or without the 2 check
-    digits when the run starts with them ("AT12" typed before a card), that form a Luhn-valid
-    13-19 digit number count as a card, even though some real IBANs are masked this way.
+
+def _card_across_iban_end(tail: str, run: str) -> str | None:
+    """Last 4 digits of a Luhn-valid 13-19 digit number made of the IBAN's last digits and the
+    first digits of the run right after it, if there is one."""
+    for take in range(1, min(len(run), _MAX_PAN - 1) + 1):  # at least 1 digit of the IBAN
+        for length in _WINDOW_LENGTHS:
+            need = length - take
+            window = tail[-need:] + run[:take] if 1 <= need <= len(tail) else ""
+            if window and luhn_valid(window):
+                return window[-4:]
+    return None
+
+
+def _mask_iban(text: str, end: int, compact: str, counts: Counter[EntityType]) -> tuple[str, int]:
+    """Masked IBAN plus the digit run joined to it; returns the text and where it stops.
+
+    The IBAN keeps its country code, check digits and last 4 characters (ADR-0017). When more
+    digits follow with only a separator between, the last 4 are hidden too: they could be the
+    first digits of a card that goes on after the IBAN; that run is masked as a card when a
+    Luhn-valid number crosses the IBAN's end.
     """
-    digits = "".join(_DIGIT.findall(part))
-    candidates = [digits, digits[2:]] if starts_at_check_digits else [digits]
-    return any(_MIN_PAN <= len(c) <= _MAX_PAN and luhn_valid(c) for c in candidates)
+    counts["IBAN"] += 1
+    joined = _AFTER_IBAN.match(text, end)
+    if joined is None:
+        return f"[IBAN {compact[:4]} \u2026{compact[-4:]}]", end
+    run = joined.group("run")
+    digits = "".join(_DIGIT.findall(_ENCODED.sub("", run)))
+    tail = re.sub(r"^.*\D", "", compact)  # the IBAN's last digits, after its last letter
+    masked_run, found = _mask_run(run)
+    if not found:
+        last4 = _card_across_iban_end(tail, digits)
+        if last4 is not None:
+            masked_run, found = _card(last4), 1
+    if found:
+        counts["PAN"] += found
+    separator = text[end : joined.start("run")]
+    return f"[IBAN {compact[:4]} \u2026]{separator}{masked_run}", joined.end()
 
 
-def _mask_cards(text: str, counts: Counter[EntityType]) -> str:
-    iban_spans = _iban_spans(text)
-
+def _mask_card_runs(text: str, counts: Counter[EntityType]) -> str:
     def replace(match: re.Match[str]) -> str:
-        iban = next(((s, e) for s, e in iban_spans if s <= match.start() < e), None)
-        iban_end: int | None = None
-        if iban is not None:
-            part = match.group(0)[: iban[1] - match.start()]
-            if not _card_in_iban(part, starts_at_check_digits=match.start() == iban[0] + 2):
-                iban_end = iban[1]
-        if iban_end is not None:
-            # Keep the IBAN; a card typed right after it is still masked.
-            cut = iban_end - match.start()
-            return match.group(0)[:cut] + _mask_cards(match.group(0)[cut:], counts)
         masked, found = _mask_run(match.group(0))
         if found:
             counts["PAN"] += found
         return masked
 
     return _DIGIT_RUN.sub(replace, text)
+
+
+def _mask_cards(text: str, counts: Counter[EntityType]) -> str:
+    """Mask every valid IBAN partly and every card number (ADR-0017).
+
+    Text between IBANs is masked on its own: an IBAN starts with letters, so no card number
+    reaches into one from the left. The digit run masked after an IBAN never holds the next
+    one: an IBAN needs a letter right after a character that is not a letter or digit.
+    """
+    parts: list[str] = []
+    position = 0
+    for start, end, compact in _iban_spans(text):
+        parts.append(_mask_card_runs(text[position:start], counts))
+        masked, position = _mask_iban(text, end, compact, counts)
+        parts.append(masked)
+    parts.append(_mask_card_runs(text[position:], counts))
+    return "".join(parts)
 
 
 def _names_last_digits(match: re.Match[str]) -> bool:
