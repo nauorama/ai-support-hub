@@ -35,6 +35,10 @@ from ._db import app_url, as_user, migrate
 
 DATABASE = "hub_llm_calls_test"
 VISA = "4111 1111 1111 1111"  # public test card number
+# Fixed run ids for the tests that check the audit details for card or IBAN digits: the run id
+# is in those details, and a random uuid can contain "4111" (it did in a CI run).
+BLOCKED_RUN_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000c0de")
+IBAN_RUN_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000beef")
 
 
 @pytest.fixture(scope="module")
@@ -121,7 +125,8 @@ async def test_a_blocked_call_writes_its_row_and_a_chained_audit_record(
         provider=FixtureProvider(ROOT / "apps" / "api" / "tests" / "fixtures" / "llm"),
         recorder=DbCallRecorder(database),
     )
-    run_id = uuid.uuid4()
+    run_id = BLOCKED_RUN_ID
+    assert "4111" not in str(run_id)  # else the leak check below could fail on the id itself
     call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.WRITE, run_id=run_id)
 
     with pytest.raises(OutboundCardDataError):
@@ -160,7 +165,8 @@ async def test_a_call_blocked_for_a_raw_iban_says_so_in_its_row_and_audit_record
         provider=FixtureProvider(ROOT / "apps" / "api" / "tests" / "fixtures" / "llm"),
         recorder=DbCallRecorder(database),
     )
-    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.WRITE, run_id=uuid.uuid4())
+    assert "37040044" not in str(IBAN_RUN_ID)  # same reason as in the test above
+    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.WRITE, run_id=IBAN_RUN_ID)
 
     with pytest.raises(OutboundIbanError):
         await gateway.complete(
