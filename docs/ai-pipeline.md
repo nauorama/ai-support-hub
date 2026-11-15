@@ -174,7 +174,11 @@ class ReviewDecision(BaseModel):          # built by the API from the operator's
     reject_reason: str | None
 ```
 
-Validation: the gateway asks the provider for JSON that matches the schema, validates with Pydantic, and makes one repair call with the validation error when it fails ([ADR-0004](adr/0004-structured-output.md)).
+Validation: the gateway asks the provider for JSON that matches the schema, validates with Pydantic, and makes one repair call with the validation error when it fails ([ADR-0004](adr/0004-structured-output.md)). `Gateway.complete_structured` does this (`hub/llm/structured.py`):
+- The provider gets a strict form of the Pydantic schema, the same for every provider: `additionalProperties: false` on every object, every property in `required` (an optional field is nullable), no `title` or `default`. Limits a provider may reject (`maxLength`, `minimum`, `maxItems`, `pattern`, …) move into the field description and are enforced by Pydantic. Open objects (`dict[str, X]`) and `oneOf`/`allOf` are refused: keep schemas flat.
+- An invalid answer (schema mismatch, not JSON, or empty, e.g. a refusal) is recorded as an `llm_calls` row with status `invalid_output`. It is not retried and does not go to the fallback.
+- The repair call holds the original messages, the invalid answer and the validation errors (locations and messages only, never input values). It goes to the model that wrote the invalid answer, with the usual G2 scan, retries, and then the fallback when that model was the role's own.
+- A second invalid answer raises `StructuredOutputError`; the node hands off.
 
 **Code checks in `verify`** (all must pass before the LLM check is even called):
 1. `can_answer` is true and the answer is not empty.

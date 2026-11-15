@@ -6,6 +6,11 @@ call: outbound card scan (G2) → model, with a timeout and 2 retries with backo
 errors → fallback model, the same way → `LlmUnavailableError`. Every attempt writes one
 `llm_calls` row with tokens, cost, latency, model and prompt version, failures included.
 
+`complete_structured` adds the schema check (ADR-0004, `hub/llm/structured.py`): the answer
+is validated with Pydantic; an invalid answer gets one repair call to the model that wrote it,
+and a second invalid answer is a `StructuredOutputError`. An invalid answer is recorded with
+status `invalid_output`.
+
 `LLM_MODE=fake` swaps the provider for `FixtureProvider`, which answers from recorded responses
 (`make record-llm`) and never makes a real call. Tests pass a scripted provider.
 """
@@ -43,15 +48,19 @@ from hub.llm.schemas import (
     OutboundBlockedError,
     OutboundCardDataError,
     OutboundIbanError,
+    OutputCheckError,
     ProviderError,
     ProviderRequest,
     ProviderResponse,
+    Structured,
+    StructuredOutputError,
     ToolCall,
     ToolsNotAllowedError,
     Usage,
     blocked_error,
     blocked_reason,
 )
+from hub.llm.structured import Invalid, check_answer, provider_schema, repair_messages
 
 # Switches LiteLLM reads from the environment (checked in LiteLLM 1.108.6). This is the one place
 # in the Hub that sets environment variables (hub/config.py). They are set before `import litellm`
@@ -343,7 +352,15 @@ class _Outcome:
     response: ProviderResponse
     cost_usd: Decimal
     latency_ms: int
-    fallback_used: bool
+    index: int  # 0: the role's model answered; 1: its fallback
+    invalid: Invalid | None = None  # set when `check` found the answer invalid
+
+    @property
+    def fallback_used(self) -> bool:
+        return self.index > 0
+
+
+type Check = Callable[[ProviderResponse], Invalid | None]
 
 
 @dataclass(frozen=True)
@@ -375,6 +392,38 @@ class Gateway:
             latency_ms=outcome.latency_ms,
             fallback_used=outcome.fallback_used,
         )
+
+    async def complete_structured[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        schema: type[T],
+        *,
+        call: CallContext,
+    ) -> Structured[T]:
+        """A validated `schema` instance (ADR-0004). An invalid answer gets one repair call with
+        the validation errors, sent to the model that wrote the invalid answer (then the usual
+        retries, and the fallback when that was the role's model). Raises
+        `StructuredOutputError` when the repair answer is invalid too, and the usual gateway
+        errors when a call fails."""
+
+        def check(response: ProviderResponse) -> Invalid | None:
+            result = check_answer(schema, response.content)
+            return result if isinstance(result, Invalid) else None
+
+        requests = self.chat_requests(role, messages, schema)
+        first = await self._run(requests, call, self.provider.complete, check)
+        if first.invalid is None:
+            return _structured(schema, first, [first])
+        repair = self.chat_requests(
+            role, repair_messages(messages, first.response.content, first.invalid), schema
+        )
+        second = await self._run(
+            repair[first.index :], call, self.provider.complete, check, first_index=first.index
+        )
+        if second.invalid is not None:
+            raise StructuredOutputError(schema.__name__, len(second.invalid.errors))
+        return _structured(schema, second, [first, second])
 
     async def embed(
         self, texts: Sequence[str], *, call: CallContext, role: str = "embedding"
@@ -433,7 +482,7 @@ class Gateway:
                 timeout_s=config.timeout_s,
                 params=choice.params,
                 schema_name=schema.__name__ if schema is not None else None,
-                json_schema=schema.model_json_schema() if schema is not None else None,
+                json_schema=provider_schema(schema) if schema is not None else None,
                 tools=[dict(tool) for tool in tools] if tools else None,
             )
             for choice in config.choices()
@@ -456,7 +505,12 @@ class Gateway:
         requests: list[ProviderRequest],
         call: CallContext,
         send: Callable[[ProviderRequest], Awaitable[ProviderResponse]],
+        check: Check | None = None,
+        *,
+        first_index: int = 0,
     ) -> _Outcome:
+        """`first_index`: position of `requests[0]` in the role's model list (1 when the call
+        starts at the fallback), so `_Outcome.index` always names the model's role."""
         # The model and fallback requests differ only in model and parameters: one scan covers
         # what every model would see.
         entities = scan_outbound(requests[0])
@@ -470,7 +524,7 @@ class Gateway:
             )
             raise _blocked_error(reason, f"G2 blocked a call of node {call.node.value}")
 
-        for index, request in enumerate(requests):
+        for index, request in enumerate(requests, start=first_index):
             for attempt in range(RETRIES + 1):
                 start = self.clock()
                 try:
@@ -513,17 +567,40 @@ class Gateway:
                             )
                         )
                         raise
+                    # A paid answer that fails the schema is not a provider failure: no retry and
+                    # no fallback here; complete_structured decides about the repair call.
+                    try:
+                        invalid = check(response) if check is not None else None
+                    except Exception as exc:
+                        # The call was paid: keep its row, then stop. Only the class is kept;
+                        # the message may quote the answer.
+                        kind = type(exc).__name__
+                        await self.recorder.record(
+                            self._row(
+                                call,
+                                request.model,
+                                LlmCallStatus.ERROR,
+                                usage=response.usage,
+                                cost=cost,
+                                latency_ms=latency_ms,
+                                error=f"CheckFailed ({kind})",
+                            )
+                        )
+                        raise OutputCheckError(
+                            f"node {call.node.value}: the answer check failed ({kind})"
+                        ) from None
                     await self.recorder.record(
                         self._row(
                             call,
                             request.model,
-                            LlmCallStatus.OK,
+                            LlmCallStatus.OK if invalid is None else LlmCallStatus.INVALID_OUTPUT,
                             usage=response.usage,
                             cost=cost,
                             latency_ms=latency_ms,
+                            error=invalid.summary if invalid is not None else None,
                         )
                     )
-                    return _Outcome(request, response, cost, latency_ms, index > 0)
+                    return _Outcome(request, response, cost, latency_ms, index, invalid)
                 will_retry = error.transient and attempt < RETRIES
                 await self.recorder.record(
                     self._row(
@@ -569,6 +646,26 @@ class Gateway:
             status=status,
             error=error,
         )
+
+
+def _structured[T: BaseModel](
+    schema: type[T], last: _Outcome, outcomes: Sequence[_Outcome]
+) -> Structured[T]:
+    usages = [outcome.response.usage for outcome in outcomes]
+    return Structured(
+        value=schema.model_validate_json(last.response.content or ""),
+        model=last.request.model,
+        usage=Usage(
+            input_tokens=sum(usage.input_tokens for usage in usages),
+            output_tokens=sum(usage.output_tokens for usage in usages),
+            cached_tokens=sum(usage.cached_tokens for usage in usages),
+            cache_write_tokens=sum(usage.cache_write_tokens for usage in usages),
+        ),
+        cost_usd=sum((outcome.cost_usd for outcome in outcomes), Decimal(0)),
+        latency_ms=sum(outcome.latency_ms for outcome in outcomes),
+        fallback_used=any(outcome.fallback_used for outcome in outcomes),
+        repaired=len(outcomes) > 1,
+    )
 
 
 def build_gateway(settings: Settings, recorder: CallRecorder) -> Gateway:

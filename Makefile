@@ -39,7 +39,7 @@ lint:
 # scan (G2), retries and fallback; hub.llm.pricing the cost of every call. Add tools/permissions
 # here when it is built.
 SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov=hub.auth \
-	--cov=hub.llm.gateway --cov=hub.llm.pricing --cov-report=term-missing:skip-covered --cov-fail-under=95
+	--cov=hub.llm.gateway --cov=hub.llm.structured --cov=hub.llm.pricing --cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:
 	uv run pytest $(SAFETY_COVERAGE)

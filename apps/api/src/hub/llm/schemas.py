@@ -7,6 +7,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -95,6 +96,20 @@ class Completion(BaseModel):
     fallback_used: bool
 
 
+@dataclass(frozen=True)
+class Structured[T: BaseModel]:
+    """The answer of `complete_structured`: the validated value, and tokens, cost and latency
+    summed over the first call and the repair call. `model` is the model of the valid answer."""
+
+    value: T
+    model: str
+    usage: Usage
+    cost_usd: Decimal
+    latency_ms: int
+    fallback_used: bool
+    repaired: bool
+
+
 class Embeddings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -177,6 +192,22 @@ def blocked_error(reason: BlockedReason) -> str:
 
 class LlmUnavailableError(LlmError):
     """Every attempt on the model and its fallback failed."""
+
+
+class StructuredOutputError(LlmError):
+    """The answer and the one repair answer both failed the schema (ADR-0004). The node hands
+    the ticket to a human. Carries the schema name and the error count, never model text."""
+
+    def __init__(self, schema_name: str, errors: int) -> None:
+        self.schema_name = schema_name
+        self.errors = errors
+        super().__init__(f"{schema_name}: invalid after one repair ({errors} errors)")
+
+
+class OutputCheckError(LlmError):
+    """The check of an answer crashed (e.g. a custom validator raised something Pydantic does
+    not wrap). A programming error; the paid call is recorded with status `error`. Names the
+    exception class only, never its message, which may quote the answer."""
 
 
 class ToolsNotAllowedError(LlmError):

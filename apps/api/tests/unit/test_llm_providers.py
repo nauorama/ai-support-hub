@@ -14,12 +14,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import litellm
 import pytest
 from litellm import exceptions as litellm_errors
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from hub.config import Settings
 from hub.domain.enums import LlmCallContext, LlmNode
@@ -42,6 +42,7 @@ from hub.llm.schemas import (
     ProviderResponse,
     Usage,
 )
+from hub.llm.structured import provider_schema
 
 from ._llm import MemoryRecorder, ScriptedProvider, make_gateway
 
@@ -246,9 +247,7 @@ async def test_litellm_sends_what_the_role_config_says(
         assert captured.headers["x-api-key"] == ANTHROPIC_KEY
         assert body["system"] == [{"type": "text", "text": "You classify tickets."}]
         if schema is not None:
-            assert body["output_format"]["schema"]["properties"] == {
-                "intent": {"title": "Intent", "type": "string"}
-            }
+            assert body["output_format"]["schema"] == provider_schema(Verdict)
         # LiteLLM adds cache reads and writes to prompt_tokens (3 + 2 on top of 10).
         assert response.usage == Usage(
             input_tokens=15, output_tokens=5, cached_tokens=3, cache_write_tokens=2
@@ -261,10 +260,64 @@ async def test_litellm_sends_what_the_role_config_says(
             assert body["response_format"]["type"] == "json_schema"
             assert body["response_format"]["json_schema"]["name"] == "Verdict"
             assert body["response_format"]["json_schema"]["strict"] is True
+            assert body["response_format"]["json_schema"]["schema"] == provider_schema(Verdict)
         assert response.usage == Usage(input_tokens=10, output_tokens=5, cached_tokens=4)
     if tools:
         [sent_tool] = body["tools"]
         assert sent_tool["name" if "name" in sent_tool else "function"]
+
+
+class _Cite(BaseModel):
+    marker: int = Field(ge=1)
+    source_id: str
+
+
+class _Draft(BaseModel):
+    """Shaped like DraftAnswer (ai-pipeline §5): nested model, list, nullable field, limits."""
+
+    can_answer: bool
+    missing_information: str | None
+    answer: str = Field(max_length=1200, description="customer text")
+    urgency: Literal["low", "normal", "high"] = "normal"
+    citations: list[_Cite]
+
+
+def _nodes(value: object) -> Iterator[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _nodes(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _nodes(item)
+
+
+@pytest.mark.parametrize("model_index", [0, 1], ids=["anthropic", "openai"])
+async def test_a_nested_schema_reaches_both_providers_strict(
+    capture: CaptureServer, model_index: int
+) -> None:
+    # verify: Haiku 5.5, fallback GPT-6 Luna. LiteLLM must send our strict schema natively
+    # (Anthropic `output_format`, not the forced-tool trick; OpenAI `strict: true`).
+    request = make_gateway(ScriptedProvider({})).chat_requests("verify", MESSAGES, _Draft)[
+        model_index
+    ]
+    _, captured = await _send(capture, request)
+    body = captured.body
+    if model_index == 0:
+        assert "tools" not in body
+        assert "tool_choice" not in body
+        sent = body["output_format"]["schema"]
+    else:
+        assert body["response_format"]["json_schema"]["strict"] is True
+        sent = body["response_format"]["json_schema"]["schema"]
+        assert sent == provider_schema(_Draft)
+    objects = [node for node in _nodes(sent) if node.get("type") == "object"]
+    assert len(objects) >= 2  # the answer and the citation
+    for node in objects:
+        assert node["additionalProperties"] is False
+        assert node["required"] == list(node["properties"])
+    for node in _nodes(sent):
+        assert not {"maxLength", "minimum", "title", "default"} & set(node)
 
 
 async def test_tool_calls_come_back_as_tool_calls(capture: CaptureServer) -> None:
