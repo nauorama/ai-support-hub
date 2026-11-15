@@ -14,7 +14,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make up` / `make down` | start / stop the compose stack |
 | `make migrate` | Alembic upgrade + LangGraph checkpointer setup |
 | `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
-| `make kb-load` | load `data/kb` into Postgres and Qdrant (only changed documents) |
+| `make kb-load` | load `data/kb` into Postgres and Qdrant (only changed documents); the Qdrant part arrives in phase 5 |
 | `make dev` | `up` + `migrate` + `seed` + `kb-load` |
 | `make test` | unit tests (no network, no containers) |
 | `make test-int` | integration tests with testcontainers (Postgres, Qdrant) and recorded model responses |

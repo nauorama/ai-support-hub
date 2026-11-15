@@ -103,6 +103,8 @@ References: [design](design.md), [data model](data-model.md), [API](api.md) ยง1โ
 
 **Follow-up from P2-08 (separate small PR):** masking must not redact an exact `ERR-\d{4}` code as a PIN or 2FA code; tests: 'ERR-3007 wrong PIN' keeps the code, 'my PIN is 3007' is still masked. Found while writing the KB: `mask_text("ERR-3007 wrong PIN")` returns `ERR-[REDACTED] wrong PIN` (also ERR-3003, ERR-5003, ERR-5004), so triage would lose the code. When the fix lands, restore the world-file wording in `data/kb/` (e.g. ERR-3007 "Wrong PIN" instead of "Incorrect card PIN", ERR-3003, ERR-5003, ERR-5004 titles, and the articles `card-pin.md`, `two-factor-authentication.md`, `card-declined.md` that keep codes away from PIN/2FA words).
 
+**Open question for P5-01 (from the P2-09 review):** `make kb-load` skips a file whose SHA-256 is unchanged, so a change to the chunker or to `MAX_CHUNK_TOKENS` does not reach unchanged files: their old chunks stay in Postgres, and from P5 in Qdrant, until each file is edited. P5-01 needs a way to force a full reload (for example a `--force` option, or a chunker version stored with each document that triggers a reload when it differs).
+
 **Gate 2:** with `make dev`, a customer message with a card number is stored masked, an operator answers it through the API, the audit chain verifies, CI is green. Walkthrough written.
 
 ---

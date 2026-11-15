@@ -229,7 +229,8 @@ def test_an_external_row_with_internal_wording_fails() -> None:
     ]
 
 
-def test_an_internal_row_is_not_checked_for_phrases() -> None:
+def test_an_internal_row_is_refused() -> None:
+    # The CSV is one external document (P2-09), so an internal row would reach the customer.
     row = ErrorCodeRow.model_validate(
         {
             "code": "ERR-5010",
@@ -239,4 +240,6 @@ def test_an_internal_row_is_not_checked_for_phrases() -> None:
             "visibility": "internal",
         }
     )
-    assert error_code_errors(row) == []
+    assert error_code_errors(row) == [
+        "ERR-5010: visibility must be external (error codes are one external document)"
+    ]

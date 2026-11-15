@@ -7,8 +7,9 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed record-llm
-NOT_IMPLEMENTED := kb-load test-e2e \
+BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
+	record-llm
+NOT_IMPLEMENTED := test-e2e \
 	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
 	leak-scan export-review-candidates rollback
 
@@ -70,13 +71,18 @@ migrate:
 seed:
 	uv run python -m hub.seed data/seed
 
-# operations §1: dev = up + migrate + seed + kb-load. kb-load joins here when it is built (P2-09).
+# Knowledge base into Postgres (kb_documents, kb_chunks) as the app role: only changed files are
+# written, deleted files are removed. The Qdrant part joins in phase 5.
+kb-load:
+	uv run python -m hub.kb.loader data/kb
+
+# operations §1: dev = up + migrate + seed + kb-load.
 # The check runs first and alone: with required settings empty (SEED_OPERATOR_PASSWORD,
 # SESSION_SECRET, DEMO_ACCESS_CODE) it lists them all and stops before anything starts. The
 # steps run through a sub-make, in this order, so the check always comes before them.
 dev:
 	uv run python -m hub.dev_check
-	$(MAKE) --no-print-directory up migrate seed
+	$(MAKE) --no-print-directory up migrate seed kb-load
 	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
 
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).

@@ -24,6 +24,8 @@ MIN_WORDS = 150
 MAX_WORDS = 600
 ERROR_CODES_FILE = "error_codes.csv"
 ERROR_CODE_COLUMNS = ("code", "title", "customer_explanation", "customer_action", "visibility")
+# The CSV becomes one document with this id; its chunk ids are `error-codes#<code>` (data model §1).
+ERROR_CODES_DOC_ID = "error-codes"
 
 # Phrases that belong only in internal material: restriction reasons (the tipping-off rule,
 # security §5 / world file §6) and internal procedures (goodwill limits, escalation channels,
@@ -220,9 +222,14 @@ def parse_error_codes(text: str) -> list[ErrorCodeRow]:
 
 
 def error_code_errors(row: ErrorCodeRow) -> list[str]:
-    """Rules for one error-code row beyond its schema."""
+    """Rules for one error-code row beyond its schema.
+
+    Every row must be `external`: the KB loader makes the CSV one document, `error-codes`, and
+    visibility belongs to a document (owner decision, P2-09). An internal row would reach the
+    customer, so it is refused, not loaded.
+    """
     if row.visibility is not Visibility.EXTERNAL:
-        return []
+        return [f"{row.code}: visibility must be external (error codes are one external document)"]
     text = f"{row.title}\n{row.customer_explanation}\n{row.customer_action}"
     return [
         f"{row.code}: external row contains internal-only phrase {phrase!r}"
