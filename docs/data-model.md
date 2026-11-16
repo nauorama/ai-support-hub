@@ -122,7 +122,7 @@ One execution of the workflow for one customer message.
 |---|---|---|
 | id | uuid PK | |
 | ticket_id | uuid FK | |
-| trigger_message_id | uuid FK null | `ON DELETE SET NULL`: erasure deletes messages but keeps runs | |
+| trigger_message_id | uuid FK null | `ON DELETE SET NULL`: erasure deletes messages but keeps runs |
 | status | text | `running` \| `interrupted` \| `completed` \| `failed` |
 | route | text null | |
 | route_reasons | jsonb | |
@@ -147,9 +147,9 @@ One execution of the workflow for one customer message.
 | ticket_id | uuid FK | |
 | can_answer | bool | from `DraftAnswer` (P3-05); an unchanged draft with `false` cannot be approved |
 | missing_information | text null | from `DraftAnswer`, shown to the operator; placeholders restored |
-| body | text | AI draft (placeholders restored); empty when `can_answer` is false |
+| body | text | AI draft: placeholders restored, then card data masked (G1); markers without a kept citation removed; empty when `can_answer` is false |
 | citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`; in baseline B0 `source_id` is a document id |
-| evidence | jsonb | object: retrieved chunks (id, title, section, score, text) and account facts shown to the operator; in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}]}` (the cited documents) |
+| evidence | jsonb | object: retrieved chunks (id, title, section, score, text) and account facts shown to the operator; in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because their citation pointed to no external document) |
 | proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
 | groundedness | numeric(4,3) null | |
 | unsupported_claims | jsonb | from the verify step |

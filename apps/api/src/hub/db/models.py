@@ -316,7 +316,11 @@ class Message(Base):
     body: Mapped[str]
     is_ai_generated: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     author_operator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("operators.id"))
-    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    # `use_alter`: `runs.trigger_message_id` points back at `messages`, so the two tables form a
+    # cycle; SQLAlchemy adds this key after both tables exist (migration 0007 does the same).
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL", use_alter=True)
+    )
     citations: Mapped[list[Any]] = mapped_column(default=list, server_default=text("'[]'::jsonb"))
     masked_entities: Mapped[dict[str, Any]] = mapped_column(
         default=dict, server_default=text("'{}'::jsonb")
@@ -494,7 +498,8 @@ class Draft(Base):
     ticket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tickets.id"))
     can_answer: Mapped[bool]
     missing_information: Mapped[str | None]
-    # Card data already masked (the model only ever saw masked text); placeholders restored.
+    # Model output after `OutputMask` (hub/graph/linear.py): placeholders restored, then card
+    # data masked (G1). Never stored unmasked.
     body: Mapped[str]
     citations: Mapped[list[Any]] = mapped_column(default=list, server_default=text("'[]'::jsonb"))
     evidence: Mapped[dict[str, Any]] = mapped_column(

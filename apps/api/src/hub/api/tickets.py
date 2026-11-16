@@ -175,6 +175,7 @@ def _run_stream(
 
     async def events() -> AsyncIterator[bytes]:
         yield _event("ticket.created", created)
+        status_sent = False
         while True:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=PING_INTERVAL_S)
@@ -185,8 +186,14 @@ def _run_stream(
                 break
             name, data = item
             if name == "ticket.status":
+                status_sent = True
                 yield _event("message", _placeholder().model_dump(mode="json"))
             yield _event(name, data)
+        if not status_sent:
+            # A run that ended without a status (it crashed in a way `run_ticket` does not
+            # catch): the stream still follows api.md §4; the ticket waits in the queue.
+            yield _event("message", _placeholder().model_dump(mode="json"))
+            yield _event("ticket.status", {"status": TicketStatus.PROCESSING.value})
         yield _event("done", {})
 
     return _sse(events())

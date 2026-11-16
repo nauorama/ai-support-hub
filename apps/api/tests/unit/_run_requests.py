@@ -8,7 +8,7 @@ through the API in fake mode (integration tests, `make dev`) finds its recording
 fails when a file is missing or out of date, e.g. after a prompt or KB change; then run
 `make llm-requests` and `make record-llm`.
 
-Only the role's own model is recorded (no fallback recording): one write request is about 18k
+Only the role's own model is recorded (no fallback recording): one write request is about 28k
 input tokens, and fake mode never falls back.
 """
 

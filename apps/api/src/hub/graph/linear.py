@@ -15,6 +15,12 @@ Order and transactions:
 4. write (model): the draft is saved, the ticket moves to `pending_approval`; `draft.created`,
    `route.decided`.
 
+Model output is untrusted (security T2-T5): every model-written string (draft body,
+missing information, proposed actions, triage summary) gets the run's placeholders restored and
+then goes through the card mask (G1) before it is stored (AGENTS.md never-do #1). The model
+only ever sees masked text, but it can still write digits, e.g. a number an injection made it
+spell out. Output checks (G7) come later; this mask is the floor until then.
+
 On **any** error (a gateway error, an invalid answer after the repair call, a missing recording
 in fake mode, a database error) the run is `failed` and the ticket goes to a human: `handed_off`
 with reason `system_error` (AGENTS.md: on any error or doubt, hand off). Logs and the run row
@@ -27,7 +33,9 @@ the ticket is left as the operator has it.
 
 import asyncio
 import logging
+import re
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -56,6 +64,7 @@ from hub.domain.triage import TriageResult
 from hub.graph.nodes import triage as triage_node
 from hub.graph.nodes import write as write_node
 from hub.graph.nodes.intake import ChatTurn, IntakeResult, intake
+from hub.guardrails.masking import mask
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt
@@ -136,12 +145,50 @@ def history_turns(messages: Sequence[Message], trigger_id: uuid.UUID) -> list[Ch
     return turns
 
 
+@dataclass
+class OutputMask:
+    """Prepares model-written text for storage: the run's placeholders are restored (G3), so
+    the operator never sees a dangling `<EMAIL_1>`, then card data is masked (G1). `counts`
+    sums what was masked, by type (`{"failed": n}` when masking failed); counts only, for the
+    audit record."""
+
+    intake_result: IntakeResult
+    counts: Counter[str] = field(default_factory=Counter)
+
+    def __call__(self, text: str) -> str:
+        result = mask(self.intake_result.restore(text))
+        self.counts.update({str(kind): count for kind, count in result.counts.items()})
+        if result.failed:
+            self.counts["failed"] += 1
+        return result.text
+
+
+_MARKER = re.compile(r" ?\[(\d+)\]")
+
+
+def drop_markers(body: str, keep: set[int]) -> tuple[str, list[int]]:
+    """Remove the `[n]` markers that have no kept citation (an unknown source id, or no
+    citation at all), so the operator and the customer never see a marker without a source.
+    Returns the body and the dropped marker numbers, in order of appearance."""
+    dropped: list[int] = []
+
+    def replace(match: re.Match[str]) -> str:
+        number = int(match.group(1))
+        if number in keep:
+            return match.group(0)
+        dropped.append(number)
+        return ""
+
+    return _MARKER.sub(replace, body), dropped
+
+
 def draft_from_answer(
-    answer: DraftAnswer, sources: Sequence[KbSource], intake_result: IntakeResult
+    answer: DraftAnswer, sources: Sequence[KbSource], clean: OutputMask
 ) -> tuple[dict[str, Any], int]:
     """The column values of the draft, and the number of citations dropped because their id is
-    not an external document. Placeholders are restored with the run's mapping (G3): the
-    operator never sees a dangling `<EMAIL_1>`."""
+    not an external document. Every model-written string goes through `clean` (placeholders
+    restored, then G1). Markers without a kept citation are removed from the body and listed in
+    `evidence.dropped_markers`."""
     by_id = {source.id: source for source in sources}
     citations: list[dict[str, Any]] = []
     unknown = 0
@@ -171,20 +218,25 @@ def draft_from_answer(
             "type": action.type,
             "params": {
                 "issue_type": action.issue_type,
-                "summary": intake_result.restore(action.summary),
-                "description": intake_result.restore(action.description),
+                "summary": clean(action.summary),
+                "description": clean(action.description),
             },
         }
         for index, action in enumerate(answer.proposed_actions, start=1)
     ]
     missing = answer.missing_information
+    body, dropped = (
+        drop_markers(clean(answer.answer), {citation["marker"] for citation in citations})
+        if answer.can_answer
+        else ("", [])
+    )
     return (
         {
             "can_answer": answer.can_answer,
-            "missing_information": intake_result.restore(missing) if missing else None,
-            "body": intake_result.restore(answer.answer) if answer.can_answer else "",
+            "missing_information": clean(missing) if missing else None,
+            "body": body,
             "citations": citations,
-            "evidence": {"variant": VARIANT, "documents": documents},
+            "evidence": {"variant": VARIANT, "documents": documents, "dropped_markers": dropped},
             "proposed_actions": actions,
         },
         unknown,
@@ -207,17 +259,19 @@ def run_failed_problem() -> dict[str, Any]:
 
 async def _start(
     pipeline: Pipeline, ticket_id: uuid.UUID, message_id: uuid.UUID
-) -> tuple[uuid.UUID, IntakeResult] | None:
+) -> tuple[uuid.UUID, IntakeResult] | TicketStatus:
+    """The new run and the intake result, or the ticket's status when no run starts (the
+    ticket is no longer the AI's, or the message is not its own)."""
     async with pipeline.database.sessions.begin() as session:
-        ticket = await session.get(Ticket, ticket_id)
-        if ticket is None or ticket.status != TicketStatus.PROCESSING:
-            return None
+        ticket = await _ticket(session, ticket_id)
+        if ticket.status != TicketStatus.PROCESSING:
+            return ticket.status
         messages = await MessageRepository(session).list_for_ticket(ticket_id)
         trigger = next(
             (m for m in messages if m.id == message_id and m.role == MessageRole.CUSTOMER), None
         )
         if trigger is None:
-            return None
+            return ticket.status
         run = Run(
             ticket_id=ticket_id,
             trigger_message_id=message_id,
@@ -253,6 +307,7 @@ async def _save_triage(
     model: str,
     intake_result: IntakeResult,
 ) -> None:
+    clean = OutputMask(intake_result)
     async with pipeline.database.sessions.begin() as session:
         repository = TicketRepository(session)
         ticket = await repository.lock(await _ticket(session, ticket_id))
@@ -262,7 +317,7 @@ async def _save_triage(
                 Intent(result.secondary_intent) if result.secondary_intent else None
             )
             ticket.urgency = Urgency(result.urgency)
-            ticket.summary = intake_result.restore(result.summary)
+            ticket.summary = clean(result.summary)
             await repository.save(ticket)
         await record(
             session,
@@ -274,6 +329,7 @@ async def _save_triage(
             details={
                 "run_id": run_id,
                 **triage_node.audit_details(result, pipeline.triage_prompt.version, model),
+                "summary_masked": dict(clean.counts),
             },
         )
 
@@ -337,7 +393,8 @@ async def _save_draft(
     intake_result: IntakeResult,
     models: dict[str, str],
 ) -> TicketStatus:
-    values, unknown = draft_from_answer(answer, sources, intake_result)
+    clean = OutputMask(intake_result)
+    values, unknown = draft_from_answer(answer, sources, clean)
     async with pipeline.database.sessions.begin() as session:
         repository = TicketRepository(session)
         ticket = await repository.lock(await _ticket(session, ticket_id))
@@ -372,6 +429,8 @@ async def _save_draft(
                 "can_answer": answer.can_answer,
                 "citations": len(values["citations"]),
                 "unknown_citations": unknown,
+                "dropped_markers": len(values["evidence"]["dropped_markers"]),
+                "masked": dict(clean.counts),
                 "proposed_actions": len(values["proposed_actions"]),
                 "prompt_version": pipeline.write_prompt.version,
                 "model": models["write"],
@@ -381,17 +440,22 @@ async def _save_draft(
             ticket.last_route = Route.APPROVAL
             ticket.route_reasons = APPROVAL_REASONS
             await repository.change_status(ticket, TicketStatus.PENDING_APPROVAL)
-            await _audit_route(session, ticket_id, run_id, Route.APPROVAL, APPROVAL_REASONS)
+            await _audit_route(
+                session, pipeline, ticket_id, run_id, Route.APPROVAL, APPROVAL_REASONS
+            )
         return ticket.status
 
 
 async def _audit_route(
     session: AsyncSession,
+    pipeline: Pipeline,
     ticket_id: uuid.UUID,
     run_id: uuid.UUID | None,
     route: Route,
     reasons: list[str],
 ) -> None:
+    """`route.decided` with the reasons and the versions (security §5). No confidence or
+    features yet: the linear run has no `decide` step (phase 6)."""
     await record(
         session,
         actor_type=ActorType.SYSTEM,
@@ -404,6 +468,7 @@ async def _audit_route(
             "route": route.value,
             "reasons": reasons,
             "graph_version": GRAPH_VERSION,
+            "prompt_versions": pipeline.prompt_versions,
         },
     )
 
@@ -434,7 +499,7 @@ async def _fail(
             ticket.last_route = Route.HANDOFF
             ticket.route_reasons = ERROR_REASONS
             await repository.change_status(ticket, TicketStatus.HANDED_OFF)
-            await _audit_route(session, ticket_id, run_id, Route.HANDOFF, ERROR_REASONS)
+            await _audit_route(session, pipeline, ticket_id, run_id, Route.HANDOFF, ERROR_REASONS)
         return ticket.status
 
 
@@ -452,9 +517,11 @@ async def run_ticket(
     try:
         await emit("run.status", {"step": STEP_UNDERSTANDING})
         started = await _start(pipeline, ticket_id, message_id)
-        if started is None:
+        if isinstance(started, TicketStatus):
             # Nothing to do: the ticket is no longer the AI's, or the message is not its own.
-            return RunOutcome(run_id=None, ticket_status=None, failed=False)
+            # The stream still ends with the ticket's status (api.md §4).
+            await emit("ticket.status", {"status": started.value})
+            return RunOutcome(run_id=None, ticket_status=started, failed=False)
         run_id, intake_result = started
 
         triaged = await triage_node.triage_structured(
@@ -489,8 +556,11 @@ async def run_ticket(
             )
             failed_status = None
         await emit("error", run_failed_problem())
-        if failed_status is not None:
-            await emit("ticket.status", {"status": failed_status.value})
+        # When even the handoff could not be saved, the ticket is still `processing` in the
+        # database: it waits in the operator queue (a claim hands it off) and `recover-runs`
+        # (phase 6) picks the run up. The stream says so instead of claiming a handoff.
+        shown = failed_status if failed_status is not None else TicketStatus.PROCESSING
+        await emit("ticket.status", {"status": shown.value})
         return RunOutcome(run_id=run_id, ticket_status=failed_status, failed=True)
     await emit("ticket.status", {"status": status.value})
     return RunOutcome(run_id=run_id, ticket_status=status, failed=False)

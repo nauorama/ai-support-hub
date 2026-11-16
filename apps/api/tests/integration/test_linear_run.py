@@ -6,6 +6,7 @@ model answers come from `tests/fixtures/llm` (fake mode): the tickets are the on
 `tests/fixtures/run/tickets.jsonl`, whose requests `make llm-requests` wrote with the same KB.
 """
 
+import dataclasses
 import json
 import uuid
 from collections.abc import Callable, Iterator
@@ -23,10 +24,12 @@ from hub.audit import ChainCheck, verify_chain
 from hub.config import Settings
 from hub.db.session import connect
 from hub.deps import Container, build_pipeline
+from hub.domain.enums import TicketStatus
 from hub.graph import linear
 from hub.graph.linear import GRAPH_VERSION, RUN_FAILED_DETAIL, RunOutcome, run_ticket
 from hub.kb.full_text import load_external_sources, sources_from_files
 from hub.kb.loader import load_kb, read_kb
+from hub.llm.schemas import ProviderRequest, ProviderResponse, Usage
 from hub.main import create_app
 
 from ._api import (
@@ -228,6 +231,9 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     assert "summary" not in triage
     assert rows["draft.created"]["prompt_version"] == "write/v1"
     assert rows["route.decided"]["reasons"] == ["auto_reply_off"]
+    assert rows["route.decided"]["prompt_versions"] == {"triage": "v1", "write": "v1"}
+    assert rows["draft.created"]["masked"] == {}
+    assert rows["triage.done"]["summary_masked"] == {}
     # The audit log holds ids, codes and numbers, never message text (security §5).
     text = json.dumps(list(rows.values()))
     assert "SEPA" not in text
@@ -332,14 +338,35 @@ def _ticket_with_message(
     return ticket_id, message_id
 
 
+@dataclasses.dataclass
+class _Scripted:
+    """A provider that answers each chat request with the next scripted content."""
+
+    answers: list[str]
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return ProviderResponse(
+            content=self.answers.pop(0), usage=Usage(input_tokens=10, output_tokens=5)
+        )
+
+    async def embed(self, request: ProviderRequest) -> ProviderResponse:
+        raise AssertionError("no embeddings in the linear run")
+
+
 async def _run(
     urls: Urls,
     ticket_id: uuid.UUID,
     message_id: uuid.UUID,
     on_event: Callable[[str, dict[str, Any]], None] = lambda _name, _data: None,
+    provider: _Scripted | None = None,
 ) -> tuple[RunOutcome, list[tuple[str, dict[str, Any]]]]:
     settings = _settings(urls)
     database = connect(settings.database_url.get_secret_value())
+    pipeline = build_pipeline(settings, database)
+    if provider is not None:
+        pipeline = dataclasses.replace(
+            pipeline, gateway=dataclasses.replace(pipeline.gateway, provider=provider)
+        )
     emitted: list[tuple[str, dict[str, Any]]] = []
 
     async def emit(name: str, data: dict[str, Any]) -> None:
@@ -348,7 +375,7 @@ async def _run(
 
     try:
         outcome = await run_ticket(
-            build_pipeline(settings, database),
+            pipeline,
             ticket_id=ticket_id,
             message_id=message_id,
             emit=emit,
@@ -392,25 +419,31 @@ async def test_no_run_starts_for_a_ticket_a_human_already_has(run_db: Urls) -> N
 
     outcome, emitted = await _run(run_db, ticket_id, message_id)
 
-    assert outcome == RunOutcome(run_id=None, ticket_status=None, failed=False)
-    assert emitted == [("run.status", {"step": "understanding"})]
+    assert outcome == RunOutcome(run_id=None, ticket_status=TicketStatus.HANDED_OFF, failed=False)
+    # The stream still ends with the ticket's status (api.md §4, review round 1 N3).
+    assert emitted == [
+        ("run.status", {"step": "understanding"}),
+        ("ticket.status", {"status": "handed_off"}),
+    ]
     assert run_sql(run_db, "SELECT 1 FROM runs") == []
 
 
 async def test_no_run_starts_for_a_message_of_another_ticket(run_db: Urls) -> None:
     ticket_id, _ = _ticket_with_message(run_db, SEPA)
 
-    outcome, _ = await _run(run_db, ticket_id, uuid.uuid4())
+    outcome, emitted = await _run(run_db, ticket_id, uuid.uuid4())
 
     assert outcome.run_id is None
+    assert emitted[-1] == ("ticket.status", {"status": "processing"})
     assert run_sql(run_db, "SELECT 1 FROM runs") == []
 
 
 async def test_a_failure_that_cannot_be_recorded_still_ends_the_stream(
     run_db: Urls, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When even the handoff cannot be written (database down), the stream gets `error` and
-    ends; the run stays `running` for `recover-runs` (phase 6)."""
+    """When even the handoff cannot be written (database down), the stream gets `error` and the
+    ticket's real status, `processing` (it waits in the queue); the run stays `running` for
+    `recover-runs` (phase 6)."""
     ticket_id, message_id = _ticket_with_message(run_db, NOT_RECORDED)
 
     async def broken(*_args: object) -> None:
@@ -420,11 +453,88 @@ async def test_a_failure_that_cannot_be_recorded_still_ends_the_stream(
     outcome, emitted = await _run(run_db, ticket_id, message_id)
 
     assert (outcome.failed, outcome.ticket_status) == (True, None)
-    assert [name for name, _ in emitted] == ["run.status", "error"]
+    assert emitted[1:] == [
+        ("error", linear.run_failed_problem()),
+        ("ticket.status", {"status": "processing"}),
+    ]
     assert _one(run_db, "SELECT status FROM runs WHERE ticket_id = %s", ticket_id) == ("running",)
 
 
+TEST_CARD = "4111 1111 1111 1111"  # public test card number
+
+
+async def test_card_data_written_by_the_model_is_stored_masked(run_db: Urls) -> None:
+    """Review round 1, B1 (AGENTS.md never-do #1): the model only sees masked text, but its
+    answers are masked again before anything is stored."""
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    triage = {
+        "intent": "withdrawal_issue",
+        "secondary_intent": None,
+        "urgency": "normal",
+        "wants_human": False,
+        "reports_unauthorised_activity": False,
+        "is_complaint_or_legal": False,
+        "asks_for_action": "none",
+        "injection_suspected": False,
+        "summary": f"Customer with card {TEST_CARD} asks about a SEPA withdrawal.",
+    }
+    draft = {
+        "can_answer": True,
+        "missing_information": None,
+        "answer": f"Your card {TEST_CARD} is not used for SEPA withdrawals [1].",
+        "citations": [{"marker": 1, "source_id": "withdrawal-times"}],
+        "proposed_actions": [
+            {
+                "type": "jira_create_issue",
+                "issue_type": "dispute",
+                "summary": f"Card {TEST_CARD}",
+                "description": f"Check card {TEST_CARD}.",
+            }
+        ],
+    }
+    provider = _Scripted([json.dumps(triage), json.dumps(draft)])
+
+    outcome, _ = await _run(run_db, ticket_id, message_id, provider=provider)
+
+    assert not outcome.failed
+    [(summary,)] = run_sql(run_db, "SELECT summary FROM tickets WHERE id = %s", ticket_id)
+    assert summary == "Customer with card [CARD ****1111] asks about a SEPA withdrawal."
+    body, actions = _one(
+        run_db, "SELECT body, proposed_actions FROM drafts WHERE ticket_id = %s", ticket_id
+    )
+    assert body == "Your card [CARD ****1111] is not used for SEPA withdrawals [1]."
+    assert actions[0]["params"]["summary"] == "Card [CARD ****1111]"
+    assert actions[0]["params"]["description"] == "Check card [CARD ****1111]."
+    stored = run_sql(
+        run_db,
+        "SELECT t.summary || d.body || d.proposed_actions::text || "
+        "(SELECT string_agg(details::text, ' ') FROM audit_log)"
+        " FROM tickets t JOIN drafts d ON d.ticket_id = t.id WHERE t.id = %s",
+        ticket_id,
+    )
+    assert "4111" not in str(stored)
+    audit = dict(run_sql(run_db, "SELECT action, details FROM audit_log"))
+    assert audit["draft.created"]["masked"] == {"PAN": 3}
+    assert audit["triage.done"]["summary_masked"] == {"PAN": 1}
+
+
 # --- the stream ------------------------------------------------------------------------------
+
+
+def test_a_run_that_ends_without_a_status_still_ends_the_stream_by_the_contract(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """api.md §4: placeholder, `ticket.status`, `done` even when the run task ends without a
+    status (review round 1, N3)."""
+
+    async def silent(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(tickets_module, "run_ticket", silent)
+    _, events = _post(customer_client(app), SEPA)
+
+    assert [name for name, _ in events] == ["ticket.created", "message", "ticket.status", "done"]
+    assert events[2][1] == {"status": "processing"}
 
 
 def test_a_replayed_request_starts_no_second_run(app: FastAPI, run_db: Urls) -> None:

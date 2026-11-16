@@ -6,19 +6,25 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from hub.db.models import Message
 from hub.domain.draft import Citation, DraftAnswer, ProposedAction
 from hub.domain.enums import MessageRole
 from hub.domain.triage import TriageResult
+from hub.graph import linear
 from hub.graph.linear import (
     VARIANT,
+    OutputMask,
     RunTasks,
     draft_from_answer,
+    drop_markers,
     history_turns,
     run_failed_problem,
 )
 from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import audit_details
+from hub.guardrails.masking import MaskResult
 from hub.kb.full_text import KbSource
 from hub.llm.gateway import FIXTURES_DIR
 
@@ -62,7 +68,7 @@ def _answer(**changes: Any) -> DraftAnswer:  # noqa: ANN401 - any field value
 
 
 def test_a_draft_keeps_known_citations_and_counts_unknown_ones() -> None:
-    values, unknown = draft_from_answer(_answer(), SOURCES, intake("ana@example.com"))
+    values, unknown = draft_from_answer(_answer(), SOURCES, OutputMask(intake("ana@example.com")))
 
     assert unknown == 1
     assert values["citations"] == [
@@ -76,6 +82,7 @@ def test_a_draft_keeps_known_citations_and_counts_unknown_ones() -> None:
     ]
     assert values["evidence"] == {
         "variant": VARIANT,
+        "dropped_markers": [2],
         "documents": [
             {
                 "doc_id": "withdrawal-times",
@@ -87,8 +94,10 @@ def test_a_draft_keeps_known_citations_and_counts_unknown_ones() -> None:
 
 
 def test_a_draft_gets_the_runs_placeholders_restored() -> None:
-    values, _ = draft_from_answer(_answer(), SOURCES, intake("ana@example.com"))
-    assert values["body"] == "It takes 1 business day [1]. Write to ana@example.com if not [2]."
+    values, _ = draft_from_answer(_answer(), SOURCES, OutputMask(intake("ana@example.com")))
+    # [2] cites an internal document: the citation is dropped, and so is its marker (N2).
+    assert values["body"] == "It takes 1 business day [1]. Write to ana@example.com if not."
+    assert values["evidence"]["dropped_markers"] == [2]
 
 
 def test_a_draft_that_cannot_answer_has_an_empty_body_and_the_missing_information() -> None:
@@ -98,7 +107,7 @@ def test_a_draft_that_cannot_answer_has_an_empty_body_and_the_missing_informatio
         missing_information="Interest on balances (<EMAIL_1>) is not in the KB.",
         citations=[],
     )
-    values, unknown = draft_from_answer(answer, SOURCES, intake("ana@example.com"))
+    values, unknown = draft_from_answer(answer, SOURCES, OutputMask(intake("ana@example.com")))
 
     assert (values["can_answer"], values["body"], unknown) == (False, "", 0)
     assert (
@@ -114,7 +123,7 @@ def test_proposed_actions_get_ids_for_the_operator() -> None:
         description="Check the payment.",
     )
     values, _ = draft_from_answer(
-        _answer(proposed_actions=[action, action]), SOURCES, intake("ana@example.com")
+        _answer(proposed_actions=[action, action]), SOURCES, OutputMask(intake("ana@example.com"))
     )
     assert [item["id"] for item in values["proposed_actions"]] == ["a1", "a2"]
     assert values["proposed_actions"][0] == {
@@ -182,3 +191,71 @@ async def test_run_tasks_wait_for_runs_in_flight() -> None:
     await tasks.wait(timeout_s=1)
     assert done == ["run"]
     await tasks.wait(timeout_s=1)  # nothing in flight: returns at once
+
+
+# --- output masking (B1, AGENTS.md never-do #1) ------------------------------------------------
+
+TEST_CARD = "4111 1111 1111 1111"  # public test card number
+
+
+def test_every_model_written_string_of_a_draft_is_card_masked() -> None:
+    action = ProposedAction(
+        type="jira_create_issue",
+        issue_type="dispute",
+        summary=f"Dispute card {TEST_CARD}",
+        description=f"Customer card {TEST_CARD}, check the payment.",
+    )
+    answer = _answer(
+        answer=f"Your card {TEST_CARD} was charged [1].",
+        citations=[Citation(marker=1, source_id="withdrawal-times")],
+        proposed_actions=[action],
+    )
+    clean = OutputMask(intake("hello"))
+    values, _ = draft_from_answer(answer, SOURCES, clean)
+
+    assert values["body"] == "Your card [CARD ****1111] was charged [1]."
+    params = values["proposed_actions"][0]["params"]
+    assert params["summary"] == "Dispute card [CARD ****1111]"
+    assert params["description"] == "Customer card [CARD ****1111], check the payment."
+    assert clean.counts == {"PAN": 3}
+    assert "4111 1111" not in str(values)
+
+
+def test_missing_information_is_card_masked() -> None:
+    answer = _answer(
+        can_answer=False, answer="", citations=[], missing_information=f"Card {TEST_CARD}?"
+    )
+    values, _ = draft_from_answer(answer, SOURCES, OutputMask(intake("hello")))
+    assert values["missing_information"] == "Card [CARD ****1111]?"
+
+
+def test_a_restored_placeholder_is_masked_too() -> None:
+    """Restoring happens first, so the mask also sees what the placeholders put back."""
+    clean = OutputMask(intake("write to ana@example.com"))
+    assert clean(f"Sent to <EMAIL_1> about {TEST_CARD}.") == (
+        "Sent to ana@example.com about [CARD ****1111]."
+    )
+
+
+def test_a_failed_mask_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        linear, "mask", lambda text: MaskResult(text="#" * len(text), counts={}, failed=True)
+    )
+    clean = OutputMask(intake("hello"))
+    assert clean("abc") == "###"
+    assert clean.counts == {"failed": 1}
+
+
+@pytest.mark.parametrize(
+    ("body", "keep", "expected", "dropped"),
+    [
+        ("A [1]. B [2].", {1, 2}, "A [1]. B [2].", []),
+        ("A [1]. B [2].", {1}, "A [1]. B.", [2]),
+        ("A[3] and [3] again.", set(), "A and again.", [3, 3]),
+        ("No markers.", {1}, "No markers.", []),
+    ],
+)
+def test_markers_without_a_kept_citation_are_removed(
+    body: str, keep: set[int], expected: str, dropped: list[int]
+) -> None:
+    assert drop_markers(body, keep) == (expected, dropped)
