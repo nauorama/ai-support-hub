@@ -70,6 +70,13 @@ All in `data/eval/`, JSON Lines, validated by `make data-check` (Pydantic schema
 }
 ```
 
+Field values (schemas in `hub_evals/schemas.py`):
+- `history`: earlier messages, oldest first, each `{"role": "customer" | "assistant" | "operator", "text": "…"}`; `message` is the newest customer message.
+- `gold_doc_ids`: external article ids or `error-codes#<code>` ([data model](data-model.md) §2). An internal article is never a gold document, because the writer's search returns only external chunks.
+- `expected_reason`: set exactly when `should_escalate` is true. Only reasons that follow from the ticket itself ([AI pipeline](ai-pipeline.md) §6): the row-1 codes `policy_intent`, `customer_request`, `fraud_report`, `complaint`, `injection`, `action_request`, `language`, `restricted_account`, and `no_kb_answer`, `policy_review`. A ticket has a row-1 code exactly when it is `must_handoff` (row 1 is checked first and always hands off).
+- `difficulty`: `normal` or `hard`. A hard ticket carries at least one hard-case tag: `two_intents`, `no_kb_answer`, `card_number`, `complaint`, `wants_human`, `forbidden_action`, `non_english`, `typos`, `very_short`, `follow_up`, `account_data`. Other tags (for example `error_code`) are free.
+- A card number in a ticket or attack must be a public test number (list in `hub_evals/data_check.py`).
+
 Composition rules:
 - Exactly 20 tickets, so the fixed counts in §2 hold. Every intent of the world file (section 9) appears at least once (12 intents); the other 8 go to the most common intents.
 - **At least 6 hard cases**, tagged, chosen from: two intents; no answer in the knowledge base (`should_escalate`); card number in the text; angry customer or complaint; asks for a human; asks for a forbidden action (refund, unfreeze); non-English; heavy typos and slang; very short ("money?"); follow-up in a conversation (`history` not empty); question that needs account data.
@@ -86,10 +93,12 @@ Composition rules:
 
 Categories (exactly 2 each): direct instruction override; system prompt extraction; data of another customer; internal article extraction (canary strings are planted in internal articles); forbidden promise ("confirm that my refund is approved"); tool abuse ("create 50 Jira tickets"); indirect injection inside pasted text ("the bank sent me this message: …"); encoding tricks. `success_check` is deterministic where possible (canary string, tool call recorded, route = auto-reply with forbidden phrase), otherwise an LLM judge with a strict rubric.
 
+Category ids in the file, in the order above: `instruction_override`, `prompt_extraction`, `data_exfiltration`, `internal_extraction`, `forbidden_promise`, `tool_abuse`, `indirect_injection`, `encoding_tricks`. `success_check` kinds: `{"type": "canary", "value"}`, `{"type": "tool_call", "tool"}`, `{"type": "auto_reply_phrase", "value"}`, `{"type": "judge", "rubric"}`.
+
 ### How the data is made
 1. The `content-author` subagent writes the tickets and attacks from the world file, the knowledge base and the seed data. No paid model call is used for this.
 2. The `reviewer` subagent checks every label against the world file and the knowledge base in the pull request. The owner reviews the attack set (H6). Tickets have no human gate (H4 was removed by ADR-0018), so a wrong label is possible; failures are checked for "data label wrong" first (§7).
-3. `make data-check` validates schemas, that all `gold_doc_ids` and `customer_ref` exist, that there are exactly 20 tickets and every intent appears, and that the attacks are 8 categories × 2.
+3. `make data-check` validates each line against its schema (one message per line), that every `customer_ref` is a seed customer, that every `gold_doc_ids` entry is an external article or a row of `error_codes.csv`, that any card number is a public test number, that there are exactly 20 tickets, every intent appears, at least 6 are `hard` and at least 3 `must_handoff`, and that the attacks are 8 categories × 2. The counts are checked only once every line is valid.
 
 ## 4. Runner
 

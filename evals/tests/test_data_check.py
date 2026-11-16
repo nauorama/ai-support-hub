@@ -1,12 +1,12 @@
 """`make data-check`: the layout rules (fail safe for files without a validator). The seed and
-knowledge-base validators are tested in test_data_check_seed.py and test_data_check_kb.py;
-evaluation validators come in P4-01."""
+knowledge-base validators are tested in test_data_check_seed.py and test_data_check_kb.py, the
+evaluation validators in test_data_check_eval.py."""
 
 from pathlib import Path
 
 import pytest
 
-from hub_evals.data_check import check_layout, main
+from hub_evals.data_check import check, check_layout, main
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,7 +41,8 @@ def test_os_noise_is_ignored(tmp_path: Path) -> None:
         "kb/error_codes.json",
         "seed/accounts.json",
         "seed/old/customers.json",
-        "eval/tickets.dev.jsonl",
+        "eval/tickets.jsonl",
+        "eval/old/tickets.dev.jsonl",
         "kb/nested/deep.md",
     ],
 )
@@ -53,6 +54,25 @@ def test_a_data_file_without_a_validator_fails(tmp_path: Path, name: str) -> Non
 @pytest.mark.parametrize("name", ["kb/refunds.md", "kb/error_codes.csv"])
 def test_kb_files_have_a_validator(tmp_path: Path, name: str) -> None:
     assert check_layout(_layout(tmp_path, name)) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["eval/tickets.dev.jsonl", "eval/attacks.jsonl", "eval/README.md", "eval/CHANGELOG.md"],
+)
+def test_eval_files_have_a_validator(tmp_path: Path, name: str) -> None:
+    assert check_layout(_layout(tmp_path, name)) == []
+
+
+def test_the_test_set_is_refused_by_name_and_never_read(tmp_path: Path) -> None:
+    # AGENTS.md rule 7: a file that is not valid JSON Lines would give a parse error if read.
+    data = _layout(tmp_path, "eval/tickets.test.jsonl")
+    path = data / "eval" / "tickets.test.jsonl"
+    path.chmod(0)
+    try:
+        assert check(data) == [f"{path}: there is no test set (ADR-0018); remove this file"]
+    finally:
+        path.chmod(0o600)
 
 
 def test_an_unknown_folder_fails(tmp_path: Path) -> None:
