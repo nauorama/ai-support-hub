@@ -73,6 +73,7 @@ def test_phone_formats_are_replaced(phone: str) -> None:
         "Error ERR-3007 and ERR-2001.",
         "Card [CARD ****1111] and [CARD ****].",
         "Amounts 0.50, 1 200 000 EUR, 12345678.",
+        "Amount 1 000 000 000 and 5-0151-2345-6789.",
         "Ticket 0b74d664-3640-4097-8741-e5b0ef08c44e.",
         "Short numbers 0123 and 01234567.",
         "Not an email: user@localhost, @handle, a@b.",
@@ -86,10 +87,40 @@ def test_text_without_pii_stays_as_it_is(text: str) -> None:
     assert result.mapping == {}
 
 
-def test_a_placeholder_the_customer_typed_keeps_its_number() -> None:
-    result = round_trip("I typed <EMAIL_1> and <PHONE_2>; mail me at a@b.io or x@y.io")
-    assert result.text == "I typed <EMAIL_1> and <PHONE_2>; mail me at <EMAIL_2> or <EMAIL_3>"
-    assert "<EMAIL_1>" not in result.mapping
+def test_a_placeholder_the_customer_typed_is_escaped_and_never_restored() -> None:
+    result = replace_pii("I typed <EMAIL_1> and <PHONE_2>; mail me at a@b.io")
+    assert result.text == "I typed &lt;EMAIL_1&gt; and &lt;PHONE_2&gt;; mail me at <EMAIL_1>"
+    assert result.mapping == {"<EMAIL_1>": "a@b.io"}
+    restored = restore_pii(result.text, result.mapping)
+    assert restored == "I typed &lt;EMAIL_1&gt; and &lt;PHONE_2&gt;; mail me at a@b.io"
+
+
+def test_a_run_mapping_is_continued_across_texts() -> None:
+    first = replace_pii("Mail a@b.io, call 0151 23456789")
+    second = replace_pii("Old a@b.io, new c@d.io, and [IBAN DE89 \u20263000]", first.mapping)
+    assert second.text == "Old <EMAIL_1>, new <EMAIL_2>, and <IBAN_1>"
+    assert second.mapping == {
+        "<EMAIL_1>": "a@b.io",
+        "<PHONE_1>": "0151 23456789",
+        "<EMAIL_2>": "c@d.io",
+        "<IBAN_1>": "[IBAN DE89 \u20263000]",
+    }
+    assert first.mapping == {"<EMAIL_1>": "a@b.io", "<PHONE_1>": "0151 23456789"}
+    both = f"{first.text} | {second.text}"
+    assert restore_pii(both, second.mapping) == (
+        "Mail a@b.io, call 0151 23456789 | Old a@b.io, new c@d.io, and [IBAN DE89 \u20263000]"
+    )
+
+
+def test_numbering_continues_after_the_highest_number_in_the_mapping() -> None:
+    result = replace_pii("x@y.io", {"<EMAIL_7>": "a@b.io"})
+    assert result.text == "<EMAIL_8>"
+
+
+def test_a_mapping_key_that_is_not_a_placeholder_is_refused_without_showing_values() -> None:
+    with pytest.raises(ValueError, match="not a placeholder") as error:
+        replace_pii("x", {"EMAIL_1": "a@b.io"})
+    assert "a@b.io" not in str(error.value)
 
 
 def test_restore_leaves_unknown_placeholders_and_never_expands_a_value() -> None:

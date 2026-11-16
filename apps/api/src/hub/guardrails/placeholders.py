@@ -3,13 +3,18 @@
 Email addresses, phone numbers and IBANs in model input become ``<EMAIL_1>``, ``<PHONE_1>``,
 ``<IBAN_1>``. The text is already masked by G1, so an IBAN only appears in G1's partly masked
 form (``[IBAN DE89 …3000]``, or ``[IBAN AT77 …]`` when digits follow it); restoring gives
-that masked form back, never a full IBAN (ADR-0017). The mapping is kept in memory for the run and
-is never logged (``repr`` hides it).
+that masked form back, never a full IBAN (ADR-0017). The mapping is kept in memory for the
+run and is never logged (``repr`` hides it). One mapping serves the whole run: pass it back in
+for the next text (the history, a follow-up message), so the same placeholder never stands for
+two values.
 
 Phone numbers are matched conservatively, so that amounts, dates, times, error codes and
 masked card numbers stay as they are: an international number (``+`` or ``00``), a national
 number that starts with ``0`` and has at least 9 digits, or the North American form
-``(555) 123-4567``. A number that is missed stays in the masked text, where it was already
+``(555) 123-4567``. A number never starts right after a digit and a space, so ``1 000 000 000``
+stays an amount. A reference or account number that starts with ``0`` and is long enough is
+taken for a phone number; that hides it from the model, but leaks nothing (owner decision,
+P3-04). A number that is missed stays in the masked text, where it was already
 allowed (ADR-0010); G3 is minimisation, not a leak guard.
 
 Pure functions; no imports from the rest of the project.
@@ -28,10 +33,11 @@ _EMAIL = re.compile(r"(?<![\w.%+'-])[\w.%+'-]+@(?:[^\W_](?:[\w-]*[^\W_])?\.)+[^\
 _MASKED_IBAN = re.compile(r"\[IBAN [A-Z]{2}\d{2} \u2026(?:[A-Z0-9]{4})?\]")
 
 # A phone number may not start inside a word, a number, a masked card (``****1111``) or a
-# masked IBAN (``\u20263000``), and may not run on into more digits, a time (``10:00``) or a
+# masked IBAN (``\u20263000``), nor right after a digit and a space or dash (a group of an
+# amount such as ``1 000 000``), and may not run on into more digits, a time (``10:00``) or a
 # decimal part. Digit groups are possessive (``\d++``), so a failed end check drops a whole
 # group instead of splitting one.
-_START = r"(?<![\w*\u2026+:.,/-])"
+_START = r"(?<![\w*\u2026+:.,/-])(?<!\d[ \-])"
 _END = r"(?![\w:]|[.,/-]\d)"
 _INTERNATIONAL = re.compile(rf"{_START}(?:\+|00)[1-9]\d{{0,2}}(?:[ .\-/]?\(?\d++\)?){{1,6}}{_END}")
 # National: a leading 0 (or ``(0``). Dots and slashes are not separators here, so a date such
@@ -86,35 +92,45 @@ def _spans(text: str) -> list[tuple[int, int, PiiType]]:
     return kept
 
 
-def replace_pii(text: str) -> PiiReplacement:
+def _escape_typed_placeholders(text: str) -> str:
+    """A placeholder the customer typed (``<EMAIL_1>``) is written as ``&lt;EMAIL_1&gt;``, so
+    the model never takes it for one of ours and restoring never gives it a value."""
+    return _PLACEHOLDER.sub(lambda match: f"&lt;{match.group(0)[1:-1]}&gt;", text)
+
+
+def replace_pii(text: str, mapping: Mapping[str, str] | None = None) -> PiiReplacement:
     """Replace every email, phone number and masked IBAN with a numbered placeholder.
 
-    The same value always gets the same placeholder. A placeholder the customer typed
-    themselves (``<EMAIL_1>``) keeps its number taken, so restoring never turns the
-    customer's own text into a value it did not stand for.
+    ``mapping`` is the run's mapping so far (from an earlier call); the result's mapping holds
+    it plus the new placeholders. The same value always gets the same placeholder, and a new
+    value gets the next free number of its type.
     """
-    taken = {match.group(0) for match in _PLACEHOLDER.finditer(text)}
-    by_value: dict[tuple[PiiType, str], str] = {}
-    mapping: dict[str, str] = {}
-    counters: dict[PiiType, int] = {"EMAIL": 0, "PHONE": 0, "IBAN": 0}
+    text = _escape_typed_placeholders(text)
+    known = dict(mapping or {})
+    by_value: dict[tuple[str, str], str] = {}
+    counters: dict[str, int] = {"EMAIL": 0, "PHONE": 0, "IBAN": 0}
+    for placeholder, value in known.items():
+        match = _PLACEHOLDER.fullmatch(placeholder)
+        if match is None:
+            raise ValueError("mapping holds a key that is not a placeholder")
+        kind, number = match.group(1), int(match.group(2))
+        by_value[(kind, value)] = placeholder
+        counters[kind] = max(counters[kind], number)
     parts: list[str] = []
     position = 0
     for start, end, kind in _spans(text):
         value = text[start:end]
-        placeholder = by_value.get((kind, value))
-        if placeholder is None:
-            while True:
-                counters[kind] += 1
-                placeholder = f"<{kind}_{counters[kind]}>"
-                if placeholder not in taken:
-                    break
-            by_value[(kind, value)] = placeholder
-            mapping[placeholder] = value
+        found = by_value.get((kind, value))
+        if found is None:
+            counters[kind] += 1
+            found = f"<{kind}_{counters[kind]}>"
+            by_value[(kind, value)] = found
+            known[found] = value
         parts.append(text[position:start])
-        parts.append(placeholder)
+        parts.append(found)
         position = end
     parts.append(text[position:])
-    return PiiReplacement(text="".join(parts), mapping=mapping)
+    return PiiReplacement(text="".join(parts), mapping=known)
 
 
 def restore_pii(text: str, mapping: Mapping[str, str]) -> str:

@@ -89,6 +89,24 @@ def test_the_recorded_triage_tickets_are_not_changed_by_tag_neutralisation() -> 
         assert neutralise_data_tags(example.ticket) == example.ticket
 
 
+def test_every_tag_used_in_a_prompt_file_is_a_data_tag() -> None:
+    """A new data tag (e.g. `<draft>` for verify) must be added to DATA_TAGS, or a customer could
+    close it from inside a value."""
+    import re
+
+    from hub.guardrails.injection import DATA_TAGS
+
+    files = sorted(PROMPTS.glob("*/v*.md"))
+    assert files
+    tags = {
+        name
+        for path in files
+        for name in re.findall(r"</?([a-z_]+)(?:\s[^<>]*)?>", path.read_text(encoding="utf-8"))
+    }
+    assert "ticket" in tags
+    assert tags <= set(DATA_TAGS), sorted(tags - set(DATA_TAGS))
+
+
 def test_a_missing_placeholder_value_is_an_error_that_does_not_show_values() -> None:
     prompt = parse_prompt(GOOD, "triage", "v2")
     with pytest.raises(PromptError, match=r"no value for \['rule'\]") as error:
