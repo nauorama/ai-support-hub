@@ -25,7 +25,8 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018) |
 | `make web-types` | generate TypeScript types from OpenAPI |
 | `make retention` | run the retention job once |
-| `make record-llm` | refresh recorded model responses for tests (real calls) |
+| `make record-llm` | refresh recorded model responses for tests (real calls); skips models that already have a real recording, `FORCE=1` records them again |
+| `make llm-requests` | rewrite the triage recording requests from the example tickets and the active prompt (no model call); run before `make record-llm` after a triage prompt change |
 | `make eval-report RUN=<id> BASE=<id>` | compare two evaluation runs; see [eval plan](eval-plan.md) |
 | `make leak-scan` | scan database, logs and recorded model requests for card patterns and canary strings |
 | `make export-review-candidates` | export rejected and heavily edited drafts as candidates for new eval tickets |

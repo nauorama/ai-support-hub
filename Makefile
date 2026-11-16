@@ -8,7 +8,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm
+	record-llm llm-requests
 NOT_IMPLEMENTED := test-e2e \
 	eval eval-smoke eval-attacks eval-report web-types retention \
 	leak-scan export-review-candidates rollback
@@ -93,7 +93,12 @@ test-int:
 # needs ANTHROPIC_API_KEY in .env and the database (`make dev`); costs money.
 # Rewrites the recorded responses that fake mode (LLM_MODE=fake) serves to the tests.
 record-llm:
-	uv run python -m hub.llm.record
+	uv run python -m hub.llm.record $(if $(FORCE),--force,)
+
+# Rewrites tests/fixtures/llm/requests/triage_*.json from the triage examples and the active
+# prompt (no model call). Run it after a triage prompt change, then `make record-llm`.
+llm-requests:
+	uv run python apps/api/tests/unit/_triage_requests.py
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"
