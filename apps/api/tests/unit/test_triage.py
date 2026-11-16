@@ -37,8 +37,9 @@ DISAGREES: dict[str, dict[str, object]] = {
     # by owner decision (P3-03 review round 1): no triage/v2 for it.
     "triage_14": {"secondary_intent": "payment_pending"},
     # "I need a bank statement as a PDF": labelled `normal` by the prompt's rule (`low` is for a
-    # general question; this is a request). Haiku answers `low`. Open for the owner (P3-03
-    # review round 2), found when urgency was labelled on all 20 examples.
+    # general question; this is a request, like triage_11/13/17). Haiku answers `low`. Known
+    # disagreement, kept by owner decision (P3-03 review round 2): the prompt does not say what
+    # urgency a request with no money stuck gets; a later prompt version may.
     "triage_16": {"urgency": "low"},
 }
 
