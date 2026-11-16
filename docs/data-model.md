@@ -285,7 +285,7 @@ Collection `kb_chunks_v1` (alias `kb_chunks`; a re-index builds `v2` and moves t
 | Item | Value |
 |---|---|
 | Point id | UUID v5 of the chunk id |
-| Vector `dense` | size from the embedding model in `config/models.yaml`, cosine distance |
+| Vector `dense` | size from the embedding model in `config/models.yaml` (384 for the local `BAAI/bge-small-en-v1.5`, ADR-0018), cosine distance |
 | Vector `sparse` | BM25 from FastEmbed, IDF modifier on |
 | Payload | `chunk_id`, `doc_id`, `title`, `section`, `text`, `visibility`, `product`, `intents`, `url`, `doc_version` |
 | Payload indexes | `visibility` (keyword), `product` (keyword), `doc_id` (keyword) |
@@ -334,4 +334,4 @@ Rules that matter outside the schema:
 Dates in seed files are **offsets** from an anchor date (`"requested_at": "-3d 10:15"`: days, then a time of day in **UTC**). **Every seed date is a past event: `-1d` or earlier, and on `-1d` before 22:00 UTC** (the anchor day starts at 00:00 CET, which is 22:00 UTC in summer). With an empty `CORE_ANCHOR_DATE` an event at `0d` would lie in the future for part of the day. Only expected dates (`expected_at`), which the core mock computes, may be in the future; `make data-check` enforces this. The core mock resolves them against `CORE_ANCHOR_DATE`: empty = today (the demo always has a "withdrawal from three days ago"), a fixed date in tests and evaluation (repeatable results). Because the anchor can be any weekday and either side of the summer-time change, scenario dates are chosen to stay true for every anchor: "late" cases lie far enough back to be late on any weekday (late SWIFT at 14 days or more), and a SEPA withdrawal is never requested between 13:00 and 13:59 UTC, the hour that is before the 15:00 CET cut-off in winter but after it in summer (CEST).
 
 ### `data/eval/` — evaluation sets
-See [eval plan](eval-plan.md) §3 for the schemas of `tickets.dev.jsonl`, `tickets.test.jsonl`, `attacks.jsonl` and `judge_validation.jsonl`.
+See [eval plan](eval-plan.md) §3 for the schemas of `tickets.dev.jsonl` and `attacks.jsonl`. There is no test set and no judge validation set (ADR-0018).

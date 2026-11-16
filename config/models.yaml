@@ -1,71 +1,69 @@
-# Roles -> models (docs/ai-pipeline.md §8; ADR-0003). A model change is a config change plus an
-# eval run. Read by hub/llm/config.py; every model here needs a price in pricing.yaml.
+# Roles -> models (docs/ai-pipeline.md §8; ADR-0003, ADR-0018). A model change is a config change
+# plus an eval run. Read by hub/llm/config.py; every model here needs a price in pricing.yaml.
+#
+# Budget mode (ADR-0018): one provider, Anthropic. Every chat role runs on Claude Haiku 5.5 with
+# Claude Sonnet 5.5 as the fallback; the judge is the same model family as the writer (eval plan
+# §5 states the bias). Embeddings come from a local model, never from an API.
 #
 # Model ids and parameters checked against the provider documentation on 2026-11-14:
 #   https://platform.claude.com/docs/en/about-claude/models/overview
 #   https://platform.claude.com/docs/en/build-with-claude/effort
 #   https://platform.claude.com/docs/en/build-with-claude/thinking
-#   https://developers.openai.com/api/docs/models/gpt-6-luna
-#   https://developers.openai.com/api/docs/models/gpt-6.1-sol
-#   https://developers.openai.com/api/docs/guides/reasoning
 #
 # Parameter rules that shape this file:
 # - Claude Haiku 5.5 and Sonnet 5.5 reject `temperature` (Sonnet: 400 error; Haiku: "omit"), so
 #   no role sends it. Thinking counts toward `max_tokens` and is billed as output: Haiku runs with
 #   thinking off (allowed at effort `high` or below); Sonnet 5.5 cannot turn thinking off, so it
 #   runs `between_tools` (allowed at effort `high` or below) with effort `low`.
-# - GPT-6.1 Sol has no tool calling in Chat Completions (LiteLLM uses Chat Completions) and no
-#   effort `none`. GPT-6 Luna calls tools in Chat Completions only at reasoning effort `none`.
-#   `models.*.tools` and `tools_require` encode this; the loader refuses a role that may
-#   receive tools (`tools: true`) when its model or fallback cannot take them.
+# - The same-provider fallback does not help when Anthropic itself is down: then the gateway
+#   raises LlmUnavailableError and the ticket goes to a human (NFR-10).
 
 models:
   anthropic/claude-haiku-5-5: {tools: true}
   anthropic/claude-sonnet-5-5: {tools: true}
-  openai/gpt-6-luna:
-    tools: true
-    tools_require: {reasoning_effort: none}
-  openai/gpt-6.1-sol: {tools: false}
-  openai/text-embedding-3-small: {tools: false}
+  # Local ONNX model run by FastEmbed (ADR-0018). The real embedding backend lands in P5-01;
+  # until then a real-mode embedding call fails with `LocalEmbeddingNotAvailable`.
+  fastembed/BAAI/bge-small-en-v1.5: {tools: false}
 
 roles:
   triage:
     model: anthropic/claude-haiku-5-5
     params: {thinking: {type: disabled}}
-    fallback: {model: openai/gpt-6-luna, params: {reasoning_effort: none}}
+    fallback: &sonnet {model: anthropic/claude-sonnet-5-5, params: {thinking: {type: between_tools}, reasoning_effort: low}}
     max_tokens: 400
     timeout_s: 30
   research:
-    model: anthropic/claude-sonnet-5-5
-    params: {thinking: {type: between_tools}, reasoning_effort: low}
-    fallback: {model: openai/gpt-6-luna, params: {reasoning_effort: none}}
+    model: anthropic/claude-haiku-5-5
+    params: {thinking: {type: disabled}}
+    fallback: *sonnet
     max_tokens: 800
     timeout_s: 60
     tools: true
   write:
-    model: anthropic/claude-sonnet-5-5
-    params: {thinking: {type: between_tools}, reasoning_effort: low}
-    fallback: {model: openai/gpt-6.1-sol, params: {reasoning_effort: low}}
+    model: anthropic/claude-haiku-5-5
+    params: {thinking: {type: disabled}}
+    fallback: *sonnet
     max_tokens: 900
     timeout_s: 60
   verify:
     model: anthropic/claude-haiku-5-5
     params: {thinking: {type: disabled}}
-    fallback: {model: openai/gpt-6-luna, params: {reasoning_effort: none}}
+    fallback: *sonnet
     max_tokens: 700
     timeout_s: 45
-  # The judge uses another provider than the writer (eval plan §5), so it has no fallback: a
-  # fallback to Anthropic would grade Claude with Claude.
+  # Same model as the writer (ADR-0018): self-preference is likely, so judge numbers are
+  # reported as unvalidated (eval plan §5).
   judge:
-    model: openai/gpt-6.1-sol
-    params: {reasoning_effort: low}
+    model: anthropic/claude-haiku-5-5
+    params: {thinking: {type: disabled}}
+    fallback: *sonnet
     max_tokens: 800
     timeout_s: 90
   # No fallback on purpose: vectors of another model live in another space and cannot be mixed
   # with the index.
   embedding:
     kind: embedding
-    model: openai/text-embedding-3-small
+    model: fastembed/BAAI/bge-small-en-v1.5
     timeout_s: 30
 
 prompts: {triage: v1, research: v1, write: v1, verify: v1, handoff_summary: v1, memory_summary: v1}

@@ -10,7 +10,7 @@ You analyse one evaluation run of the Enterprise AI Support Hub. You do not fix 
 
 1. Read `docs/eval-plan.md` (metrics, targets, red lines, error categories in §7) and `docs/experiments.md`.
 2. Read the run folder `evals/runs/<run>/`: `config.json`, `metrics.json`, `report.md`, `results.jsonl`. When a base run is given, compare with `make eval-report RUN=<id> BASE=<id>`.
-3. Read at least 30 failed tickets one by one (all of them when there are fewer). Put each into exactly one category: wrong intent / document not found / document found but answer wrong / answer right but judge wrong / wrong route / data label wrong.
+3. Read every failed ticket one by one (the set has 20 tickets and 16 attacks, ADR-0018). Put each into exactly one category: wrong intent / document not found / document found but answer wrong / answer right but judge wrong / wrong route / data label wrong.
 4. Look for patterns: one intent, one article, one tag, one prompt rule.
 
 ## Rules
@@ -30,6 +30,6 @@ Changed against base: <only real changes>
 Failure categories: <category — count — 2 example ticket ids>
 Top 3 patterns: <what, evidence, ticket ids>
 Suspected label errors: <ticket id — reason>
-Proposed next experiment: <one change, expected effect, how to measure>
+Proposed next fix: <one change, expected effect, how to measure>
 Draft row for docs/experiments.md
 ```

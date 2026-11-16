@@ -1,6 +1,6 @@
 # ADR-0009: Routing by policy rules first, then a calibrated confidence model
 
-- Status: accepted
+- Status: Superseded in part by ADR-0018 (trained confidence model)
 - Date: 2026-11-12
 
 ## Context

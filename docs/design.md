@@ -22,7 +22,7 @@ flowchart LR
     operator([Support operator]) -- "review drafts, reply" --> hub
     lead([Support lead]) -- "dashboard, settings" --> hub
     compliance([Compliance officer]) -- "audit log" --> hub
-    hub -- "prompts, masked text" --> llm[(LLM providers<br/>Anthropic, OpenAI)]
+    hub -- "prompts, masked text" --> llm[(LLM provider<br/>Anthropic)]
     hub -- "read account data" --> core[(Tallybridge core system<br/>mock)]
     hub -- "create issues" --> jira[(Jira)]
     hub -- "urgent alerts" --> slack[(Slack)]
@@ -153,7 +153,7 @@ Each decision has an ADR with alternatives.
 | 6 | Chunk knowledge-base articles by section | [0006](adr/0006-section-chunking.md) |
 | 7 | Process a ticket inside the HTTP request and stream progress with SSE; no queue | [0007](adr/0007-in-request-processing-sse.md) |
 | 8 | Human-in-the-loop with LangGraph `interrupt` and a Postgres checkpointer | [0008](adr/0008-hitl-interrupt-checkpointer.md) |
-| 9 | Routing = policy rules first, then a calibrated confidence model; never the model's own "I am sure" | [0009](adr/0009-confidence-and-routing.md) |
+| 9 | Routing = policy rules first, then a confidence score (in budget mode the rule score, ADR-0018); never the model's own "I am sure" | [0009](adr/0009-confidence-and-routing.md) |
 | 10 | Mask card data before storage and before any model call | [0010](adr/0010-masking-before-everything.md) |
 | 11 | All external tools behind one MCP server; customer identity injected by the Hub | [0011](adr/0011-mcp-tools-and-identity-binding.md) |
 | 12 | Customer memory = ticket summaries in Postgres | [0012](adr/0012-customer-memory.md) |
@@ -161,6 +161,7 @@ Each decision has an ADR with alternatives.
 | 14 | Tracing with Langfuse plus an own `llm_calls` table | [0014](adr/0014-observability.md) |
 | 15 | Free-tier deployment: Cloud Run + Neon + Qdrant Cloud | [0015](adr/0015-free-tier-deployment.md) |
 | 16 | React console served by the API; cookie sessions | [0016](adr/0016-web-ui-and-auth.md) |
+| 18 | Budget mode: Anthropic only, Haiku for every role, local embeddings, a small evaluation (replaces parts of 0003, 0005, 0009, 0013) | [0018](adr/0018-budget-mode.md) |
 
 ## 8. Repository layout
 
@@ -193,8 +194,8 @@ Each decision has an ADR with alternatives.
 ├── data/
 │   ├── kb/                      # articles *.md + error_codes.csv
 │   ├── seed/                    # customers.json, transactions.json, cards.json, operators.json
-│   └── eval/                    # tickets.dev.jsonl, tickets.test.jsonl, attacks.jsonl, judge_validation.jsonl
-├── experiments/                 # notebooks and scripts: retrieval, models, fine-tuning
+│   └── eval/                    # tickets.dev.jsonl, attacks.jsonl (no test set, ADR-0018)
+├── experiments/                 # small scripts, for example the E9 threshold counts (ADR-0018)
 ├── infra/                       # docker-compose.yml, Dockerfile.api, Dockerfile.mcp, alembic/, cloudrun/
 ├── docs/                        # this package
 └── .github/                     # workflows/, ISSUE_TEMPLATE/
@@ -218,7 +219,7 @@ Module rules (enforced by import-linter in CI):
 | Data | SQLAlchemy 2 async + psycopg 3, Alembic | One driver for the app and for the LangGraph checkpointer. |
 | Workflow | LangGraph + `langgraph-checkpoint-postgres` | No LangChain chat-model wrappers; nodes call the own gateway. |
 | Models | LiteLLM SDK (library, not the proxy server) | Roles → models in `config/models.yaml`. |
-| Search | Qdrant, `qdrant-client`, FastEmbed BM25 for sparse vectors | Dense embeddings through LiteLLM. |
+| Search | Qdrant, `qdrant-client`, FastEmbed (BM25 sparse vectors and the local dense model `BAAI/bge-small-en-v1.5`) | Dense embeddings run locally through the gateway, never through an API (ADR-0018). |
 | Tools | `mcp` Python SDK | Server and client. |
 | Tracing | Langfuse (OpenTelemetry) | Optional in local development. |
 | Quality | pytest, pytest-asyncio, testcontainers, ruff, mypy (strict), import-linter | |
@@ -254,13 +255,13 @@ Full version: [security.md](security.md).
 
 ## 12. Open questions
 
-These do not block the build. Each has a default; the experiment that answers it is in the build plan.
+These do not block the build. Each has a default. ADR-0018 removed the experiments, so most stay open; the README lists them.
 
 | Question | Default now | Answered in |
 |---|---|---|
-| Does RAG beat "whole knowledge base in the prompt" on quality, or only on cost and latency? | Build both; compare. | Phase 4–5 |
-| Is a reranker worth the extra latency? | Off. | Phase 5 |
-| Which node can use the small model without a quality loss? | Small: triage, verify. Strong: research, write. | Phase 5, 9 |
-| How much does the retry loop help? | One retry on. | Phase 6 |
-| Where is the confidence threshold? | Rule-based routing until the confidence model is trained. | Phase 9 |
-| Does a fine-tuned small classifier match the LLM on triage? | LLM triage. | Phase 11 |
+| Does RAG beat "whole knowledge base in the prompt" on quality, or only on cost and latency? | Build both; RAG is the default. | Not measured (E1 removed) |
+| Is a reranker worth the extra latency? | Off; not built. | Not measured (E3 removed) |
+| Which node can use the small model without a quality loss? | Small model (Haiku) for every role. | Not measured (E8 removed) |
+| How much does the retry loop help? | One retry on. | Not measured (E7 removed) |
+| Where is the confidence threshold? | Rule score, auto-reply off by default; no trained model (ADR-0018). | Phase 9 (H7) |
+| Does a fine-tuned small classifier match the LLM on triage? | LLM triage. | Not measured (phase 11 removed) |

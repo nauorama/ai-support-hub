@@ -92,7 +92,7 @@ The hash chain makes changes visible: `GET /console/audit/verify` recomputes it.
 | Storage limitation | Retention job (`make retention` / scheduled): tickets, messages, drafts, runs older than 24 months → deleted; checkpoints of closed tickets → deleted after 7 days; traces 30 days (Langfuse setting); memory 12 months. |
 | Erasure | `DELETE /admin/customers/{id}/data`: deletes messages, drafts, memory, feedback, checkpoints; anonymises the customer row and ticket rows (kept for statistics); the audit log is not changed (it holds only the internal id). Returns a report of what was removed. In a real payments company the legal record-keeping duty (anti-money-laundering rules, 5 years) comes before erasure for transaction records; the Hub holds only support data, which can be erased. |
 | Transparency | The chat shows the AI notice and a link to a short privacy text: what the AI sees, who the providers are, how to ask for a human. |
-| Providers | Data goes to the model providers and to Langfuse. The README lists them as sub-processors of the fictional company and names the provider settings that matter (API data is not used for training; retention options). The builder checks the current provider terms. |
+| Providers | Data goes to one model provider, Anthropic ([ADR-0018](adr/0018-budget-mode.md)), and to Langfuse. Embeddings are computed locally, so knowledge-base text and queries for search never leave the host. The README lists them as sub-processors of the fictional company and names the provider settings that matter (API data is not used for training; retention options). The builder checks the current provider terms. |
 
 ## 7. EU AI Act — Article 50 (transparency)
 

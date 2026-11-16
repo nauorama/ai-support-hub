@@ -41,11 +41,17 @@ def test_the_real_files_load_and_every_model_has_a_price() -> None:
 
 def test_roles_follow_the_pipeline_document() -> None:
     roles = real_models().roles
-    # ai-pipeline §8: Anthropic writes, the judge is another provider than the writer.
-    assert roles["write"].model.startswith("anthropic/")
-    assert roles["judge"].model.startswith("openai/")
-    assert roles["judge"].fallback is None
+    # ai-pipeline §8, ADR-0018: one provider; every chat role on Haiku with a Sonnet fallback,
+    # the judge included; embeddings from a local model, never an API.
+    for name, role in roles.items():
+        if role.kind == "chat":
+            assert role.model == "anthropic/claude-haiku-5-5", name
+            assert role.fallback is not None
+            assert role.fallback.model == "anthropic/claude-sonnet-5-5", name
+    assert roles["embedding"].model.startswith("fastembed/")
     assert roles["embedding"].fallback is None
+    every_model = {choice.model for role in roles.values() for choice in role.choices()}
+    assert {model.split("/", 1)[0] for model in every_model} == {"anthropic", "fastembed"}
     # Only research may receive tools (research node, ai-pipeline §4).
     assert [name for name, role in roles.items() if role.tools] == ["research"]
 
@@ -76,20 +82,19 @@ def test_build_gateway_uses_fixtures_in_fake_mode_and_litellm_in_real_mode() -> 
         (lambda d: d["roles"]["triage"]["params"].update(api_base="http://x"), "not allowed"),
         (lambda d: d["roles"]["triage"]["params"].update(temperature=0), "not allowed"),
         (
-            lambda d: d["roles"]["embedding"].update(fallback={"model": "openai/gpt-6-luna"}),
+            lambda d: d["roles"]["embedding"].update(
+                fallback={"model": "anthropic/claude-haiku-5-5"}
+            ),
             "no fallback",
         ),
         (lambda d: d["roles"]["embedding"].update(tools=True), "takes no tools"),
         (lambda d: d["roles"]["triage"].pop("max_tokens"), "needs max_tokens"),
         (lambda d: d["roles"]["triage"].update(timeout_s=0), "greater than 0"),
         (lambda d: d["roles"]["triage"].update(colour="red"), "Extra inputs"),
-        # Luna takes tools only with reasoning_effort none.
         (
-            lambda d: d["roles"]["research"]["fallback"]["params"].update(reasoning_effort="low"),
-            "needs reasoning_effort=none",
-        ),
-        (
-            lambda d: d["roles"]["research"].update(fallback={"model": "openai/gpt-6.1-sol"}),
+            lambda d: d["roles"]["research"].update(
+                fallback={"model": "fastembed/BAAI/bge-small-en-v1.5"}
+            ),
             "cannot call tools",
         ),
     ],
@@ -117,9 +122,11 @@ def test_unreadable_files_are_config_errors(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        (lambda d: d["models"]["openai/gpt-6-luna"]["tiers"].pop(), "last tier has no"),
+        (lambda d: d["models"]["anthropic/claude-haiku-5-5"]["tiers"].pop(), "last tier has no"),
         (
-            lambda d: d["models"]["openai/gpt-6-luna"]["tiers"][0].pop("max_prompt_tokens"),
+            lambda d: d["models"]["anthropic/claude-haiku-5-5"]["tiers"][0].pop(
+                "max_prompt_tokens"
+            ),
             "only the last tier",
         ),
         (
@@ -128,7 +135,10 @@ def test_unreadable_files_are_config_errors(tmp_path: Path) -> None:
             ),
             "must rise",
         ),
-        (lambda d: d["models"]["openai/gpt-6-luna"]["tiers"][0].update(input=-1), "greater than"),
+        (
+            lambda d: d["models"]["anthropic/claude-haiku-5-5"]["tiers"][0].update(input=-1),
+            "greater than",
+        ),
         (lambda d: d.pop("checked"), "Field required"),
     ],
 )
@@ -141,7 +151,7 @@ def test_pricing_config_refuses(change: Change, message: str) -> None:
 
 def test_a_model_without_price_is_refused() -> None:
     data = _pricing_data()
-    del data["models"]["openai/gpt-6.1-sol"]
+    del data["models"]["anthropic/claude-sonnet-5-5"]
     with pytest.raises(ConfigError, match="without a price"):
         parse_pricing(data).check_covers(real_models())
 
@@ -185,11 +195,18 @@ def test_cache_reads_count_toward_the_prompt_length_tier() -> None:
     assert real_pricing().cost("anthropic/claude-haiku-5-5", usage) == Decimal("0.005001")
 
 
+def test_the_local_embedding_model_costs_nothing() -> None:
+    usage = Usage(input_tokens=1_000_000)
+    assert real_pricing().cost("fastembed/BAAI/bge-small-en-v1.5", usage) == Decimal(0)
+
+
 def test_cost_errors() -> None:
     pricing = real_pricing()
     with pytest.raises(ConfigError, match="no price"):
-        pricing.cost("openai/unknown", Usage())
+        pricing.cost("anthropic/unknown", Usage())
     with pytest.raises(ConfigError, match="no cache_write price"):
-        pricing.cost("openai/text-embedding-3-small", Usage(input_tokens=10, cache_write_tokens=5))
+        pricing.cost(
+            "fastembed/BAAI/bge-small-en-v1.5", Usage(input_tokens=10, cache_write_tokens=5)
+        )
     with pytest.raises(ConfigError, match="do not add up"):
         pricing.cost("anthropic/claude-haiku-5-5", Usage(input_tokens=5, cached_tokens=10))

@@ -26,8 +26,6 @@ class _Strict(BaseModel):
 
 class ModelInfo(_Strict):
     tools: bool
-    # Parameters the model needs before it accepts tools (GPT-6 Luna: reasoning_effort none).
-    tools_require: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ModelChoice(_Strict):
@@ -81,12 +79,6 @@ class ModelsConfig(_Strict):
                     raise ValueError(
                         f"role {name} may receive tools, but {choice.model} cannot call tools"
                     )
-                if role.tools:
-                    for key, value in info.tools_require.items():
-                        if choice.params.get(key) != value:
-                            raise ValueError(
-                                f"role {name}: {choice.model} needs {key}={value} for tools"
-                            )
         return self
 
     def role(self, name: str) -> RoleConfig:

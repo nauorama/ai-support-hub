@@ -1,15 +1,15 @@
 """Structured output (ADR-0004): the schema a provider gets, the check of its answer, and the
 repair request. Pure functions; `Gateway.complete_structured` puts them together.
 
-The schema sent to a provider is a strict form of the Pydantic schema, the same for every
-provider, so the fallback model gets the same contract. Rules (checked 2026-11-15):
+The schema sent to a provider is a strict form of the Pydantic schema, the same for the model
+and its fallback, so both get the same contract. Rules (checked 2026-11-15):
 - Anthropic JSON outputs: every object needs `additionalProperties: false`; `minLength`,
   `maxLength`, `minimum`, `maximum`, `multipleOf` and `minItems` above 1 are rejected with a 400
   (https://platform.claude.com/docs/en/build-with-claude/structured-outputs, and LiteLLM
   1.108.6 `AnthropicConfig.filter_anthropic_output_schema`, which strips the same keywords).
-- OpenAI strict mode: every object needs `additionalProperties: false` and every property in
-  `required`; an optional field is a nullable union
-  (https://developers.openai.com/api/docs/guides/structured-outputs).
+- Every property is in `required` and an optional field is a nullable union. This came from
+  OpenAI strict mode, which ADR-0018 removed; it is kept because it makes the contract stricter
+  (a model cannot leave a field out). P3-03's first real calls confirm that Anthropic accepts it.
 Constraints a provider may not enforce are moved into the field description, so the model still
 reads them; Pydantic enforces them on the answer and a miss goes through the repair call.
 """
@@ -38,8 +38,8 @@ _MOVED_CONSTRAINTS = {
 # Keywords that only describe the schema for people, or that a strict schema must not carry.
 _DROPPED = ("title", "default", "examples")
 # Keywords the strict schema cannot express; a schema using them is refused, not loosened.
-# `uniqueItems` comes from `set[...]`, `prefixItems` from `tuple[...]`: OpenAI strict mode does
-# not list them and LiteLLM strips them for Anthropic, so the model would not see the rule.
+# `uniqueItems` comes from `set[...]`, `prefixItems` from `tuple[...]`: LiteLLM strips them for
+# Anthropic, so the model would not see the rule.
 _REFUSED = {
     "oneOf": "",
     "allOf": "",

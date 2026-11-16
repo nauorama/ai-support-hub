@@ -161,10 +161,7 @@ class LiteLLMProvider:
     set in code, never from a config file or a request."""
 
     def __init__(self, settings: Settings, api_bases: Mapping[str, str] | None = None) -> None:
-        self._keys = {
-            "anthropic": settings.anthropic_api_key.get_secret_value(),
-            "openai": settings.openai_api_key.get_secret_value(),
-        }
+        self._keys = {"anthropic": settings.anthropic_api_key.get_secret_value()}
         self._api_bases = dict(api_bases or {})
 
     def _connection(self, model: str) -> dict[str, str]:
@@ -220,24 +217,10 @@ class LiteLLMProvider:
             raise ProviderError("InvalidResponse", transient=False) from None
 
     async def embed(self, request: ProviderRequest) -> ProviderResponse:
-        try:
-            response = await litellm.aembedding(
-                model=request.model,
-                input=request.texts,
-                timeout=request.timeout_s,
-                num_retries=0,
-                max_retries=0,
-                **self._connection(request.model),
-            )
-        except Exception as exc:
-            raise _provider_error(exc) from None
-        try:
-            return ProviderResponse(
-                vectors=[item["embedding"] for item in response.data],
-                usage=_usage(response.usage),
-            )
-        except Exception:
-            raise ProviderError("InvalidResponse", transient=False) from None
+        """Embeddings come from a local model, never from a provider API (ADR-0018). The local
+        backend lands in P5-01; until then a real-mode embedding call fails without a retry, and
+        the gateway records it and raises `LlmUnavailableError`."""
+        raise ProviderError("LocalEmbeddingNotAvailable", transient=False)
 
 
 def _provider_error(exc: Exception) -> ProviderError:

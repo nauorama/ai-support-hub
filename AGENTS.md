@@ -35,8 +35,8 @@ make test         # unit tests (no network)
 make test-int     # integration tests (testcontainers, fake models)
 make test-e2e     # Playwright (fake models)
 make data-check   # validate data/
-make eval-smoke   # small real-model evaluation (costs money)
-make eval SPLIT=dev
+make eval-smoke   # small real-model evaluation (costs money; by hand, only when the owner asks)
+make eval         # the 20 dev tickets with judges (costs money)
 ```
 
 Run `make lint test` before you say a task is done. Run `make test-int` when you touched the database, Qdrant, the graph, tools or the API.
@@ -61,7 +61,7 @@ Run `make lint test` before you say a task is done. Run `make test-int` when you
 - One task = one small pull request with: what changed, how it was verified (command output), which "Done when" lines are met, what you were unsure about.
 - Tests with the change. Deterministic safety code (masking, policy, routing, permissions, output checks, auth): ≥ 95% line coverage.
 - Tests never need an API key: use the fake model mode and recorded fixtures.
-- A change to prompts, models, retrieval or the graph: new prompt version file, `make eval-smoke`, numbers in the pull request.
+- A change to prompts, models, retrieval or the graph: new prompt version file. Run `make eval-smoke` by hand and put its numbers in the pull request only when the owner asks for it (it costs money and never runs in CI; ADR-0018).
 - Every new model call records tokens, cost, latency, model and prompt version. Every decision and action writes an audit record.
 - On any error or doubt at run time, the system hands the ticket to a human.
 - Keep the module rules (import-linter). `graph` combines modules; other modules do not import each other's internals.

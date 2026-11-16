@@ -22,12 +22,11 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make lint` | ruff, mypy, import-linter, eslint, tsc |
 | `make data-check` | validate `data/` (seed schemas and rules; KB front matter, `error_codes.csv`, internal-only phrases in external content; seed error codes must be in the CSV) |
 | `make kb-numbers` | report every number in `data/kb/` that is not in the world file (a report, not a gate) |
-| `make eval SPLIT=dev`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md) |
+| `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018) |
 | `make web-types` | generate TypeScript types from OpenAPI |
 | `make retention` | run the retention job once |
 | `make record-llm` | refresh recorded model responses for tests (real calls) |
 | `make eval-report RUN=<id> BASE=<id>` | compare two evaluation runs; see [eval plan](eval-plan.md) |
-| `make eval-judges` | measure the judges against the human-labelled validation set |
 | `make leak-scan` | scan database, logs and recorded model requests for card patterns and canary strings |
 | `make export-review-candidates` | export rejected and heavily edited drafts as candidates for new eval tickets |
 | `make rollback` | send traffic back to the previous deployed revision |
@@ -47,7 +46,7 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `CORE_ANCHOR_DATE` | empty \| `2026-11-12` | "today" for the core mock and the workflow; empty = real date; fixed in tests and evaluation |
 | `JOBS_TOKEN` | random | bearer token for `POST /admin/jobs/*` |
 | `QDRANT_URL`, `QDRANT_API_KEY` | | key empty locally |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` | | read by LiteLLM |
+| `ANTHROPIC_API_KEY` | | read by LiteLLM; the only provider key (ADR-0018) |
 | `LLM_MODE` | `real` \| `fake` | |
 | `MODELS_CONFIG` | `config/models.yaml` | |
 | `MCP_SERVER_URL`, `MCP_SERVER_TOKEN` | `http://mcp:8001/mcp` | |
@@ -56,8 +55,8 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `DEMO_ACCESS_CODE` | | for the public chat |
 | `SEED_OPERATOR_PASSWORD` | | used by `make seed` |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` | | tracing is off when empty |
-| `DAILY_BUDGET_USD` | `3.0` | start value of the setting |
-| `EVAL_MAX_COST_USD` | `8.0` | |
+| `DAILY_BUDGET_USD` | `0.50` | start value of the setting |
+| `EVAL_MAX_COST_USD` | `1.00` | hard stop for one evaluation run |
 | `EVAL_TRACE_SAMPLE` | `0.2` | share of evaluation runs sent to Langfuse |
 | `LOG_LEVEL` | `INFO` | |
 
@@ -91,18 +90,19 @@ Trace attributes on every run: `ticket_id`, `intent`, `route`, `route_reasons`, 
 - Costs are recorded in USD, the currency of the provider price lists. Targets in the PRD are in EUR; reports convert with one fixed rate from `config/pricing.yaml` and print the rate.
 - Prices per model in `config/pricing.yaml` (input, output, cached input; date of the price). The gateway computes `cost_usd` for every call.
 - Prompt caching for the stable system part of every prompt (provider feature; the builder checks the current rules and minimum sizes).
-- Small model for triage and verify; strong model only for research and writing (to be confirmed by experiment E8).
+- One small model for every role: Claude Haiku 5.5, fallback Claude Sonnet 5.5 ([ADR-0018](adr/0018-budget-mode.md)). Embeddings run locally (FastEmbed, `BAAI/bge-small-en-v1.5`) and cost nothing.
+- Project budget: about $5 of model calls in total. The owner sets a $5 spending limit in the Anthropic console. Paid evaluation runs only by hand, when the owner asks; none in CI.
 - Limits: input 4,000 characters, 10 history turns, 8 chunks, `max_tokens` per role.
-- Daily budget guard (G8). Evaluation has its own limit and a disk cache.
+- Daily budget guard (G8). Evaluation has its own limit (`EVAL_MAX_COST_USD`) and a disk cache that is on by default.
 
 ## 5. CI (GitHub Actions)
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
 | `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit tests, coverage gate for safety modules) · `test-int` (integration with testcontainers; builds the api dev image) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks, pip-audit, pnpm audit) · `data-check` |
-| `eval-smoke.yml` | pull request touching the AI paths (see [eval plan](eval-plan.md) §8); manual | `make eval-smoke` with real keys from repository secrets; comment with the metrics table on the pull request |
-| `eval-full.yml` | weekly; manual | full dev run; opens a pull request with the report |
 | `deploy.yml` | push to main after `ci` is green; manual | build images → push → migrate → deploy → smoke check |
+
+No workflow runs an evaluation or any other real model call, except the post-deploy canary ticket (§6, under one cent). `make eval-smoke` runs by hand, only when the owner asks ([ADR-0018](adr/0018-budget-mode.md)).
 
 Branch rule: changes reach `main` only through pull requests, and CI must be green. Until phase 12 the repository is private on the free GitHub plan, which has no branch protection, so the rule holds by process (only the owner merges). The owner turns branch protection on when the repository becomes public; the README section "CI and branch protection" lists the settings.
 
@@ -130,7 +130,7 @@ flowchart LR
 | Vector search | Qdrant Cloud free cluster (1 GB RAM) | free | Checked 2026-11: a free cluster is suspended after 1 week without use and deleted after 4 weeks. A scheduled GitHub Action calls the `ping` job every 3 days. If the cluster is lost, `make kb-load` rebuilds it in minutes. |
 | Tracing | Langfuse Cloud free plan | free | Checked 2026-11: 50,000 units per month, 30 days of data. Full evaluation runs can use this up — tracing of eval runs is sampled (`EVAL_TRACE_SAMPLE`, default 0.2). |
 | Images | Artifact Registry or GitHub Container Registry | free at this size | |
-| Model calls | Anthropic + OpenAI APIs | pay per use | The only real cost. Daily budget guard default $3. |
+| Model calls | Anthropic API (the only provider, ADR-0018) | pay per use | The only real cost. About $5 for the whole project; daily budget guard default $0.50. Embeddings run inside the API container (the image contains the model). |
 
 Free tiers change. **Before phase 10 the builder checks the current limits on the official pricing pages and updates this table.** Everything runs in standard containers with standard Postgres and Qdrant, so the fallback is simple: one small VPS with the same `docker-compose.yml` plus Caddy for HTTPS (`infra/compose.prod.yml` is kept working for this).
 
@@ -140,7 +140,7 @@ Deployment rules:
 - Migrations run as a separate step before the new revision gets traffic. Migrations must be backward compatible with the running version.
 - After deploy: smoke check — `/ready`, then one fixed canary ticket through the real pipeline (cost under one cent). A failed check triggers the rollback.
 - Rollback: previous Cloud Run revision gets the traffic again (`make rollback`).
-- Because Cloud Run gives CPU only during a request, all work happens inside requests ([ADR-0007](adr/0007-in-request-processing-sse.md)). Scheduled work is triggered by GitHub Actions schedules that call `POST /admin/jobs/{name}` with `JOBS_TOKEN`: `close-stale` and `recover-runs` every hour, `retention` every night, `ping` every 3 days. The weekly evaluation runs in GitHub Actions itself.
+- Because Cloud Run gives CPU only during a request, all work happens inside requests ([ADR-0007](adr/0007-in-request-processing-sse.md)). Scheduled work is triggered by GitHub Actions schedules that call `POST /admin/jobs/{name}` with `JOBS_TOKEN`: `close-stale` and `recover-runs` every hour, `retention` every night, `ping` every 3 days. No evaluation runs in GitHub Actions (ADR-0018).
 
 ## 7. Backups
 

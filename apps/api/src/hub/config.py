@@ -48,7 +48,6 @@ class Settings(BaseSettings):
     qdrant_api_key: SecretStr = SecretStr("")
 
     anthropic_api_key: SecretStr = SecretStr("")
-    openai_api_key: SecretStr = SecretStr("")
     llm_mode: Literal["real", "fake"] = "fake"
     models_config: Path = Path("config/models.yaml")
 
@@ -72,8 +71,8 @@ class Settings(BaseSettings):
     langfuse_secret_key: SecretStr = SecretStr("")
     langfuse_host: str = ""
 
-    daily_budget_usd: float = Field(default=3.0, ge=0)
-    eval_max_cost_usd: float = Field(default=8.0, ge=0)
+    daily_budget_usd: float = Field(default=0.5, ge=0)
+    eval_max_cost_usd: float = Field(default=1.0, ge=0)
     eval_trace_sample: float = Field(default=0.2, ge=0, le=1)
 
     @field_validator("log_level", mode="before")

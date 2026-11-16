@@ -10,7 +10,7 @@ AI customer support for **Tallybridge**, a payments platform for freelancers and
 
 1. A customer writes in the chat. Card numbers are masked before anything is stored.
 2. The workflow classifies the ticket, searches the knowledge base, reads the customer's own account data through tools, writes an answer with citations and checks it.
-3. Fixed policy rules and a calibrated confidence score choose a route: **auto-reply**, **operator approval** or **handoff**.
+3. Fixed policy rules and a rule-based confidence score (uncalibrated, ADR-0018) choose a route: **auto-reply**, **operator approval** or **handoff**.
 4. Operators review drafts in a console. A support lead sees quality, cost and automation numbers and can switch auto-replies off.
 5. Every model call is traced and costed. Every decision is in an audit log. Quality is measured on labelled tickets before anything is automated.
 
@@ -35,15 +35,17 @@ AI customer support for **Tallybridge**, a payments platform for freelancers and
 
 ## Technology
 
-Python 3.13 · FastAPI · LangGraph · LiteLLM (Anthropic + OpenAI) · Qdrant (hybrid search) · Postgres · MCP · Langfuse · React + TypeScript · Docker · GitHub Actions · Cloud Run.
+Python 3.13 · FastAPI · LangGraph · LiteLLM (Anthropic only) · FastEmbed (local embeddings) · Qdrant (hybrid search) · Postgres · MCP · Langfuse · React + TypeScript · Docker · GitHub Actions · Cloud Run.
+
+**Budget mode** ([ADR-0018](docs/adr/0018-budget-mode.md)): the whole project spends about $5 on model calls. Every model role runs on Claude Haiku 5.5 (fallback Claude Sonnet 5.5); embeddings come from a local model. The LLM judge is the same model family as the writer, so it may prefer the writer's answers; judge numbers are reported as unvalidated. Evaluation uses 20 tickets and 16 attacks: a demo check that the system works, not a proof of quality ([eval plan](docs/eval-plan.md)).
 
 ## How this project is built
 
-The design package was written first. A coding agent builds the system phase by phase from [the build plan](docs/build-plan.md); the owner reviews each phase, checks all evaluation data by hand and makes the risk decisions (confidence threshold, auto-reply on or off). Each phase ends with a walkthrough for the owner, written locally to `docs/walkthrough/`. Walkthroughs are personal notes: the folder is git-ignored and they are not in this repository.
+The design package was written first. A coding agent builds the system phase by phase from [the build plan](docs/build-plan.md); the owner reviews each phase, checks the attack set and makes the risk decisions (whether auto-reply goes on in the demo). Each phase ends with a walkthrough for the owner, written locally to `docs/walkthrough/`. Walkthroughs are personal notes: the folder is git-ignored and they are not in this repository.
 
 ## CI and branch protection
 
-CI (`.github/workflows/ci.yml`, see [operations](docs/operations.md) §5) runs on every pull request and every push to `main`. It has four required jobs: `lint` (ruff, mypy strict, import-linter), `test` (unit tests, with no provider API keys), `data-check`, and `security` (gitleaks over the whole history, pip-audit). Each runs the same `make` target you run locally. A fifth job, `hook-bootstrap`, is **informational and not required**: it shows that the gitleaks pre-commit hook installs on a machine with no Go and no pre-commit cache. It downloads Go from go.dev, so an outage there must not block a merge.
+CI (`.github/workflows/ci.yml`, see [operations](docs/operations.md) §5) runs on every pull request and every push to `main`. It has four required jobs: `lint` (ruff, mypy strict, import-linter), `test` (unit tests, with no provider API key), `data-check`, and `security` (gitleaks over the whole history, pip-audit). Each runs the same `make` target you run locally. A fifth job, `hook-bootstrap`, is **informational and not required**: it shows that the gitleaks pre-commit hook installs on a machine with no Go and no pre-commit cache. It downloads Go from go.dev, so an outage there must not block a merge.
 
 Branch protection is **not turned on yet**. GitHub does not offer branch protection or rulesets for a private repository on the free plan, and this repository stays private until phase 12. Until then the rules below hold **by process**: the coding agent opens pull requests and never merges, and only the owner merges, after CI is green.
 

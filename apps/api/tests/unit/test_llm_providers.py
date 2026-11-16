@@ -46,8 +46,7 @@ from hub.llm.structured import provider_schema
 
 from ._llm import MemoryRecorder, ScriptedProvider, make_gateway
 
-ANTHROPIC_KEY = "test-anthropic-key"  # placeholders; never real keys
-OPENAI_KEY = "test-openai-key"
+ANTHROPIC_KEY = "test-anthropic-key"  # a placeholder; never a real key
 
 
 class Verdict(BaseModel):
@@ -67,56 +66,25 @@ class CaptureServer:
     seen: list[Captured] = field(default_factory=list)
 
 
-def _answer(path: str, body: dict[str, Any]) -> dict[str, Any]:
-    if path.endswith("/v1/messages"):
-        return {
-            "id": "msg_1",
-            "type": "message",
-            "role": "assistant",
-            "model": body["model"],
-            "content": [{"type": "text", "text": '{"intent": "fees_fx"}'}],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "cache_read_input_tokens": 3,
-                "cache_creation_input_tokens": 2,
-            },
-        }
-    if path.endswith("/embeddings"):
-        return {
-            "object": "list",
-            "data": [
-                {"object": "embedding", "index": i, "embedding": [0.1, 0.2]}
-                for i, _ in enumerate(body["input"])
-            ],
-            "model": body["model"],
-            "usage": {"prompt_tokens": 4, "total_tokens": 4},
-        }
-    message: dict[str, Any] = {"role": "assistant", "content": "hello"}
+def _answer(body: dict[str, Any]) -> dict[str, Any]:
+    """An Anthropic Messages API answer: a tool call when tools were sent, else JSON text."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": '{"intent": "fees_fx"}'}]
     if body.get("tools"):
-        message = {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {"name": "kb_search", "arguments": '{"query": "fees"}'},
-                }
-            ],
-        }
+        content = [
+            {"type": "tool_use", "id": "toolu_1", "name": "kb_search", "input": {"query": "fees"}}
+        ]
     return {
-        "id": "c1",
-        "object": "chat.completion",
-        "created": 1,
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
         "model": body["model"],
-        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+        "content": content,
+        "stop_reason": "tool_use" if body.get("tools") else "end_turn",
         "usage": {
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "total_tokens": 15,
-            "prompt_tokens_details": {"cached_tokens": 4},
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 2,
         },
     }
 
@@ -131,7 +99,7 @@ def capture() -> Iterator[CaptureServer]:
             server_state.seen.append(
                 Captured(self.path, {k.lower(): v for k, v in self.headers.items()}, body)
             )
-            data = json.dumps(_answer(self.path, body)).encode()
+            data = json.dumps(_answer(body)).encode()
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(data)))
@@ -150,8 +118,8 @@ def capture() -> Iterator[CaptureServer]:
 
 
 def _provider(capture: CaptureServer) -> LiteLLMProvider:
-    settings = Settings(_env_file=None, anthropic_api_key=ANTHROPIC_KEY, openai_api_key=OPENAI_KEY)
-    return LiteLLMProvider(settings, api_bases={"anthropic": capture.base, "openai": capture.base})
+    settings = Settings(_env_file=None, anthropic_api_key=ANTHROPIC_KEY)
+    return LiteLLMProvider(settings, api_bases={"anthropic": capture.base})
 
 
 async def _send(
@@ -159,8 +127,7 @@ async def _send(
 ) -> tuple[ProviderResponse, Captured]:
     capture.seen.clear()
     provider = _provider(capture)
-    send = provider.embed if request.kind == "embedding" else provider.complete
-    response = await send(request)
+    response = await provider.complete(request)
     [captured] = capture.seen
     return response, captured
 
@@ -178,47 +145,19 @@ TOOL = {
     },
 }
 
-# role, model index (0 model, 1 fallback) -> what the wire body must contain / must not contain.
+# role, model index (0 model, 1 fallback) -> what the wire body must contain. Every chat role runs
+# on Haiku 5.5 with thinking off and falls back to Sonnet 5.5 (ADR-0018).
+_HAIKU_WIRE = {"model": "claude-haiku-5-5", "thinking": {"type": "disabled"}}
+_SONNET_WIRE = {
+    "model": "claude-sonnet-5-5",
+    "thinking": {"type": "between_tools"},
+    "output_config": {"effort": "low"},
+}
+_MAX_TOKENS = {"triage": 400, "research": 800, "write": 900, "verify": 700, "judge": 800}
 EXPECTED: dict[tuple[str, int], dict[str, Any]] = {
-    ("triage", 0): {
-        "model": "claude-haiku-5-5",
-        "max_tokens": 400,
-        "thinking": {"type": "disabled"},
-    },
-    ("triage", 1): {
-        "model": "gpt-6-luna",
-        "max_completion_tokens": 400,
-        "reasoning_effort": "none",
-    },
-    ("research", 0): {
-        "model": "claude-sonnet-5-5",
-        "max_tokens": 800,
-        "thinking": {"type": "between_tools"},
-        "output_config": {"effort": "low"},
-    },
-    ("research", 1): {
-        "model": "gpt-6-luna",
-        "max_completion_tokens": 800,
-        "reasoning_effort": "none",
-    },
-    ("write", 0): {
-        "model": "claude-sonnet-5-5",
-        "max_tokens": 900,
-        "thinking": {"type": "between_tools"},
-        "output_config": {"effort": "low"},
-    },
-    ("write", 1): {"model": "gpt-6.1-sol", "max_completion_tokens": 900, "reasoning_effort": "low"},
-    ("verify", 0): {
-        "model": "claude-haiku-5-5",
-        "max_tokens": 700,
-        "thinking": {"type": "disabled"},
-    },
-    ("verify", 1): {
-        "model": "gpt-6-luna",
-        "max_completion_tokens": 700,
-        "reasoning_effort": "none",
-    },
-    ("judge", 0): {"model": "gpt-6.1-sol", "max_completion_tokens": 800, "reasoning_effort": "low"},
+    (role, index): {**wire, "max_tokens": max_tokens}
+    for role, max_tokens in _MAX_TOKENS.items()
+    for index, wire in enumerate((_HAIKU_WIRE, _SONNET_WIRE))
 }
 
 
@@ -242,26 +181,15 @@ async def test_litellm_sends_what_the_role_config_says(
         assert body.get(key) == value, f"{role}[{index}] {key}: {body.get(key)!r}"
     for forbidden in ("temperature", "top_p", "top_k", "api_base", "api_key"):
         assert forbidden not in body
-    if request.model.startswith("anthropic/"):
-        assert captured.path.endswith("/v1/messages")
-        assert captured.headers["x-api-key"] == ANTHROPIC_KEY
-        assert body["system"] == [{"type": "text", "text": "You classify tickets."}]
-        if schema is not None:
-            assert body["output_format"]["schema"] == provider_schema(Verdict)
-        # LiteLLM adds cache reads and writes to prompt_tokens (3 + 2 on top of 10).
-        assert response.usage == Usage(
-            input_tokens=15, output_tokens=5, cached_tokens=3, cache_write_tokens=2
-        )
-    else:
-        assert captured.path.endswith("/chat/completions")
-        assert captured.headers["authorization"] == f"Bearer {OPENAI_KEY}"
-        assert "max_tokens" not in body
-        if schema is not None:
-            assert body["response_format"]["type"] == "json_schema"
-            assert body["response_format"]["json_schema"]["name"] == "Verdict"
-            assert body["response_format"]["json_schema"]["strict"] is True
-            assert body["response_format"]["json_schema"]["schema"] == provider_schema(Verdict)
-        assert response.usage == Usage(input_tokens=10, output_tokens=5, cached_tokens=4)
+    assert captured.path.endswith("/v1/messages")
+    assert captured.headers["x-api-key"] == ANTHROPIC_KEY
+    assert body["system"] == [{"type": "text", "text": "You classify tickets."}]
+    if schema is not None:
+        assert body["output_format"]["schema"] == provider_schema(Verdict)
+    # LiteLLM adds cache reads and writes to prompt_tokens (3 + 2 on top of 10).
+    assert response.usage == Usage(
+        input_tokens=15, output_tokens=5, cached_tokens=3, cache_write_tokens=2
+    )
     if tools:
         [sent_tool] = body["tools"]
         assert sent_tool["name" if "name" in sent_tool else "function"]
@@ -292,25 +220,21 @@ def _nodes(value: object) -> Iterator[dict[str, Any]]:
             yield from _nodes(item)
 
 
-@pytest.mark.parametrize("model_index", [0, 1], ids=["anthropic", "openai"])
-async def test_a_nested_schema_reaches_both_providers_strict(
+@pytest.mark.parametrize("model_index", [0, 1], ids=["haiku", "sonnet"])
+async def test_a_nested_schema_reaches_model_and_fallback_strict(
     capture: CaptureServer, model_index: int
 ) -> None:
-    # verify: Haiku 5.5, fallback GPT-6 Luna. LiteLLM must send our strict schema natively
-    # (Anthropic `output_format`, not the forced-tool trick; OpenAI `strict: true`).
+    # verify: Haiku 5.5, fallback Sonnet 5.5. LiteLLM must send our strict schema natively
+    # (Anthropic `output_format`, not the forced-tool trick).
     request = make_gateway(ScriptedProvider({})).chat_requests("verify", MESSAGES, _Draft)[
         model_index
     ]
     _, captured = await _send(capture, request)
     body = captured.body
-    if model_index == 0:
-        assert "tools" not in body
-        assert "tool_choice" not in body
-        sent = body["output_format"]["schema"]
-    else:
-        assert body["response_format"]["json_schema"]["strict"] is True
-        sent = body["response_format"]["json_schema"]["schema"]
-        assert sent == provider_schema(_Draft)
+    assert "tools" not in body
+    assert "tool_choice" not in body
+    # LiteLLM inlines the `$defs` for Anthropic, so the strict rules are checked node by node.
+    sent = body["output_format"]["schema"]
     objects = [node for node in _nodes(sent) if node.get("type") == "object"]
     assert len(objects) >= 2  # the answer and the citation
     for node in objects:
@@ -326,29 +250,34 @@ async def test_tool_calls_come_back_as_tool_calls(capture: CaptureServer) -> Non
     response, _ = await _send(capture, request)
     [call] = response.tool_calls
     assert (call.id, call.name, json.loads(call.arguments)) == (
-        "call_1",
+        "toolu_1",
         "kb_search",
         {"query": "fees"},
     )
 
 
-async def test_embeddings_go_to_the_embeddings_endpoint(capture: CaptureServer) -> None:
+async def test_a_real_embedding_call_is_not_available_until_p5_01(
+    capture: CaptureServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Embeddings come from a local model (ADR-0018), never through LiteLLM.
+    async def never(**kwargs: object) -> NoReturn:
+        raise AssertionError("no embedding call may go to a provider")
+
+    monkeypatch.setattr(litellm, "aembedding", never)
+    capture.seen.clear()
     request = make_gateway(ScriptedProvider({})).embedding_request(["a", "b"])
-    response, captured = await _send(capture, request)
-    assert captured.path.endswith("/embeddings")
-    assert captured.body == {"model": "text-embedding-3-small", "input": ["a", "b"]}
-    assert response.vectors == [[0.1, 0.2], [0.1, 0.2]]
-    assert response.usage == Usage(input_tokens=4)
+    with pytest.raises(ProviderError) as raised:
+        await _provider(capture).embed(request)
+    assert (raised.value.kind, raised.value.transient) == ("LocalEmbeddingNotAvailable", False)
+    assert capture.seen == []
 
 
 async def test_a_missing_key_fails_before_any_call(capture: CaptureServer) -> None:
     capture.seen.clear()
-    provider = LiteLLMProvider(Settings(_env_file=None), api_bases={"openai": capture.base})
-    request = ProviderRequest(
-        kind="embedding", model="openai/text-embedding-3-small", texts=["a"], timeout_s=5
-    )
+    provider = LiteLLMProvider(Settings(_env_file=None), api_bases={"anthropic": capture.base})
+    request = make_gateway(ScriptedProvider({})).chat_requests("triage", MESSAGES)[0]
     with pytest.raises(ProviderError) as raised:
-        await provider.embed(request)
+        await provider.complete(request)
     assert (raised.value.kind, raised.value.transient) == ("MissingApiKey", False)
     assert capture.seen == []
 
@@ -357,46 +286,52 @@ async def test_provider_failures_become_provider_errors(monkeypatch: pytest.Monk
     async def fail(**kwargs: object) -> NoReturn:
         raise litellm_errors.RateLimitError(
             message="slow down; your prompt was: card 4111 1111 1111 1111",
-            llm_provider="openai",
-            model="gpt-6-luna",
+            llm_provider="anthropic",
+            model="claude-haiku-5-5",
         )
 
     monkeypatch.setattr(litellm, "acompletion", fail)
-    monkeypatch.setattr(litellm, "aembedding", fail)
-    provider = LiteLLMProvider(Settings(_env_file=None, openai_api_key=OPENAI_KEY))
-    chat = ProviderRequest(
-        kind="chat", model="openai/gpt-6-luna", messages=MESSAGES, max_tokens=5, timeout_s=5
-    )
-    embed = ProviderRequest(
-        kind="embedding", model="openai/text-embedding-3-small", texts=["a"], timeout_s=5
-    )
-    for call in (provider.complete(chat), provider.embed(embed)):
-        with pytest.raises(ProviderError) as raised:
-            await call
-        # Only class and status: the provider text (which may echo the request) is dropped.
-        assert raised.value.summary == "RateLimitError (429)"
-        assert raised.value.transient
-        assert raised.value.__cause__ is None
+    provider = LiteLLMProvider(Settings(_env_file=None, anthropic_api_key=ANTHROPIC_KEY))
+    chat = make_gateway(ScriptedProvider({})).chat_requests("triage", MESSAGES)[0]
+    with pytest.raises(ProviderError) as raised:
+        await provider.complete(chat)
+    # Only class and status: the provider text (which may echo the request) is dropped.
+    assert raised.value.summary == "RateLimitError (429)"
+    assert raised.value.transient
+    assert raised.value.__cause__ is None
 
 
 @pytest.mark.parametrize(
     ("error", "transient"),
     [
-        (litellm_errors.Timeout(message="t", model="m", llm_provider="openai"), True),
-        (litellm_errors.APIConnectionError(message="c", llm_provider="openai", model="m"), True),
+        (litellm_errors.Timeout(message="t", model="m", llm_provider="anthropic"), True),
+        (litellm_errors.APIConnectionError(message="c", llm_provider="anthropic", model="m"), True),
         (
-            litellm_errors.ServiceUnavailableError(message="s", llm_provider="openai", model="m"),
+            litellm_errors.ServiceUnavailableError(
+                message="s", llm_provider="anthropic", model="m"
+            ),
             True,
         ),
-        (litellm_errors.InternalServerError(message="i", llm_provider="openai", model="m"), True),
-        (litellm_errors.BadGatewayError(message="g", llm_provider="openai", model="m"), True),
-        (litellm_errors.BadRequestError(message="b", model="m", llm_provider="openai"), False),
-        (litellm_errors.AuthenticationError(message="a", llm_provider="openai", model="m"), False),
+        (
+            litellm_errors.InternalServerError(message="i", llm_provider="anthropic", model="m"),
+            True,
+        ),
+        (litellm_errors.BadGatewayError(message="g", llm_provider="anthropic", model="m"), True),
+        (litellm_errors.BadRequestError(message="b", model="m", llm_provider="anthropic"), False),
+        (
+            litellm_errors.AuthenticationError(message="a", llm_provider="anthropic", model="m"),
+            False,
+        ),
         (ValueError("anything else"), False),
     ],
 )
 def test_which_errors_are_retried(error: Exception, transient: bool) -> None:
     assert _provider_error(error).transient is transient
+
+
+def test_a_provider_error_passes_through_unchanged() -> None:
+    error = ProviderError("LocalEmbeddingNotAvailable", transient=False)
+    assert _provider_error(error) is error
 
 
 # --- fake mode -----------------------------------------------------------------------------------
@@ -515,25 +450,17 @@ def test_any_5xx_status_is_transient(status_code: object, transient: bool) -> No
 async def test_an_unreadable_answer_is_a_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
     class Empty:
         choices = ()
-        data = ({"no_embedding": 1},)
         usage = None
 
     async def empty(**kwargs: object) -> Empty:
         return Empty()
 
     monkeypatch.setattr(litellm, "acompletion", empty)
-    monkeypatch.setattr(litellm, "aembedding", empty)
-    provider = LiteLLMProvider(Settings(_env_file=None, openai_api_key=OPENAI_KEY))
-    chat = ProviderRequest(
-        kind="chat", model="openai/gpt-6-luna", messages=MESSAGES, max_tokens=5, timeout_s=5
-    )
-    embed = ProviderRequest(
-        kind="embedding", model="openai/text-embedding-3-small", texts=["a"], timeout_s=5
-    )
-    for call in (provider.complete(chat), provider.embed(embed)):
-        with pytest.raises(ProviderError) as raised:
-            await call
-        assert (raised.value.kind, raised.value.transient) == ("InvalidResponse", False)
+    provider = LiteLLMProvider(Settings(_env_file=None, anthropic_api_key=ANTHROPIC_KEY))
+    chat = make_gateway(ScriptedProvider({})).chat_requests("triage", MESSAGES)[0]
+    with pytest.raises(ProviderError) as raised:
+        await provider.complete(chat)
+    assert (raised.value.kind, raised.value.transient) == ("InvalidResponse", False)
 
 
 def test_litellm_switches_are_set_and_its_loggers_pinned_at_warning() -> None:

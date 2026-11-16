@@ -1,6 +1,6 @@
 # ADR-0013: Prompts are versioned files in the repository
 
-- Status: accepted
+- Status: Superseded in part by ADR-0018 (eval-smoke in CI)
 - Date: 2026-11-12
 
 ## Context
