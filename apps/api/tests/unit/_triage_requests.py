@@ -44,7 +44,7 @@ class Expected(BaseModel):
     is_complaint_or_legal: bool
     injection_suspected: bool
     asks_for_action: RequestedAction
-    urgency: Urgency | None = None  # checked only where the example states it
+    urgency: Urgency
 
 
 class Example(BaseModel):

@@ -54,6 +54,13 @@ def test_render_fills_every_placeholder_into_a_system_and_a_user_message() -> No
     ]
 
 
+def test_single_braces_and_spaced_placeholders_are_fine() -> None:
+    text = GOOD.replace("Rules {{rule}}.", 'Rules {{ rule }}. JSON looks like {"a": 1}.')
+    prompt = parse_prompt(text, "triage", "v2")
+    [system, _] = prompt.render({"rule": "one", "ticket": "t"})
+    assert system["content"].startswith('Rules one. JSON looks like {"a": 1}.')
+
+
 def test_a_value_is_inserted_as_text_and_never_expanded() -> None:
     prompt = parse_prompt(GOOD, "triage", "v2")
     [_, user] = prompt.render({"rule": "x", "ticket": "{{rule}} \\1 \\g<0>"})
@@ -91,6 +98,12 @@ def test_windows_line_endings_are_accepted() -> None:
         (GOOD.replace("# User\n", "# Notes\n\n# User\n"), "expected the parts"),
         (GOOD.replace("# System\n\nRules", "Intro\n\n# System\n\nRules"), "text before"),
         (GOOD.replace("<ticket>{{ticket}}</ticket>", ""), "must not be empty"),
+        (GOOD.replace("{{ticket}}", "{{Ticket}}"), "malformed placeholder in the User"),
+        (GOOD.replace("{{ticket}}", "{{ ticket-id }}"), "malformed placeholder in the User"),
+        (GOOD.replace("{{rule}}", "{{rule}"), "malformed placeholder in the System"),
+        (GOOD.replace("{{rule}}", "rule}}"), "malformed placeholder in the System"),
+        (GOOD.replace("{{rule}}", "{{}}"), "malformed placeholder in the System"),
+        (GOOD.replace("# System", "#System"), "expected the parts"),
     ],
     ids=[
         "no front matter",
@@ -104,6 +117,12 @@ def test_windows_line_endings_are_accepted() -> None:
         "a third part",
         "text before system",
         "empty user part",
+        "uppercase placeholder",
+        "placeholder with a dash",
+        "unclosed placeholder",
+        "unopened placeholder",
+        "empty placeholder",
+        "heading without a space",
     ],
 )
 def test_an_invalid_prompt_file_is_refused(text: str, message: str) -> None:

@@ -129,7 +129,7 @@ One execution of the workflow for one customer message.
 | confidence | numeric(4,3) null | |
 | features | jsonb | inputs of the confidence model |
 | graph_version | text | git SHA or semantic version of the workflow |
-| prompt_versions | jsonb | `{"triage": "v2", "write": "v3", ...}` |
+| prompt_versions | jsonb | `{"triage": "v2", "write": "v3", ...}`: node → version, without the node prefix (compare `llm_calls.prompt_version`) |
 | models | jsonb | role → model id used |
 | total_cost_usd | numeric(10,6) | sum of `llm_calls` |
 | input_tokens, output_tokens | int | |
@@ -169,7 +169,7 @@ Own record of every model call. Source of truth for cost.
 | context | text | `online` \| `eval` \| `memory` \| `record` (`make record-llm`) |
 | node | text | `triage`, `research`, `write`, `verify`, `handoff_prep`, `memory_summary`, `judge`, `embedding` |
 | model | text | provider model id |
-| prompt_version | text null | null for embeddings (no prompt file) |
+| prompt_version | text null | `<node>/v<N>`, e.g. `triage/v1` (the prompt file `prompts/<node>/v<N>.md`; `Prompt.version` in `llm/prompts.py`); null for embeddings and calls without a prompt file |
 | input_tokens, output_tokens, cached_tokens | int | |
 | cost_usd | numeric(10,6) | from `config/pricing.yaml` |
 | latency_ms | int | |

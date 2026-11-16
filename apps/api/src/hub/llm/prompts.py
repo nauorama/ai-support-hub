@@ -5,9 +5,10 @@ then exactly two parts, `# System` and `# User`, with `{{placeholders}}`. The ac
 each node is named in `config/models.yaml` (`prompts`). Every model call made with a prompt
 records its id (`<node>/v<N>`) in `llm_calls.prompt_version`.
 
-Rendering is strict both ways: a placeholder without a value and a value without a placeholder
-are errors, so a renamed placeholder cannot silently send an empty or stale prompt. Values are
-inserted in one pass, so text inside a value (a ticket that contains `{{x}}`) is never expanded.
+A `{{` or `}}` that is not part of a valid placeholder makes the file invalid. Rendering is
+strict both ways: a placeholder without a value and a value without a placeholder are errors,
+so a renamed placeholder cannot silently send an empty or stale prompt. Values are inserted in
+one pass, so text inside a value (a ticket that contains `{{x}}`) is never expanded.
 """
 
 import re
@@ -26,8 +27,12 @@ PLACEHOLDER = re.compile(r"\{\{\s*([a-z][a-z0-9_]*)\s*\}\}")
 _VERSION = re.compile(r"v[1-9][0-9]*")
 _FRONT_MATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 _PART_HEADING = re.compile(r"^# (System|User)[ \t]*$", re.MULTILINE)
-# Any other level-1 heading: a typo such as `# Sytem` must not be swallowed into a part.
-_LEVEL_1_HEADING = re.compile(r"^# \S.*$", re.MULTILINE)
+# Any other level-1 heading, `#System` without the space included: a typo such as `# Sytem`
+# must not be swallowed into a part.
+_LEVEL_1_HEADING = re.compile(r"^#(?!#).*$", re.MULTILINE)
+# Braces left after the valid placeholders are taken out: a malformed placeholder such as
+# `{{Ticket}}` or `{{ ticket-id }}` would otherwise reach the model as literal text.
+_BRACES = re.compile(r"\{\{|\}\}")
 
 
 class PromptError(LlmError):
@@ -102,6 +107,12 @@ def parse_prompt(text: str, node: str, version: str) -> Prompt:
     system, user = parts[2].strip(), parts[4].strip()
     if not system or not user:
         raise PromptError(f"{name}: the System and User parts must not be empty")
+    for part, text in (("System", system), ("User", user)):
+        if _BRACES.search(PLACEHOLDER.sub("", text)):
+            raise PromptError(
+                f"{name}: malformed placeholder in the {part} part "
+                "(lowercase letters, digits and `_`, e.g. `{{ticket}}`)"
+            )
     return Prompt(node=node, front=front, system=system, user=user)
 
 

@@ -29,13 +29,17 @@ EXAMPLES = load_examples()
 PROMPT = active_prompt(ROOT / "prompts", real_models(), "triage")
 
 # Example id -> {field: what the recorded model answer says}, from the first real recording
-# (2026-11-16, Haiku 5.5, triage/v1). Labels and prompt were not changed to fit; the owner
-# decides whether the label or the prompt is wrong (P3-03 PR).
+# (2026-11-16, Haiku 5.5, triage/v1). The owner decides whether the label or the prompt is
+# wrong; labels are never changed only to make this test pass.
 DISAGREES: dict[str, dict[str, object]] = {
-    # Account takeover with a €900 transfer: label secondary null / action none.
-    "triage_14": {"secondary_intent": "payment_pending", "asks_for_action": "other"},
-    # "I need a bank statement as a PDF": label action none.
-    "triage_16": {"asks_for_action": "other"},
+    # Account takeover with a €900 outgoing transfer: the label keeps secondary intent null;
+    # Haiku answers `payment_pending` (which is for incoming money). Known disagreement, kept
+    # by owner decision (P3-03 review round 1): no triage/v2 for it.
+    "triage_14": {"secondary_intent": "payment_pending"},
+    # "I need a bank statement as a PDF": labelled `normal` by the prompt's rule (`low` is for a
+    # general question; this is a request). Haiku answers `low`. Open for the owner (P3-03
+    # review round 2), found when urgency was labelled on all 20 examples.
+    "triage_16": {"urgency": "low"},
 }
 
 
@@ -80,9 +84,7 @@ async def test_an_example_ticket_gets_the_expected_intent_and_flags(example: Exa
     result = await triage(_fake_gateway(recorder), PROMPT, example.ticket)
 
     assert isinstance(result, TriageResult)
-    expected = example.expected.model_dump(exclude_none=False)
-    if expected["urgency"] is None:
-        del expected["urgency"]
+    expected = example.expected.model_dump()
     got = {field: getattr(result, field) for field in expected}
     wrong = {field: got[field] for field in expected if got[field] != expected[field]}
     assert wrong == DISAGREES.get(example.id, {}), f"{example.id}: model disagrees on {wrong}"
