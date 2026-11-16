@@ -430,19 +430,26 @@ class Gateway:
         messages: Sequence[Message] = (),
         texts: Sequence[str] = (),
         tools: Sequence[dict[str, Any]] | None = None,
+        schema: type[BaseModel] | None = None,
         call: CallContext,
+        select: Callable[[ProviderRequest], bool] | None = None,
     ) -> list[ProviderRequest]:
         """Record mode: call the role's model and its fallback each once (with the usual G2 scan,
-        retries and rows), so fake mode has an answer for both. Returns the requests sent."""
+        retries and rows), so fake mode has an answer for both. `schema` builds the request as
+        `complete_structured` does (the answer is recorded as it came, not validated: a test
+        that reads the fixture shows a bad answer). `select` keeps only some of the requests,
+        e.g. the role's own model, or those without a real recording yet. Returns the requests
+        sent."""
         if texts:
             requests = [self.embedding_request(texts, role)]
             send = self.provider.embed
         else:
-            requests = self.chat_requests(role, messages, tools=tools)
+            requests = self.chat_requests(role, messages, schema, tools)
             send = self.provider.complete
-        for request in requests:
+        chosen = [request for request in requests if select is None or select(request)]
+        for request in chosen:
             await self._run([request], call, send)
-        return requests
+        return chosen
 
     def chat_requests(
         self,

@@ -31,7 +31,7 @@ from hub.llm.gateway import (
     _usage,
     write_fixture,
 )
-from hub.llm.record import RequestSpec, load_specs
+from hub.llm.record import RequestSpec, load_specs, spec_requests
 from hub.llm.schemas import (
     CallContext,
     FixtureMissingError,
@@ -395,20 +395,23 @@ async def test_every_request_spec_has_a_fixture_for_each_of_its_models(
     recorder = MemoryRecorder()
     provider = FixtureProvider(FIXTURES_DIR)
     fake = make_gateway(ScriptedProvider({}), recorder)
-    requests = (
-        [fake.embedding_request(spec.texts, spec.role)]
-        if spec.texts
-        else fake.chat_requests(spec.role, spec.messages, tools=spec.tools)
-    )
+    requests = spec_requests(fake, spec)
     for request in requests:
         assert provider.path(request).exists(), f"{spec_path.name}: no fixture for {request.model}"
     fake = type(fake)(
         models=fake.models, pricing=fake.pricing, provider=provider, recorder=recorder
     )
-    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, prompt_version="v1")
+    call = CallContext(
+        context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, prompt_version=spec.prompt_version
+    )
+    schema = spec.schema_model
     if spec.texts:
         result = await fake.embed(spec.texts, call=call, role=spec.role)
         assert len(result.vectors) == len(spec.texts)
+    elif schema is not None:
+        # A recorded structured answer must be valid as recorded: no repair call in fake mode.
+        structured = await fake.complete_structured(spec.role, spec.messages, schema, call=call)
+        assert not structured.repaired
     else:
         completion = await fake.complete(spec.role, spec.messages, tools=spec.tools, call=call)
         assert completion.content or completion.tool_calls

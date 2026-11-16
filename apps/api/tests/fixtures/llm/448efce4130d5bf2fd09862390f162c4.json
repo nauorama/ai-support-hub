@@ -1,0 +1,113 @@
+{
+  "request": {
+    "kind": "chat",
+    "model": "anthropic/claude-haiku-5-5",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You fill in a test JSON object. Follow the field descriptions."
+      },
+      {
+        "role": "user",
+        "content": "Colour: blue. Word: probe. Items: alpha, beta. Number: 3."
+      }
+    ],
+    "texts": [],
+    "max_tokens": 400,
+    "params": {
+      "thinking": {
+        "type": "disabled"
+      }
+    },
+    "schema_name": "SchemaProbe",
+    "json_schema": {
+      "$defs": {
+        "ProbeColour": {
+          "enum": [
+            "red",
+            "blue"
+          ],
+          "type": "string"
+        },
+        "ProbeItem": {
+          "properties": {
+            "kind": {
+              "const": "probe_item",
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "note"
+          ],
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "description": "Only for recording (P3-03): one request whose strict schema has every shape our schemas\nuse or will use, so the first real calls show that Anthropic accepts them: `const` (a\none-value Literal), a `description` next to a `$ref` (an enum and a nested model), a\nnullable `$ref` (`anyOf` with null), a list of models, and limits moved into descriptions.",
+      "properties": {
+        "marker": {
+          "const": "schema_probe",
+          "description": "Always `schema_probe`.",
+          "type": "string"
+        },
+        "colour": {
+          "$ref": "#/$defs/ProbeColour",
+          "description": "The colour the user names."
+        },
+        "item": {
+          "$ref": "#/$defs/ProbeItem",
+          "description": "One item; `note` repeats the user's word."
+        },
+        "maybe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProbeItem"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null unless the user asks for a second item."
+        },
+        "items": {
+          "description": "The items the user lists. Constraint: at most 2 items.",
+          "items": {
+            "$ref": "#/$defs/ProbeItem"
+          },
+          "type": "array"
+        },
+        "count": {
+          "description": "The number the user names. Constraint: at most 9; at least 0.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "marker",
+        "colour",
+        "item",
+        "maybe",
+        "items",
+        "count"
+      ],
+      "type": "object",
+      "additionalProperties": false
+    },
+    "tools": null
+  },
+  "response": {
+    "content": "{\"marker\":\"schema_probe\",\"colour\":\"blue\",\"item\":{\"kind\":\"probe_item\",\"note\":\"probe\"},\"maybe\":null,\"items\":[{\"kind\":\"probe_item\",\"note\":\"alpha\"},{\"kind\":\"probe_item\",\"note\":\"beta\"}],\"count\":3}",
+    "tool_calls": [],
+    "vectors": [],
+    "usage": {
+      "input_tokens": 931,
+      "output_tokens": 94,
+      "cached_tokens": 0,
+      "cache_write_tokens": 0
+    }
+  },
+  "recorded": "2026-11-16"
+}

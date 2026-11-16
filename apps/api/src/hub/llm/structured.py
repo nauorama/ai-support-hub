@@ -9,7 +9,9 @@ and its fallback, so both get the same contract. Rules (checked 2026-11-15):
   1.108.6 `AnthropicConfig.filter_anthropic_output_schema`, which strips the same keywords).
 - Every property is in `required` and an optional field is a nullable union. This came from
   OpenAI strict mode, which ADR-0018 removed; it is kept because it makes the contract stricter
-  (a model cannot leave a field out). P3-03's first real calls confirm that Anthropic accepts it.
+  (a model cannot leave a field out). Confirmed by the first real calls (P3-03, 2026-11-16,
+  `make record-llm`, request `schema_probe.json`): Haiku 5.5 and Sonnet 5.5 accept it, with
+  `const`, a `description` next to a `$ref` (LiteLLM inlines the `$defs`) and a nullable `$ref`.
 Constraints a provider may not enforce are moved into the field description, so the model still
 reads them; Pydantic enforces them on the answer and a miss goes through the repair call.
 """

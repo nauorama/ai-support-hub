@@ -1,0 +1,9 @@
+{
+  "role": "triage",
+  "schema": "SchemaProbe",
+  "models": "all",
+  "messages": [
+    {"role": "system", "content": "You fill in a test JSON object. Follow the field descriptions."},
+    {"role": "user", "content": "Colour: blue. Word: probe. Items: alpha, beta. Number: 3."}
+  ]
+}

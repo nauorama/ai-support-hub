@@ -7,19 +7,31 @@ its fallback are each called once, with the G2 scan, retries and one `llm_calls`
 the database (`make dev`); costs money.
 
 A request file: {"role": "triage", "messages": [...], "tools": [...] (optional)}
-or {"role": "embedding", "texts": [...]}. Messages must already be masked.
+or {"role": "embedding", "texts": [...]}. Messages must already be masked. Optional fields:
+- "schema": the name of a structured-output schema (`SCHEMAS`); the request is built as
+  `complete_structured` builds it.
+- "prompt_version": written to the `llm_calls` rows of the recording.
+- "models": "all" (default: the model and its fallback) or "primary" (the model only), to keep
+  the cost of a recording small.
+
+A model whose fixture already holds a real recording is skipped, so a second run costs nothing;
+`--force` (`make record-llm FORCE=1`) records it again. A synthetic fixture is always replaced.
 """
 
 import asyncio
+import json
 import sys
+from collections.abc import Callable
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from hub.config import load_settings
 from hub.db.session import connect
 from hub.domain.enums import LlmCallContext, LlmNode
+from hub.domain.triage import TriageResult
 from hub.llm.config import load_models
 from hub.llm.gateway import (
     FIXTURES_DIR,
@@ -30,7 +42,42 @@ from hub.llm.gateway import (
 )
 from hub.llm.pricing import load_pricing
 from hub.llm.recorder import CallRecorder, DbCallRecorder
-from hub.llm.schemas import CallContext
+from hub.llm.schemas import CallContext, ProviderRequest
+
+
+class ProbeColour(StrEnum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class ProbeItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["probe_item"]
+    note: str
+
+
+class SchemaProbe(BaseModel):
+    """Only for recording (P3-03): one request whose strict schema has every shape our schemas
+    use or will use, so the first real calls show that Anthropic accepts them: `const` (a
+    one-value Literal), a `description` next to a `$ref` (an enum and a nested model), a
+    nullable `$ref` (`anyOf` with null), a list of models, and limits moved into descriptions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    marker: Literal["schema_probe"] = Field(description="Always `schema_probe`.")
+    colour: ProbeColour = Field(description="The colour the user names.")
+    item: ProbeItem = Field(description="One item; `note` repeats the user's word.")
+    maybe: ProbeItem | None = Field(description="Null unless the user asks for a second item.")
+    items: list[ProbeItem] = Field(max_length=2, description="The items the user lists.")
+    count: int = Field(ge=0, le=9, description="The number the user names.")
+
+
+# Schemas a request file may name. A fixed list: a file never names arbitrary code.
+SCHEMAS: dict[str, type[BaseModel]] = {
+    "TriageResult": TriageResult,
+    "SchemaProbe": SchemaProbe,
+}
 
 
 class RequestSpec(BaseModel):
@@ -40,6 +87,32 @@ class RequestSpec(BaseModel):
     messages: list[dict[str, Any]] = []
     texts: list[str] = []
     tools: list[dict[str, Any]] | None = None
+    schema_name: Literal["TriageResult", "SchemaProbe"] | None = Field(default=None, alias="schema")
+    prompt_version: str | None = None
+    models: Literal["all", "primary"] = "all"
+
+    @property
+    def schema_model(self) -> type[BaseModel] | None:
+        return SCHEMAS[self.schema_name] if self.schema_name is not None else None
+
+
+def spec_requests(gateway: Gateway, spec: RequestSpec) -> list[ProviderRequest]:
+    """The requests a spec records: what the gateway sends for it, model then fallback, or
+    only the model for `"models": "primary"`."""
+    if spec.texts:
+        requests = [gateway.embedding_request(spec.texts, spec.role)]
+    else:
+        requests = gateway.chat_requests(spec.role, spec.messages, spec.schema_model, spec.tools)
+    return requests[:1] if spec.models == "primary" else requests
+
+
+def has_real_recording(directory: Path, request: ProviderRequest) -> bool:
+    path = directory / f"{request.fixture_key()}.json"
+    try:
+        recorded = json.loads(path.read_bytes()).get("recorded")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(recorded, str) and recorded != "synthetic"
 
 
 def load_specs(directory: Path) -> list[tuple[Path, RequestSpec]]:
@@ -51,10 +124,24 @@ def load_specs(directory: Path) -> list[tuple[Path, RequestSpec]]:
 
 def record_call(spec: RequestSpec) -> CallContext:
     """The `llm_calls` context of a recording: context `record`, node named after the role."""
-    return CallContext(context=LlmCallContext.RECORD, node=LlmNode(spec.role))
+    return CallContext(
+        context=LlmCallContext.RECORD, node=LlmNode(spec.role), prompt_version=spec.prompt_version
+    )
 
 
-async def record_all(gateway: Gateway, directory: Path) -> int:
+def _selector(
+    gateway: Gateway, spec: RequestSpec, directory: Path, force: bool
+) -> Callable[[ProviderRequest], bool]:
+    wanted = {request.fixture_key() for request in spec_requests(gateway, spec)}
+
+    def select(request: ProviderRequest) -> bool:
+        key = request.fixture_key()
+        return key in wanted and (force or not has_real_recording(directory, request))
+
+    return select
+
+
+async def record_all(gateway: Gateway, directory: Path, *, force: bool = False) -> int:
     """Record every request file through the gateway. Returns the number of models called."""
     called = 0
     for _, spec in load_specs(directory):
@@ -63,7 +150,9 @@ async def record_all(gateway: Gateway, directory: Path) -> int:
             messages=spec.messages,
             texts=spec.texts,
             tools=spec.tools,
+            schema=spec.schema_model,
             call=record_call(spec),
+            select=_selector(gateway, spec, directory, force),
         )
         called += len(requests)
     return called
@@ -83,7 +172,7 @@ def recording_gateway(
     )
 
 
-async def _main() -> int:
+async def _main(force: bool) -> int:
     settings = load_settings()
     database = connect(settings.database_url.get_secret_value())
     try:
@@ -93,17 +182,21 @@ async def _main() -> int:
             FIXTURES_DIR,
             settings.models_config,
         )
-        return await record_all(gateway, FIXTURES_DIR)
+        return await record_all(gateway, FIXTURES_DIR, force=force)
     finally:
         await database.dispose()
 
 
 def main() -> None:
-    called = asyncio.run(_main())
-    if called == 0:
+    args = sys.argv[1:]
+    if args not in ([], ["--force"]):
+        sys.exit("usage: python -m hub.llm.record [--force]")
+    if not load_specs(FIXTURES_DIR):
         sys.exit("record-llm: no request files found")
+    called = asyncio.run(_main(force=args == ["--force"]))
     print(
-        f"record-llm: {called} fixtures written; tokens and cost are in llm_calls (context record)"
+        f"record-llm: {called} fixtures written (models that already had a real recording were "
+        "skipped); tokens and cost are in llm_calls (context record)"
     )
 
 
