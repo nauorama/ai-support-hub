@@ -233,6 +233,8 @@ Decision table:
 | 8 | `confidence < confidence_threshold` | approval | `low_confidence` |
 | 9 | Otherwise | auto_reply | — |
 
+**Budget stop (row 2, G8).** The run checks the daily budget once at its start, before the first model call, and the gateway checks it again before every online call, so a run that crosses the limit half way stops at its next call. A refusal makes no model call and writes no `llm_calls` row; the run is `failed` (error `BudgetExceededError`) with route handoff and reason `budget_exceeded`, and the stream is the same as for any failed run. What counts: [security](security.md) G8.
+
 Outside the graph, one more reason code: **`operator_takeover`** (route handoff). An operator claims a ticket that is still in `processing` (`POST /console/tickets/{id}/claim`); the claim hands it off first (`processing → handed_off`), so the operator owns it like any other handoff. In phase 2 this is how a new ticket reaches a human, because no run exists yet. There is no direct operator reply on a `processing` ticket: from phase 6 it would let an operator and the AI answer the same ticket. (Phase 6 decides what a takeover does to a run that is still going.)
 
 Jira issues:

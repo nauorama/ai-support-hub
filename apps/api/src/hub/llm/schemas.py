@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 
 type Message = dict[str, Any]
 
@@ -128,6 +128,7 @@ class LlmCallRecord(BaseModel):
     id: uuid.UUID
     run_id: uuid.UUID | None
     context: LlmCallContext
+    mode: LlmCallMode
     node: LlmNode
     model: str
     prompt_version: str | None
@@ -188,6 +189,16 @@ def blocked_reason(entities: Mapping[str, int]) -> BlockedReason:
 def blocked_error(reason: BlockedReason) -> str:
     """What `llm_calls.error` stores for a G2 block."""
     return "blocked: G2" if reason == "card_data" else "blocked: G2 IBAN"
+
+
+class BudgetExceededError(LlmError):
+    """G8: today's real-mode spend has reached the daily budget. Raised before any model call;
+    the run hands the ticket to a human with reason `budget_exceeded`."""
+
+    def __init__(self, spent_usd: Decimal, limit_usd: Decimal) -> None:
+        self.spent_usd = spent_usd
+        self.limit_usd = limit_usd
+        super().__init__(f"daily budget reached: spent {spent_usd} of {limit_usd} USD")
 
 
 class LlmUnavailableError(LlmError):

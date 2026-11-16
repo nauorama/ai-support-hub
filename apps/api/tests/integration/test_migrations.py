@@ -88,4 +88,4 @@ def test_there_is_exactly_one_head() -> None:
     from alembic.script import ScriptDirectory
 
     heads = ScriptDirectory.from_config(alembic_config("postgresql://unused")).get_heads()
-    assert heads == ["0007"]
+    assert heads == ["0008"]

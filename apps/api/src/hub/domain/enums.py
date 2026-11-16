@@ -105,6 +105,15 @@ class LlmCallContext(StrEnum):
     RECORD = "record"  # `make record-llm`: refreshing the fake-mode recordings
 
 
+class LlmCallMode(StrEnum):
+    """Which provider answered (data model §1, `llm_calls.mode`; P3-06). Only `real` rows were
+    paid and count against the daily budget (G8): a `fake` row repeats the usage and cost of the
+    recording it answered from."""
+
+    REAL = "real"
+    FAKE = "fake"
+
+
 class LlmNode(StrEnum):
     """The step that made a model call (data model §1, `llm_calls.node`)."""
 

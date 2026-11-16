@@ -50,6 +50,7 @@ from hub.domain.enums import (
     FeedbackRating,
     Intent,
     LlmCallContext,
+    LlmCallMode,
     LlmCallStatus,
     LlmNode,
     MessageRole,
@@ -390,6 +391,7 @@ class LlmCall(Base):
     __tablename__ = "llm_calls"
     __table_args__ = (
         enum_check("context", LlmCallContext),
+        enum_check("mode", LlmCallMode),
         enum_check("node", LlmNode),
         enum_check("status", LlmCallStatus),
         CheckConstraint(
@@ -405,6 +407,8 @@ class LlmCall(Base):
     # SET NULL: deleting an old run (retention) never deletes the cost record.
     run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
     context: Mapped[LlmCallContext] = mapped_column(TextEnum(LlmCallContext))
+    # Only `real` rows count against the daily budget (G8, P3-06).
+    mode: Mapped[LlmCallMode] = mapped_column(TextEnum(LlmCallMode))
     node: Mapped[LlmNode] = mapped_column(TextEnum(LlmNode))
     model: Mapped[str]
     # Null for embeddings, which use no prompt file.

@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from hub.config import Settings
+from hub.domain.enums import LlmCallMode
 from hub.llm.config import ALLOWED_PARAMS, ConfigError, load_models, parse_models
 from hub.llm.gateway import FixtureProvider, LiteLLMProvider, build_gateway
 from hub.llm.pricing import load_pricing, parse_pricing
@@ -64,12 +65,16 @@ def test_no_role_sends_temperature() -> None:
 
 
 def test_build_gateway_uses_fixtures_in_fake_mode_and_litellm_in_real_mode() -> None:
-    fake = build_gateway(Settings(_env_file=None, models_config=MODELS_YAML), MemoryRecorder())
+    fake = build_gateway(
+        Settings(_env_file=None, models_config=MODELS_YAML), MemoryRecorder(), None
+    )
     assert isinstance(fake.provider, FixtureProvider)
+    assert fake.mode == LlmCallMode.FAKE
     real = build_gateway(
-        Settings(_env_file=None, models_config=MODELS_YAML, llm_mode="real"), MemoryRecorder()
+        Settings(_env_file=None, models_config=MODELS_YAML, llm_mode="real"), MemoryRecorder(), None
     )
     assert isinstance(real.provider, LiteLLMProvider)
+    assert real.mode == LlmCallMode.REAL
 
 
 # --- the loaders refuse --------------------------------------------------------------------------

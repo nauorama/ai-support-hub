@@ -66,6 +66,8 @@ async def test_recording_calls_model_and_fallback_through_the_gateway(tmp_path: 
         pricing=gateway.pricing,
         provider=gateway.provider,
         recorder=recorder,
+        mode=gateway.mode,
+        budget=None,
         sleep=_no_sleep,
     )
 
@@ -141,6 +143,8 @@ def _gateway(inner: ScriptedProvider, recorder: MemoryRecorder, directory: Path)
         pricing=gateway.pricing,
         provider=gateway.provider,
         recorder=recorder,
+        mode=gateway.mode,
+        budget=None,
         sleep=_no_sleep,
     )
 
