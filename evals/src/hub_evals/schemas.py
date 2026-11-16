@@ -157,6 +157,9 @@ def _ticket_problems(ticket: Ticket) -> list[str]:
         problems.append(
             f"a must_handoff ticket needs a hard-rule reason, not {ticket.expected_reason}"
         )
+    # Row 1 is checked first and always hands off, so a hard-rule reason means must_handoff.
+    if not ticket.must_handoff and ticket.expected_reason in HARD_RULE_REASONS:
+        problems.append(f"hard-rule reason {ticket.expected_reason} requires must_handoff")
     if ticket.difficulty == "hard" and not set(ticket.tags) & set(HardCase):
         problems.append(f"a hard ticket needs a hard-case tag ({', '.join(sorted(HardCase))})")
     if HardCase.FOLLOW_UP in ticket.tags and not ticket.history:

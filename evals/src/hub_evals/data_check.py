@@ -55,6 +55,8 @@ SEED_FILES = ("customers.json", "cards.json", "transactions.json", "operators.js
 # runs at all (cards keep only the last 4 digits).
 _LONG_DIGIT_RUN = re.compile(r"\d{13,}")
 TICKETS_FILE = "tickets.dev.jsonl"
+# ADR-0018: there is no test set. Refused by name, never opened (AGENTS.md rule 7).
+TEST_SET_FILE = "tickets.test.jsonl"
 ATTACKS_FILE = "attacks.jsonl"
 EVAL_DOCS = frozenset({"README.md", "CHANGELOG.md"})
 # Public test card numbers of the card networks (never issued to a person). A ticket may hold a
@@ -72,6 +74,8 @@ PUBLIC_TEST_CARDS = frozenset(
         "6011111111111117",
     }
 )
+COMPOSITION_SKIPPED = "counts and coverage not checked until every line is valid"
+NOT_A_TEST_CARD = "holds a card number that is not a public test number"
 _TEST_CARD_PATTERNS = tuple(
     re.compile(r"(?<!\d)" + r"[ -]?".join(number) + r"(?!\d)") for number in PUBLIC_TEST_CARDS
 )
@@ -90,6 +94,8 @@ def check_layout(data_dir: Path) -> list[str]:
             if path.is_dir() and path.name in KNOWN_FOLDERS:
                 continue
             errors.append(f"{path}: not a known data folder ({', '.join(sorted(KNOWN_FOLDERS))})")
+        elif relative == Path("eval", TEST_SET_FILE):
+            errors.append(f"{path}: there is no test set (ADR-0018); remove this file")
         elif path.name != PLACEHOLDER and not (
             _is_seed_file(relative) or _is_kb_file(relative) or _is_eval_file(relative)
         ):
@@ -305,12 +311,14 @@ def _article_visibility(kb_dir: Path) -> dict[str, Visibility]:
 
 
 def card_number_errors(text: str) -> list[str]:
-    """A card number in evaluation data must be a public test number."""
+    """A card number in evaluation data must be a public test number.
+
+    Give it decoded text: in raw JSON a number written as `\\u0034…` escapes would pass."""
     for pattern in _TEST_CARD_PATTERNS:
         text = pattern.sub("[test card]", text)
     result = mask(text)
     if result.failed or result.counts.get("PAN", 0) or _LONG_DIGIT_RUN.search(text):
-        return ["holds a card number that is not a public test number"]
+        return [NOT_A_TEST_CARD]
     return []
 
 
@@ -323,7 +331,10 @@ def _read_lines[M: (Ticket, Attack)](
     errors: list[str] = []
     items: list[M] = []
     seen: dict[str, int] = {}
-    lines = path.read_text(encoding="utf-8").split("\n")
+    try:
+        lines = path.read_text(encoding="utf-8").split("\n")
+    except UnicodeDecodeError as error:
+        return [f"{label}: not UTF-8 text ({error.reason} at byte {error.start})"], []
     if lines and lines[-1] == "":
         lines.pop()  # the newline at the end of the file
     if not lines:
@@ -337,10 +348,13 @@ def _read_lines[M: (Ticket, Attack)](
             raw = json.loads(line)
         except json.JSONDecodeError as error:
             errors.append(f"{where}: invalid JSON: {error.msg} (column {error.colno})")
+            errors.extend(f"{where}: {e}" for e in card_number_errors(line))
             continue
         if isinstance(raw, dict) and isinstance(raw.get("id"), str):
             where = f"{where} ({raw['id']})"
-        errors.extend(f"{where}: {e}" for e in card_number_errors(line))
+        # Every decoded string (keys too), like the seed check: JSON escapes cannot hide a number.
+        if any(card_number_errors(text) for text in _strings(raw)):
+            errors.append(f"{where}: {NOT_A_TEST_CARD}")
         try:
             item = model.model_validate(raw)
         except ValidationError as error:
@@ -368,7 +382,7 @@ def _validation_messages(error: ValidationError) -> list[str]:
 def check_tickets(path: Path, refs: _References) -> list[str]:
     """Each line against `Ticket` and the references; then the composition rules of eval plan
     §3. The composition rules run only when every line is valid, so one broken line does not
-    also report a missing intent."""
+    also report a missing intent; a last message says they were skipped."""
 
     def item_errors(ticket: Ticket) -> list[str]:
         errors = refs.customer_errors(ticket.customer_ref)
@@ -378,7 +392,7 @@ def check_tickets(path: Path, refs: _References) -> list[str]:
 
     errors, tickets = _read_lines(path, Ticket, item_errors)
     if errors:
-        return errors
+        return [*errors, f"eval/{path.name}: {COMPOSITION_SKIPPED}"]
     label = f"eval/{path.name}"
     if len(tickets) != TICKET_COUNT:
         errors.append(f"{label}: {len(tickets)} tickets, expected exactly {TICKET_COUNT}")
@@ -399,7 +413,7 @@ def check_attacks(path: Path, refs: _References) -> list[str]:
     """Each line against `Attack`; then exactly 2 attacks in each of the 8 categories."""
     errors, attacks = _read_lines(path, Attack, lambda a: refs.customer_errors(a.customer_ref))
     if errors:
-        return errors
+        return [*errors, f"eval/{path.name}: {COMPOSITION_SKIPPED}"]
     counts = Counter(a.category for a in attacks)
     return [
         f"eval/{path.name}: {counts[category]} attacks in category {category}, "

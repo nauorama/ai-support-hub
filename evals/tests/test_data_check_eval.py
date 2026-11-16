@@ -11,7 +11,13 @@ import pytest
 from hub.domain.enums import Intent
 from hub.domain.kb import ERROR_CODE_COLUMNS
 from hub.guardrails.masking import luhn_valid
-from hub_evals.data_check import card_number_errors, check, check_eval, main
+from hub_evals.data_check import (
+    COMPOSITION_SKIPPED,
+    card_number_errors,
+    check,
+    check_eval,
+    main,
+)
 from hub_evals.schemas import AttackCategory
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -107,18 +113,24 @@ def data(tmp_path: Path) -> Path:
     return root
 
 
+def _line_errors(data: Path) -> list[str]:
+    """`check_eval` without the closing note that the composition rules were skipped (that note
+    has its own tests)."""
+    return [e for e in check_eval(data) if not e.endswith(COMPOSITION_SKIPPED)]
+
+
 def _with_ticket(data: Path, index: int, **changes: object) -> list[str]:
     tickets = _valid_tickets()
     tickets[index].update(changes)
     _write_lines(data, TICKETS, tickets)
-    return check_eval(data)
+    return _line_errors(data)
 
 
 def _with_attack(data: Path, index: int, **changes: object) -> list[str]:
     attacks = _valid_attacks()
     attacks[index].update(changes)
     _write_lines(data, ATTACKS, attacks)
-    return check_eval(data)
+    return _line_errors(data)
 
 
 def _not_a_test_card() -> str:
@@ -136,21 +148,21 @@ def test_the_repository_eval_files_pass() -> None:
 
 
 def test_a_valid_set_passes(data: Path) -> None:
-    assert check_eval(data) == []
+    assert _line_errors(data) == []
 
 
 def test_missing_eval_files_pass(data: Path) -> None:
     (data / TICKETS).unlink()
     (data / ATTACKS).unlink()
-    assert check_eval(data) == []
+    assert _line_errors(data) == []
 
 
 def test_each_file_is_checked_on_its_own(data: Path) -> None:
     (data / ATTACKS).unlink()
-    assert check_eval(data) == []
+    assert _line_errors(data) == []
     (data / ATTACKS).write_text("{}\n", encoding="utf-8")
     (data / TICKETS).unlink()
-    assert check_eval(data)
+    assert _line_errors(data)
 
 
 def test_check_runs_the_eval_validator(data: Path) -> None:
@@ -165,7 +177,7 @@ def test_invalid_json_names_the_line(data: Path) -> None:
     lines = (data / TICKETS).read_text(encoding="utf-8").splitlines()
     lines[6] = lines[6][:-1]
     (data / TICKETS).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    errors = check_eval(data)
+    errors = _line_errors(data)
     assert len(errors) == 1
     assert errors[0].startswith(f"{TICKETS}:7: invalid JSON: ")
 
@@ -175,26 +187,46 @@ def test_each_broken_line_gets_its_own_message(data: Path) -> None:
     del tickets[1]["flags"]
     tickets[4]["intent"] = "refund"
     _write_lines(data, TICKETS, tickets)
-    errors = check_eval(data)
+    errors = _line_errors(data)
     assert errors[0] == f"{TICKETS}:2 (T-0002): flags: Field required"
     assert errors[1].startswith(f"{TICKETS}:5 (T-0005): intent: Input should be ")
-    assert len(errors) == 2  # composition rules wait until every line is valid
+    assert len(errors) == 2
+
+
+def test_broken_lines_say_that_the_composition_rules_were_skipped(data: Path) -> None:
+    tickets = _valid_tickets()
+    tickets[11]["intent"] = "refund"  # also the only "other" ticket: no "missing intent" message
+    _write_lines(data, TICKETS, tickets)
+    errors = check_eval(data)
+    assert len(errors) == 2
+    assert errors[0].startswith(f"{TICKETS}:12 (T-0012): intent: ")
+    assert errors[1] == f"{TICKETS}: {COMPOSITION_SKIPPED}"
+    attacks = _valid_attacks()
+    attacks[0]["category"] = "jailbreak"
+    _write_lines(data, ATTACKS, attacks)
+    assert check_eval(data)[-1] == f"{ATTACKS}: {COMPOSITION_SKIPPED}"
+
+
+def test_a_file_that_is_not_utf8_fails_with_a_message(data: Path) -> None:
+    (data / TICKETS).write_bytes(b'{"id": "T-0001", "message": "caf\xe9"}\n')
+    errors = check_eval(data)
+    assert errors[0] == f"{TICKETS}: not UTF-8 text (invalid continuation byte at byte 32)"
 
 
 def test_a_blank_line_fails(data: Path) -> None:
     text = (data / TICKETS).read_text(encoding="utf-8")
     (data / TICKETS).write_text(text.replace("\n", "\n\n", 1), encoding="utf-8")
-    assert check_eval(data) == [f"{TICKETS}:2: blank line"]
+    assert _line_errors(data) == [f"{TICKETS}:2: blank line"]
 
 
 def test_an_empty_file_fails(data: Path) -> None:
     (data / TICKETS).write_text("", encoding="utf-8")
-    assert check_eval(data) == [f"{TICKETS}: empty file"]
+    assert _line_errors(data) == [f"{TICKETS}: empty file"]
 
 
 def test_a_line_that_is_not_an_object_fails(data: Path) -> None:
     (data / TICKETS).write_text("[1, 2]\n", encoding="utf-8")
-    errors = check_eval(data)
+    errors = _line_errors(data)
     assert len(errors) == 1
     assert errors[0].startswith(f"{TICKETS}:1: Input should be")
 
@@ -288,9 +320,30 @@ def test_consistent_hard_cases_pass(data: Path) -> None:
     )
 
 
-def test_an_escalation_without_handoff_may_have_any_reason(data: Path) -> None:
-    errors = _with_ticket(data, 12, should_escalate=True, expected_reason="policy_review")
-    assert errors == []
+@pytest.mark.parametrize("reason", ["policy_review", "no_kb_answer"])
+def test_an_escalation_without_handoff_has_a_non_hard_rule_reason(data: Path, reason: str) -> None:
+    assert _with_ticket(data, 12, should_escalate=True, expected_reason=reason) == []
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "policy_intent",
+        "customer_request",
+        "fraud_report",
+        "complaint",
+        "injection",
+        "action_request",
+        "language",
+        "restricted_account",
+    ],
+)
+def test_a_hard_rule_reason_requires_must_handoff(data: Path, reason: str) -> None:
+    # AI pipeline §6: row 1 is checked first and always hands off.
+    errors = _with_ticket(data, 12, should_escalate=True, expected_reason=reason)
+    assert errors == [f"{TICKETS}:13 (T-0013): hard-rule reason {reason} requires must_handoff"]
+    changes = {"should_escalate": True, "must_handoff": True, "expected_reason": reason}
+    assert _with_ticket(data, 12, **changes) == []
 
 
 # --- references to seed and KB ---------------------------------------------------------------
@@ -318,7 +371,7 @@ def test_references_must_exist(data: Path, changes: dict[str, Any], message: str
 def test_without_seed_and_kb_every_reference_fails(data: Path) -> None:
     for path in (*data.glob("kb/*"), data / "seed" / "customers.json"):
         path.unlink()
-    errors = check_eval(data)
+    errors = _line_errors(data)
     assert f"{TICKETS}:1 (T-0001): customer_ref CUS-0001 is not a seed customer" in errors
     assert f"{TICKETS}:1 (T-0001): gold doc withdrawal-times is not a KB article" in errors
 
@@ -326,12 +379,12 @@ def test_without_seed_and_kb_every_reference_fails(data: Path) -> None:
 @pytest.mark.parametrize("content", ["not json", '{"external_ref": "CUS-0001"}'])
 def test_an_unreadable_customers_file_means_no_known_customer(data: Path, content: str) -> None:
     (data / "seed" / "customers.json").write_text(content, encoding="utf-8")
-    assert any("is not a seed customer" in e for e in check_eval(data))
+    assert any("is not a seed customer" in e for e in _line_errors(data))
 
 
 def test_an_article_that_does_not_parse_is_not_a_gold_document(data: Path) -> None:
     (data / "kb" / "withdrawal-times.md").write_text("no front matter", encoding="utf-8")
-    assert any("gold doc withdrawal-times is not a KB article" in e for e in check_eval(data))
+    assert any("gold doc withdrawal-times is not a KB article" in e for e in _line_errors(data))
 
 
 # --- card numbers -----------------------------------------------------------------------------
@@ -364,6 +417,53 @@ def test_a_card_number_in_a_ticket_names_the_line(data: Path) -> None:
     assert errors == [f"{TICKETS}:3 (T-0003): holds a card number that is not a public test number"]
 
 
+def _escaped(text: str) -> str:
+    """Write every digit as a JSON `\\u00XX` escape."""
+    return "".join(f"\\u{ord(c):04x}" if c.isdigit() else c for c in text)
+
+
+@pytest.mark.parametrize("field", ["message", "history"])
+def test_an_escaped_card_number_fails(data: Path, field: str) -> None:
+    number = _not_a_test_card()
+    tickets = _valid_tickets()
+    if field == "history":
+        tickets[3]["history"] = [{"role": "customer", "text": "card @@"}]
+    else:
+        tickets[3]["message"] = "card @@"
+    lines = [json.dumps(t) for t in tickets]
+    lines[3] = lines[3].replace("@@", _escaped(number))
+    assert number not in lines[3]  # the raw line hides it
+    (data / TICKETS).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert _line_errors(data) == [
+        f"{TICKETS}:4 (T-0004): holds a card number that is not a public test number"
+    ]
+
+
+def test_an_escaped_test_card_passes(data: Path) -> None:
+    tickets = _valid_tickets()
+    tickets[3]["message"] = "card @@"
+    lines = [json.dumps(t) for t in tickets]
+    lines[3] = lines[3].replace("@@", _escaped("4111 1111 1111 1111"))
+    (data / TICKETS).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert check_eval(data) == []
+
+
+def test_a_card_number_as_a_json_number_fails(data: Path) -> None:
+    tickets = _valid_tickets()
+    tickets[3]["key_facts"] = [int(_not_a_test_card())]
+    _write_lines(data, TICKETS, tickets)
+    assert f"{TICKETS}:4 (T-0004): holds a card number that is not a public test number" in (
+        check_eval(data)
+    )
+
+
+def test_a_card_number_in_a_broken_line_is_still_reported(data: Path) -> None:
+    (data / TICKETS).write_text(f'{{"message": "card {_not_a_test_card()}"\n', encoding="utf-8")
+    errors = _line_errors(data)
+    assert errors[0].startswith(f"{TICKETS}:1: invalid JSON: ")
+    assert errors[1] == f"{TICKETS}:1: holds a card number that is not a public test number"
+
+
 def test_a_test_card_in_a_ticket_passes(data: Path) -> None:
     message = "my card 4111 1111 1111 1111 was charged twice"
     assert _with_ticket(data, 5, message=message, tags=["card_number"]) == []
@@ -375,9 +475,9 @@ def test_a_test_card_in_a_ticket_passes(data: Path) -> None:
 def test_exactly_twenty_tickets(data: Path) -> None:
     tickets = _valid_tickets()
     _write_lines(data, TICKETS, tickets[:-1])
-    assert check_eval(data) == [f"{TICKETS}: 19 tickets, expected exactly 20"]
+    assert _line_errors(data) == [f"{TICKETS}: 19 tickets, expected exactly 20"]
     _write_lines(data, TICKETS, [*tickets, _ticket(21, intent="payment_pending")])
-    assert check_eval(data) == [f"{TICKETS}: 21 tickets, expected exactly 20"]
+    assert _line_errors(data) == [f"{TICKETS}: 21 tickets, expected exactly 20"]
 
 
 def test_every_intent_appears(data: Path) -> None:
@@ -391,7 +491,7 @@ def test_at_least_six_hard_tickets(data: Path) -> None:
 
 
 def test_at_least_three_must_handoff(data: Path) -> None:
-    errors = _with_ticket(data, 2, must_handoff=False)
+    errors = _with_ticket(data, 2, must_handoff=False, should_escalate=False, expected_reason=None)
     assert errors == [f"{TICKETS}: 2 must_handoff tickets, expected at least 3"]
 
 

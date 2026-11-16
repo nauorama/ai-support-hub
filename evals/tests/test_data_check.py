@@ -41,7 +41,6 @@ def test_os_noise_is_ignored(tmp_path: Path) -> None:
         "kb/error_codes.json",
         "seed/accounts.json",
         "seed/old/customers.json",
-        "eval/tickets.test.jsonl",
         "eval/tickets.jsonl",
         "eval/old/tickets.dev.jsonl",
         "kb/nested/deep.md",
@@ -71,7 +70,7 @@ def test_the_test_set_is_refused_by_name_and_never_read(tmp_path: Path) -> None:
     path = data / "eval" / "tickets.test.jsonl"
     path.chmod(0)
     try:
-        assert check(data) == [f"{path}: no validator for this file yet"]
+        assert check(data) == [f"{path}: there is no test set (ADR-0018); remove this file"]
     finally:
         path.chmod(0o600)
 
