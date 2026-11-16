@@ -21,9 +21,11 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from hub.db.models import (
     Customer,
+    Draft,
     Feedback,
     Message,
     Operator,
+    Run,
     Setting,
     Ticket,
     approve_status_change,
@@ -380,6 +382,48 @@ class MessageRepository:
         if for_update:
             statement = statement.with_for_update()
         result = await self._session.execute(statement)
+        return result.scalar_one_or_none()
+
+
+class RunRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def latest_for_ticket(self, ticket_id: uuid.UUID) -> Run | None:
+        # UUID v7 ids break a tie of equal start times in creation order.
+        result = await self._session.execute(
+            select(Run)
+            .where(Run.ticket_id == ticket_id)
+            .order_by(Run.started_at.desc(), Run.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+
+class DraftRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get(self, draft_id: uuid.UUID, *, for_update: bool = False) -> Draft | None:
+        """`for_update` locks the row and reloads it: a review that waited for the lock sees the
+        status another review committed meanwhile."""
+        statement = select(Draft).where(Draft.id == draft_id)
+        if for_update:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        result = await self._session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def for_run(self, run_id: uuid.UUID) -> Draft | None:
+        result = await self._session.execute(select(Draft).where(Draft.run_id == run_id))
+        return result.scalar_one_or_none()
+
+    async def latest_for_ticket(self, ticket_id: uuid.UUID) -> Draft | None:
+        result = await self._session.execute(
+            select(Draft)
+            .where(Draft.ticket_id == ticket_id)
+            .order_by(Draft.created_at.desc(), Draft.id.desc())
+            .limit(1)
+        )
         return result.scalar_one_or_none()
 
 

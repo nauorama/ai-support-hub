@@ -60,7 +60,7 @@ Mirror of the demo customers from the core mock. Only what the Hub needs.
 | secondary_intent | text null | |
 | urgency | text null | `low` \| `normal` \| `high` |
 | language | text null | ISO 639-1 |
-| summary | text null | written by triage, shown to the operator |
+| summary | text null | written by triage, shown to the operator; placeholders restored, then card data masked (G1) |
 | last_route | text null | `auto_reply` \| `approval` \| `handoff` |
 | route_reasons | jsonb | list of reason codes, see [ai-pipeline](ai-pipeline.md) §6 |
 | confidence | numeric(4,3) null | |
@@ -107,7 +107,7 @@ Closing: an operator closes a ticket by hand, or the scheduled job `close-stale`
 | role | text | `customer` \| `assistant` \| `operator` \| `system` |
 | body | text | card data already masked; never the raw text |
 | is_ai_generated | bool | drives the label in the UI |
-| author_operator_id | uuid FK null | |
+| author_operator_id | uuid FK null | the operator who wrote the message; on an `assistant` message the operator who approved the AI draft unchanged (label "AI assistant · reviewed by <name>", P3-05b) |
 | run_id | uuid FK null | `ON DELETE SET NULL` (P3-05) |
 | citations | jsonb | `[{"marker": 1, "chunk_id": "...", "doc_id": "...", "title": "...", "url": "..."}]` |
 | masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}` or `{"IBAN": 1}` (ADR-0017; an IBAN is not card data and does not set the customer's `masked` flag); `{"failed": 1}` when masking failed (every digit hidden, counts unknown) |
@@ -146,10 +146,10 @@ One execution of the workflow for one customer message.
 | run_id | uuid FK unique | `ON DELETE CASCADE` |
 | ticket_id | uuid FK | |
 | can_answer | bool | from `DraftAnswer` (P3-05); an unchanged draft with `false` cannot be approved |
-| missing_information | text null | from `DraftAnswer`, shown to the operator; placeholders restored |
+| missing_information | text null | from `DraftAnswer`, shown to the operator; placeholders restored, then card data masked (G1) |
 | body | text | AI draft: placeholders restored, then card data masked (G1); markers without a kept citation removed; empty when `can_answer` is false |
 | citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`; in baseline B0 `source_id` is a document id |
-| evidence | jsonb | object: retrieved chunks (id, title, section, score, text) and account facts shown to the operator; in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because their citation pointed to no external document) |
+| evidence | jsonb | object: retrieved chunks (id, title, section, score, text) and account facts shown to the operator; in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because they had no kept citation: the citation pointed to no external document, or the model wrote the marker without any citation) |
 | proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
 | groundedness | numeric(4,3) null | |
 | unsupported_claims | jsonb | from the verify step |
@@ -157,7 +157,7 @@ One execution of the workflow for one customer message.
 | reviewed_by | uuid FK null | |
 | reviewed_at | timestamptz null | |
 | final_body | text null | what was sent |
-| edit_ratio | numeric(4,3) null | normalised edit distance between `body` and `final_body` |
+| edit_ratio | numeric(4,3) null | how much the operator changed: `1 - difflib.SequenceMatcher(None, body, final_body, autojunk=False).ratio()`, rounded to 3 decimals (an approximation of a normalised edit distance, not Levenshtein; no extra dependency). `0` for an approved draft; null for a rejected one (a reply is not an edit of the draft) |
 | reject_reason | text null | `wrong_facts` \| `wrong_tone` \| `missing_info` \| `policy` \| `other` |
 | reject_note | text null | |
 

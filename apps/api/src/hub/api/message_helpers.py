@@ -18,23 +18,27 @@ OPERATOR_LABEL = "Support team"
 
 
 async def author_label(session: AsyncSession, message: Message) -> str:
+    """Security §7: "AI assistant" for AI text, "<first name> · Support team" for an operator's
+    text, and "AI assistant · reviewed by <first name>" for an AI draft an operator approved
+    unchanged (an assistant message with `author_operator_id`, P3-05b)."""
     match message.role:
         case MessageRole.CUSTOMER:
             return CUSTOMER_LABEL
         case MessageRole.ASSISTANT:
-            return AI_LABEL
+            reviewer = await _first_name(session, message.author_operator_id)
+            return AI_LABEL if reviewer is None else f"{AI_LABEL} · reviewed by {reviewer}"
         case MessageRole.SYSTEM:
             return SYSTEM_LABEL
         case MessageRole.OPERATOR:
-            # Security §7: the operator's first name and "Support team".
-            operator = (
-                await OperatorRepository(session).get(message.author_operator_id)
-                if message.author_operator_id
-                else None
-            )
-            if operator is None or not operator.name.strip():
-                return OPERATOR_LABEL
-            return f"{operator.name.split()[0]} · {OPERATOR_LABEL}"
+            name = await _first_name(session, message.author_operator_id)
+            return OPERATOR_LABEL if name is None else f"{name} · {OPERATOR_LABEL}"
+
+
+async def _first_name(session: AsyncSession, operator_id: uuid.UUID | None) -> str | None:
+    operator = await OperatorRepository(session).get(operator_id) if operator_id else None
+    if operator is None or not operator.name.strip():
+        return None
+    return operator.name.split()[0]
 
 
 def masked_entities(masked: MaskResult) -> dict[str, int]:

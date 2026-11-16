@@ -1,5 +1,6 @@
-"""Operator console endpoints of phase 2 (docs/api.md §3): queue, ticket, claim, release, reply,
-close. Drafts, actions and the knowledge base come in later phases.
+"""Operator console endpoints (docs/api.md §3): queue, ticket, claim, release, reply, close (phase
+2). The draft review (approve, edit, reject; P3-05b) is in `console_drafts`; actions and the
+knowledge base come in later phases.
 
 Every route declares its role with `RequireRole` (a test walks all `/console` and `/admin`
 routes); state-changing routes also need the CSRF token, which `RequireRole` checks. Every
@@ -28,8 +29,10 @@ from hub.api.console_schemas import (
     ConsoleCustomerOut,
     ConsoleMessageOut,
     ConsoleTicketOut,
+    DraftOut,
     QueueTicketOut,
     ReplyIn,
+    RunOut,
     TicketVersionIn,
 )
 from hub.api.dependencies import RequireRole, SessionDep
@@ -41,11 +44,13 @@ from hub.auth.roles import OPERATOR, TICKET_READER, can_override_claim
 from hub.db.models import Message, Operator, Ticket
 from hub.db.repositories import (
     ConcurrentUpdateError,
+    DraftRepository,
     MessageRepository,
     QueueCursor,
     QueueFilters,
     QueueRepository,
     QueueRow,
+    RunRepository,
     TicketRepository,
 )
 from hub.domain.enums import (
@@ -69,7 +74,7 @@ DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
 OPERATOR_TAKEOVER = "operator_takeover"
 # An operator may answer a ticket that waits for a human or was answered already. A draft that
-# waits (`pending_approval`) is answered with the draft endpoints (phase 6).
+# waits (`pending_approval`) is answered with the draft endpoints (`console_drafts`).
 _REPLYABLE = frozenset({TicketStatus.HANDED_OFF, TicketStatus.ANSWERED})
 _CLOSABLE = frozenset({TicketStatus.HANDED_OFF, TicketStatus.ANSWERED})
 
@@ -259,6 +264,8 @@ async def get_ticket(
         raise ProblemError(404, "not_found", "Ticket not found.")
     ticket = row.ticket
     messages = await MessageRepository(session).list_for_ticket(ticket.id)
+    run = await RunRepository(session).latest_for_ticket(ticket.id)
+    draft = None if run is None else await DraftRepository(session).for_run(run.id)
     return ConsoleTicketOut(
         **_row_out(row).model_dump(),
         language=ticket.language,
@@ -268,6 +275,8 @@ async def get_ticket(
         resolved_at=ticket.resolved_at,
         resolution=None if ticket.resolution is None else ticket.resolution.value,
         messages=[await _message_out(session, message) for message in messages],
+        latest_run=None if run is None else RunOut.model_validate(run),
+        draft=None if draft is None else DraftOut.model_validate(draft),
     )
 
 
