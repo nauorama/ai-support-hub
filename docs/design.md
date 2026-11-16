@@ -176,7 +176,7 @@ Each decision has an ADR with alternatives.
 │   │   │   ├── auth/
 │   │   │   ├── db/              # SQLAlchemy models, session, repositories
 │   │   │   ├── domain/          # enums and Pydantic models shared by all modules
-│   │   │   ├── guardrails/      # masking.py, injection.py, output_checks.py, policy.py
+│   │   │   ├── guardrails/      # masking.py, placeholders.py, injection.py, output_checks.py, policy.py
 │   │   │   ├── kb/              # loader.py, chunker.py, index.py, retriever.py
 │   │   │   ├── llm/             # gateway.py, structured.py, prompts.py, pricing.py, budget.py, schemas.py
 │   │   │   ├── graph/           # state.py, build.py, nodes/, routing.py, confidence.py
