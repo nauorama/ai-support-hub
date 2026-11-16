@@ -14,10 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from hub.api.schemas import MessageText
 from hub.domain.enums import (
     CustomerTier,
+    DraftStatus,
     Intent,
     MessageRole,
     OperatorRole,
+    RejectReason,
     Route,
+    RunStatus,
     TicketStatus,
     Urgency,
 )
@@ -69,6 +72,35 @@ class ReplyIn(_Strict):
     body: MessageText
 
 
+# Ids of the draft's proposed actions the operator ticked ("a1", ...). Phase 7 runs them; until
+# then they are checked against the draft and recorded in the audit log.
+ActionIds = Annotated[
+    list[Annotated[str, StringConstraints(pattern=r"^a[0-9]{1,3}$")]], Field(max_length=20)
+]
+# Same limit as a customer comment on feedback; masked (G1) before it is stored.
+RejectNote = Annotated[str, StringConstraints(max_length=1000, pattern=r"^[^\x00]*$")]
+
+
+class ApproveIn(_Strict):
+    ticket_version: Annotated[int, Field(ge=1)]
+    approved_actions: ActionIds = Field(default_factory=list)
+
+
+class EditIn(_Strict):
+    ticket_version: Annotated[int, Field(ge=1)]
+    # The same limit as a customer message; masked (G1) before it is stored.
+    body: MessageText
+    approved_actions: ActionIds = Field(default_factory=list)
+
+
+class RejectIn(_Strict):
+    ticket_version: Annotated[int, Field(ge=1)]
+    reason: RejectReason
+    note: RejectNote | None = None
+    # With a reply the operator's own answer is sent; without it the ticket stays handed off.
+    reply_body: MessageText | None = None
+
+
 class ConsoleCustomerOut(BaseModel):
     id: uuid.UUID
     customer_ref: str
@@ -113,10 +145,67 @@ class ConsoleMessageOut(BaseModel):
     created_at: datetime
 
 
+class RunOut(BaseModel):
+    """The latest run of a ticket: status, route and what it cost (data model, `runs`)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: RunStatus
+    route: Route | None
+    route_reasons: list[str]
+    confidence: Decimal | None
+    prompt_versions: dict[str, str]
+    models: dict[str, str]
+    total_cost_usd: Decimal
+    input_tokens: int
+    output_tokens: int
+    latency_ms: int | None
+    # An error class only, never a message text.
+    error: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class DraftOut(BaseModel):
+    """The draft of the latest run (data model, `drafts`). `body` and `final_body` are stored
+    card-masked; `evidence` holds what the operator checks the draft against."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    status: DraftStatus
+    can_answer: bool
+    missing_information: str | None
+    body: str
+    citations: list[dict[str, Any]]
+    evidence: dict[str, Any]
+    proposed_actions: list[dict[str, Any]]
+    groundedness: Decimal | None
+    unsupported_claims: list[Any]
+    reviewed_by: uuid.UUID | None
+    reviewed_at: datetime | None
+    final_body: str | None
+    edit_ratio: Decimal | None
+    reject_reason: RejectReason | None
+    reject_note: str | None
+    created_at: datetime
+
+
+class DraftReviewOut(BaseModel):
+    """Answer of approve, edit and reject: the reviewed draft, the message that was sent (none
+    for a reject without a reply) and the ticket's queue row with its new `version`."""
+
+    draft: DraftOut
+    message: ConsoleMessageOut | None
+    ticket: QueueTicketOut
+
+
 class ConsoleTicketOut(QueueTicketOut):
     """`GET /console/tickets/{id}`. Fields of later phases are present and empty until then:
-    runs and drafts (phase 6), evidence (phase 5), memory (phase 6), tool calls (phase 7),
-    trace URL (phase 9)."""
+    evidence chunks (phase 5; the B0 cited documents are in `draft.evidence`), memory (phase 6),
+    tool calls (phase 7), trace URL (phase 9)."""
 
     language: str | None
     confidence: Decimal | None
@@ -125,8 +214,9 @@ class ConsoleTicketOut(QueueTicketOut):
     resolved_at: datetime | None
     resolution: str | None
     messages: list[ConsoleMessageOut]
-    latest_run: None = None
-    draft: None = None
+    latest_run: RunOut | None
+    # The draft of the latest run, whatever its status.
+    draft: DraftOut | None
     evidence: list[Any] = Field(default_factory=list)
     memory: list[Any] = Field(default_factory=list)
     tool_calls: list[Any] = Field(default_factory=list)

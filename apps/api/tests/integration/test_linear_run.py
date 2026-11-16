@@ -37,8 +37,10 @@ from ._api import (
     SESSION_SECRET,
     Urls,
     add_customer,
+    add_operator,
     customer_client,
     key,
+    operator_client,
     own_database,
     run_sql,
 )
@@ -91,8 +93,8 @@ def _settings(urls: Urls) -> Settings:
 def app(run_db: Urls) -> Iterator[FastAPI]:
     run_sql(
         run_db,
-        "TRUNCATE audit_log, llm_calls, drafts, runs, feedback, messages, tickets, customers"
-        " RESTART IDENTITY CASCADE",
+        "TRUNCATE audit_log, llm_calls, drafts, runs, feedback, messages, tickets, customers,"
+        " operators RESTART IDENTITY CASCADE",
     )
     add_customer(run_db)
     settings = _settings(run_db)
@@ -133,6 +135,35 @@ def _actions(urls: Urls) -> list[str]:
 
 
 # --- a run that ends with a draft ------------------------------------------------------------
+
+
+def test_an_operator_approves_the_sepa_draft_and_the_customer_sees_it(
+    app: FastAPI, run_db: Urls
+) -> None:
+    """Done when of P3-05: approve sends the message with the "AI assistant · reviewed by" label
+    (P3-05b), on a draft the fake-mode run wrote."""
+    add_operator(run_db, "marta@tallybridge.test")
+    customer = customer_client(app)
+    operator = operator_client(app, "marta@tallybridge.test")
+    ticket_id, _ = _post(customer, SEPA)
+    detail = operator.get(f"/api/v1/console/tickets/{ticket_id}").json()
+    assert detail["latest_run"]["prompt_versions"] == {"triage": "v1", "write": "v1"}
+    draft = detail["draft"]
+    assert draft["status"] == "pending"
+
+    response = operator.post(
+        f"/api/v1/console/drafts/{draft['id']}/approve",
+        json={"ticket_version": detail["version"]},
+        headers=key(),
+    )
+
+    assert response.status_code == 200, response.text
+    messages = customer.get(f"/api/v1/tickets/{ticket_id}/messages").json()["items"]
+    sent = messages[-1]
+    assert sent["author_label"] == "AI assistant · reviewed by Marta"
+    assert sent["body"] == draft["body"]
+    assert "/help/withdrawal-times" in {citation["url"] for citation in sent["citations"]}
+    assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] == "answered"
 
 
 def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
@@ -412,6 +443,42 @@ async def test_a_ticket_claimed_during_the_run_keeps_its_operator(run_db: Urls) 
         "superseded",
     )
     assert "route.decided" not in _actions(run_db)
+
+
+async def test_a_claim_through_the_console_during_the_run_needs_the_current_version(
+    app: FastAPI, run_db: Urls
+) -> None:
+    """P3-05a known gap: the claim goes through `POST /console/tickets/{id}/claim`. The run's
+    triage save moved the version, so a claim with the version from before the run is 409; with
+    the current one it hands the ticket off, and the run's draft is `superseded`."""
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    add_operator(run_db, "marta@tallybridge.test")
+    operator = operator_client(app, "marta@tallybridge.test")
+    before = operator.get(f"/api/v1/console/tickets/{ticket_id}").json()["version"]
+    answers: list[tuple[int, str]] = []
+
+    def claim(_name: str, data: dict[str, Any]) -> None:
+        if data.get("step") != "writing":
+            return
+        url = f"/api/v1/console/tickets/{ticket_id}/claim"
+        stale = operator.post(url, json={"ticket_version": before})
+        answers.append((stale.status_code, stale.json()["code"]))
+        current = operator.get(f"/api/v1/console/tickets/{ticket_id}").json()["version"]
+        assert current > before
+        answers.append((operator.post(url, json={"ticket_version": current}).status_code, ""))
+
+    outcome, emitted = await _run(run_db, ticket_id, message_id, claim)
+
+    assert answers == [(409, "stale_draft"), (200, "")]
+    assert not outcome.failed
+    assert emitted[-1] == ("ticket.status", {"status": "handed_off"})
+    assert _one(run_db, "SELECT status, route_reasons FROM tickets WHERE id = %s", ticket_id) == (
+        "handed_off",
+        ["operator_takeover"],
+    )
+    assert _one(run_db, "SELECT status FROM drafts WHERE ticket_id = %s", ticket_id) == (
+        "superseded",
+    )
 
 
 async def test_no_run_starts_for_a_ticket_a_human_already_has(run_db: Urls) -> None:

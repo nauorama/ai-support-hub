@@ -22,13 +22,21 @@ class ProblemError(Exception):
     """Raised by endpoints for an expected error with a code from the API contract."""
 
     def __init__(
-        self, status: int, code: str, detail: str, *, headers: dict[str, str] | None = None
+        self,
+        status: int,
+        code: str,
+        detail: str,
+        *,
+        headers: dict[str, str] | None = None,
+        extensions: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(code)
         self.status = status
         self.code = code
         self.detail = detail
         self.headers = headers
+        # Extra members, e.g. `errors` of a `validation_error`; never a submitted value.
+        self.extensions = extensions
 
 
 def problem_response(
@@ -78,7 +86,9 @@ def _code_for_status(status: int) -> str:
 
 async def _problem_error_handler(_request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ProblemError)  # noqa: S101 - registered for this class only
-    return problem_response(exc.status, exc.code, exc.detail, headers=exc.headers)
+    return problem_response(
+        exc.status, exc.code, exc.detail, headers=exc.headers, extensions=exc.extensions
+    )
 
 
 async def _http_exception_handler(_request: Request, exc: Exception) -> JSONResponse:

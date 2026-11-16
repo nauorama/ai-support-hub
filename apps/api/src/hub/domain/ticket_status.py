@@ -17,7 +17,7 @@ ALLOWED_TRANSITIONS: frozenset[tuple[TicketStatus, TicketStatus]] = frozenset(
         (S.PROCESSING, S.ANSWERED),  # auto-reply
         (S.PROCESSING, S.PENDING_APPROVAL),  # draft waits
         (S.PROCESSING, S.HANDED_OFF),  # handoff / error
-        (S.PENDING_APPROVAL, S.ANSWERED),  # approve / edit
+        (S.PENDING_APPROVAL, S.ANSWERED),  # approve / edit / reject with a reply
         (S.PENDING_APPROVAL, S.HANDED_OFF),  # reject without reply
         (S.HANDED_OFF, S.ANSWERED),  # operator reply
         (S.ANSWERED, S.PROCESSING),  # customer message (AI owns)
