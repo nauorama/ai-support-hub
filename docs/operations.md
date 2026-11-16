@@ -20,7 +20,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make test-int` | integration tests with testcontainers (Postgres, Qdrant) and recorded model responses |
 | `make test-e2e` | Playwright against the compose stack with the fake model provider |
 | `make lint` | ruff, mypy, import-linter, eslint, tsc |
-| `make data-check` | validate `data/` (seed schemas and rules; KB front matter, `error_codes.csv`, internal-only phrases in external content; seed error codes must be in the CSV) |
+| `make data-check` | validate `data/` (seed schemas and rules; KB front matter, `error_codes.csv`, internal-only phrases in external content; seed error codes must be in the CSV; evaluation tickets and attacks: schema per line, known customers and external gold documents, composition rules of the [eval plan](eval-plan.md) §3) |
 | `make kb-numbers` | report every number in `data/kb/` that is not in the world file (a report, not a gate) |
 | `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018) |
 | `make web-types` | generate TypeScript types from OpenAPI |
