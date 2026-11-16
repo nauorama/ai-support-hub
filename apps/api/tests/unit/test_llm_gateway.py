@@ -11,7 +11,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import BaseModel, Field
 
-from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.guardrails.masking import luhn_valid
 from hub.llm.config import ConfigError, parse_models
 from hub.llm.gateway import BACKOFF_S, RETRIES, scan_outbound
@@ -354,6 +354,8 @@ async def test_a_paid_call_that_cannot_be_priced_is_recorded_with_its_tokens() -
         pricing=pricing.model_copy(update={"models": without_haiku}),
         provider=provider,
         recorder=recorder,
+        mode=LlmCallMode.REAL,
+        budget=None,
     )
     with pytest.raises(ConfigError, match="no price"):
         await gateway.complete("triage", user("hi"), call=CALL)

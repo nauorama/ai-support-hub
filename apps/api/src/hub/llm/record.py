@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from hub.config import load_settings
 from hub.db.session import connect
 from hub.domain.draft import DraftAnswer
-from hub.domain.enums import LlmCallContext, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmNode
 from hub.domain.triage import TriageResult
 from hub.llm.config import load_models
 from hub.llm.gateway import (
@@ -173,6 +173,9 @@ def recording_gateway(
         pricing=pricing,
         provider=RecordingProvider(provider, directory),
         recorder=recorder,
+        # Record mode makes real, paid calls: its rows count against the daily budget.
+        mode=LlmCallMode.REAL,
+        budget=None,
     )
 
 

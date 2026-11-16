@@ -12,7 +12,11 @@ and a second invalid answer is a `StructuredOutputError`. An invalid answer is r
 status `invalid_output`.
 
 `LLM_MODE=fake` swaps the provider for `FixtureProvider`, which answers from recorded responses
-(`make record-llm`) and never makes a real call. Tests pass a scripted provider.
+(`make record-llm`) and never makes a real call. Tests pass a scripted provider. Every row names
+the mode (`llm_calls.mode`), so the budget guard can leave fake-mode rows out.
+
+The budget guard (G8, `hub/llm/budget.py`) runs before every `online` call, before the G2 scan
+and before any provider call: a refused call is no attempt and writes no row.
 """
 
 import asyncio
@@ -31,8 +35,9 @@ from pydantic import BaseModel, ValidationError
 from uuid_utils.compat import uuid7
 
 from hub.config import Settings
-from hub.domain.enums import LlmCallStatus
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus
 from hub.guardrails.masking import mask
+from hub.llm.budget import BudgetCheck
 from hub.llm.config import ConfigError, ModelsConfig, RoleConfig, load_models
 from hub.llm.pricing import Pricing, load_pricing
 from hub.llm.recorder import CallRecorder
@@ -352,6 +357,11 @@ class Gateway:
     pricing: Pricing
     provider: Provider
     recorder: CallRecorder
+    # Written to every row: only `real` rows count against the daily budget.
+    mode: LlmCallMode
+    # G8, checked before `online` calls only. None in unit tests and in record mode, whose
+    # `record` calls are never refused (their rows still count against the day's budget).
+    budget: BudgetCheck | None
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep)
     clock: Callable[[], float] = field(default=time.perf_counter)
 
@@ -501,6 +511,8 @@ class Gateway:
     ) -> _Outcome:
         """`first_index`: position of `requests[0]` in the role's model list (1 when the call
         starts at the fallback), so `_Outcome.index` always names the model's role."""
+        if call.context == LlmCallContext.ONLINE and self.budget is not None:
+            await self.budget.check()
         # The model and fallback requests differ only in model and parameters: one scan covers
         # what every model would see.
         entities = scan_outbound(requests[0])
@@ -609,8 +621,8 @@ class Gateway:
     def _elapsed_ms(self, start: float) -> int:
         return max(0, round((self.clock() - start) * 1000))
 
-    @staticmethod
     def _row(
+        self,
         call: CallContext,
         model: str,
         status: LlmCallStatus,
@@ -625,6 +637,7 @@ class Gateway:
             id=uuid7(),
             run_id=call.run_id,
             context=call.context,
+            mode=self.mode,
             node=call.node,
             model=model,
             prompt_version=call.prompt_version,
@@ -658,12 +671,22 @@ def _structured[T: BaseModel](
     )
 
 
-def build_gateway(settings: Settings, recorder: CallRecorder) -> Gateway:
-    """The gateway of the app: config files next to each other, provider from LLM_MODE."""
+def build_gateway(
+    settings: Settings, recorder: CallRecorder, budget: BudgetCheck | None
+) -> Gateway:
+    """The gateway of the app: config files next to each other, provider and row mode from
+    LLM_MODE. `budget`: the app always passes its guard."""
     models = load_models(settings.models_config)
     pricing = load_pricing(settings.models_config.parent / "pricing.yaml")
     pricing.check_covers(models)
     provider: Provider = (
         LiteLLMProvider(settings) if settings.llm_mode == "real" else FixtureProvider(FIXTURES_DIR)
     )
-    return Gateway(models=models, pricing=pricing, provider=provider, recorder=recorder)
+    return Gateway(
+        models=models,
+        pricing=pricing,
+        provider=provider,
+        recorder=recorder,
+        mode=LlmCallMode(settings.llm_mode),
+        budget=budget,
+    )

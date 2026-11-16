@@ -22,7 +22,7 @@ from litellm import exceptions as litellm_errors
 from pydantic import BaseModel, Field
 
 from hub.config import Settings
-from hub.domain.enums import LlmCallContext, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmNode
 from hub.llm.gateway import (
     FIXTURES_DIR,
     FixtureProvider,
@@ -399,7 +399,12 @@ async def test_every_request_spec_has_a_fixture_for_each_of_its_models(
     for request in requests:
         assert provider.path(request).exists(), f"{spec_path.name}: no fixture for {request.model}"
     fake = type(fake)(
-        models=fake.models, pricing=fake.pricing, provider=provider, recorder=recorder
+        models=fake.models,
+        pricing=fake.pricing,
+        provider=provider,
+        recorder=recorder,
+        mode=LlmCallMode.FAKE,
+        budget=None,
     )
     call = CallContext(
         context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, prompt_version=spec.prompt_version

@@ -6,7 +6,7 @@ import uuid
 import pytest
 
 from hub.domain.draft import DraftAnswer
-from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.domain.kb import Visibility
 from hub.graph.nodes.write import write, write_messages
 from hub.kb.full_text import SEPARATOR, KbSource, render_kb, sources_from_files
@@ -31,6 +31,8 @@ def _fake_gateway(recorder: MemoryRecorder) -> Gateway:
         pricing=fake.pricing,
         provider=FixtureProvider(FIXTURES_DIR),
         recorder=recorder,
+        mode=LlmCallMode.FAKE,
+        budget=None,
     )
 
 

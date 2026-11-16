@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from hub.audit import ChainCheck, verify_chain
 from hub.db.models import AuditLog, LlmCall
 from hub.db.session import Database, connect
-from hub.domain.enums import ActorType, LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import ActorType, LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.llm.config import load_models
 from hub.llm.gateway import FixtureProvider, Gateway
 from hub.llm.pricing import load_pricing
@@ -99,6 +99,7 @@ def _record(**changes: object) -> LlmCallRecord:
         "id": uuid.uuid4(),
         "run_id": RUN_ID,
         "context": LlmCallContext.ONLINE,
+        "mode": LlmCallMode.REAL,
         "node": LlmNode.TRIAGE,
         "model": "anthropic/claude-haiku-5-5",
         "prompt_version": "v1",
@@ -153,6 +154,8 @@ async def test_a_blocked_call_writes_its_row_and_a_chained_audit_record(
         pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
         provider=FixtureProvider(ROOT / "apps" / "api" / "tests" / "fixtures" / "llm"),
         recorder=DbCallRecorder(database),
+        mode=LlmCallMode.FAKE,
+        budget=None,
     )
     run_id = BLOCKED_RUN_ID
     assert "4111" not in str(run_id)  # else the leak check below could fail on the id itself
@@ -193,6 +196,8 @@ async def test_a_call_blocked_for_a_raw_iban_says_so_in_its_row_and_audit_record
         pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
         provider=FixtureProvider(ROOT / "apps" / "api" / "tests" / "fixtures" / "llm"),
         recorder=DbCallRecorder(database),
+        mode=LlmCallMode.FAKE,
+        budget=None,
     )
     assert "37040044" not in str(IBAN_RUN_ID)  # same reason as in the test above
     call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.WRITE, run_id=IBAN_RUN_ID)
@@ -241,6 +246,8 @@ def _structured_gateway(database: Database, *contents: str) -> Gateway:
         pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
         provider=_Answers(list(contents)),
         recorder=DbCallRecorder(database),
+        mode=LlmCallMode.REAL,
+        budget=None,
     )
 
 

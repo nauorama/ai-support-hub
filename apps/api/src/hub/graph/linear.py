@@ -26,6 +26,11 @@ in fake mode, a database error) the run is `failed` and the ticket goes to a hum
 with reason `system_error` (AGENTS.md: on any error or doubt, hand off). Logs and the run row
 name only the error class: an error message can quote customer text.
 
+**Budget stop (G8, P3-06).** The run checks the daily budget once after intake, before the
+first model call, and the gateway checks again before every online call (a run can cross the
+limit half way). A refusal ends the run the same way as an error, but with reason
+`budget_exceeded` (ai-pipeline §6, row 2): no model call, the ticket `handed_off`.
+
 An operator may claim the ticket while the run is going (`processing → handed_off`, reason
 `operator_takeover`). Then the run still finishes, but its draft is stored as `superseded` and
 the ticket is left as the operator has it.
@@ -66,8 +71,10 @@ from hub.graph.nodes import write as write_node
 from hub.graph.nodes.intake import ChatTurn, IntakeResult, intake
 from hub.guardrails.masking import mask
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
+from hub.llm.budget import BudgetCheck
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt
+from hub.llm.schemas import BudgetExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +82,7 @@ GRAPH_VERSION = "linear-v1"
 VARIANT = "b0_full_kb"
 APPROVAL_REASONS = ["auto_reply_off"]
 ERROR_REASONS = ["system_error"]
+BUDGET_REASONS = ["budget_exceeded"]
 
 # Friendly step names of the `run.status` event (api.md §4): no internals.
 STEP_UNDERSTANDING = "understanding"
@@ -95,6 +103,7 @@ class Pipeline:
 
     database: Database
     gateway: Gateway
+    budget: BudgetCheck
     triage_prompt: Prompt
     write_prompt: Prompt
 
@@ -479,9 +488,10 @@ async def _fail(
     run_id: uuid.UUID | None,
     error: str,
     models: dict[str, str],
+    reasons: list[str],
 ) -> TicketStatus | None:
-    """The run is `failed`, the ticket goes to a human (`system_error`) unless it already has
-    one. Returns the ticket status."""
+    """The run is `failed`, the ticket goes to a human (`reasons`: `system_error` or
+    `budget_exceeded`) unless it already has one. Returns the ticket status."""
     async with pipeline.database.sessions.begin() as session:
         if run_id is not None:
             await _finish_run(
@@ -489,7 +499,7 @@ async def _fail(
                 run_id,
                 status=RunStatus.FAILED,
                 route=Route.HANDOFF,
-                reasons=ERROR_REASONS,
+                reasons=reasons,
                 models=models,
                 error=error,
             )
@@ -497,9 +507,9 @@ async def _fail(
         ticket = await repository.lock(await _ticket(session, ticket_id))
         if ticket.status == TicketStatus.PROCESSING:
             ticket.last_route = Route.HANDOFF
-            ticket.route_reasons = ERROR_REASONS
+            ticket.route_reasons = reasons
             await repository.change_status(ticket, TicketStatus.HANDED_OFF)
-            await _audit_route(session, pipeline, ticket_id, run_id, Route.HANDOFF, ERROR_REASONS)
+            await _audit_route(session, pipeline, ticket_id, run_id, Route.HANDOFF, reasons)
         return ticket.status
 
 
@@ -523,6 +533,7 @@ async def run_ticket(
             await emit("ticket.status", {"status": started.value})
             return RunOutcome(run_id=None, ticket_status=started, failed=False)
         run_id, intake_result = started
+        await pipeline.budget.check()
 
         triaged = await triage_node.triage_structured(
             pipeline.gateway, pipeline.triage_prompt, intake_result.message_for_llm, run_id=run_id
@@ -546,9 +557,10 @@ async def run_ticket(
         )
     except Exception as exc:
         error = type(exc).__name__
+        reasons = BUDGET_REASONS if isinstance(exc, BudgetExceededError) else ERROR_REASONS
         logger.warning("run failed", extra={"run_id": str(run_id), "error": error})
         try:
-            failed_status = await _fail(pipeline, ticket_id, run_id, error, models)
+            failed_status = await _fail(pipeline, ticket_id, run_id, error, models, reasons)
         except Exception as second:
             logger.error(
                 "run failure could not be recorded",

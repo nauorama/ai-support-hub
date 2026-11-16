@@ -169,6 +169,7 @@ Own record of every model call. Source of truth for cost.
 | id | uuid PK | |
 | run_id | uuid FK null | null for eval judges, embeddings and background calls. `ON DELETE SET NULL`: deleting an old run never deletes its cost rows (foreign key added in P3-05) |
 | context | text | `online` \| `eval` \| `memory` \| `record` (`make record-llm`) |
+| mode | text | `real` \| `fake` (P3-06): the provider that answered. A fake-mode row (`LLM_MODE=fake`) repeats the usage and cost of the recording it answered from; only `real` rows count against the daily budget (G8). Rows written before migration 0008 were set to `real` |
 | node | text | `triage`, `research`, `write`, `verify`, `handoff_prep`, `memory_summary`, `judge`, `embedding` |
 | model | text | provider model id |
 | prompt_version | text null | `<node>/v<N>`, e.g. `triage/v1` (the prompt file `prompts/<node>/v<N>.md`; `Prompt.version` in `llm/prompts.py`); null for embeddings and calls without a prompt file |

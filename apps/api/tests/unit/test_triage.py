@@ -11,7 +11,7 @@ from typing import get_args
 
 import pytest
 
-from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.domain.triage import Intent, TriageResult
 from hub.graph.nodes.triage import triage, triage_messages
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider, Gateway
@@ -51,6 +51,8 @@ def _fake_gateway(recorder: MemoryRecorder) -> Gateway:
         pricing=fake.pricing,
         provider=FixtureProvider(FIXTURES_DIR),
         recorder=recorder,
+        mode=LlmCallMode.FAKE,
+        budget=None,
     )
 
 

@@ -9,7 +9,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
+from hub.llm.budget import BudgetCheck
 from hub.llm.config import ModelsConfig, load_models
 from hub.llm.gateway import Gateway
 from hub.llm.pricing import Pricing, load_pricing
@@ -98,6 +99,8 @@ def make_gateway(
     sleeps: Sleeps | None = None,
     models: ModelsConfig | None = None,
     clock: Sequence[float] | None = None,
+    mode: LlmCallMode = LlmCallMode.REAL,
+    budget: BudgetCheck | None = None,
 ) -> Gateway:
     ticks = iter(clock) if clock is not None else None
     return Gateway(
@@ -105,6 +108,8 @@ def make_gateway(
         pricing=real_pricing(),
         provider=provider,
         recorder=recorder or MemoryRecorder(),
+        mode=mode,
+        budget=budget,
         sleep=sleeps or Sleeps(),
         clock=(lambda: next(ticks)) if ticks is not None else time.perf_counter,
     )

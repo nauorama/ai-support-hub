@@ -4,6 +4,7 @@ Built once in `create_app` and kept on `app.state.container`. Tests build their 
 """
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from hub.api.limits import RateLimits
 from hub.auth.customer_session import CustomerSessionSigner
@@ -11,6 +12,7 @@ from hub.auth.operator_session import OperatorSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
 from hub.graph.linear import Pipeline, RunTasks
+from hub.llm.budget import BudgetGuard
 from hub.llm.gateway import build_gateway
 from hub.llm.prompts import active_prompt
 from hub.llm.recorder import DbCallRecorder
@@ -48,11 +50,14 @@ class Container:
 
 
 def build_pipeline(settings: Settings, database: Database) -> Pipeline:
-    """Gateway and active prompts, loaded once: a broken config or prompt file stops the start."""
-    gateway = build_gateway(settings, DbCallRecorder(database))
+    """Gateway, budget guard and active prompts, loaded once: a broken config or prompt file
+    stops the start. One guard serves the gateway (every online call) and the run (its start)."""
+    budget = BudgetGuard(database, default_limit=Decimal(str(settings.daily_budget_usd)))
+    gateway = build_gateway(settings, DbCallRecorder(database), budget)
     return Pipeline(
         database=database,
         gateway=gateway,
+        budget=budget,
         triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
         write_prompt=active_prompt(settings.prompts_dir, gateway.models, "write"),
     )
