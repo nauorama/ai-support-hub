@@ -16,8 +16,8 @@ from hub.llm.schemas import OutboundCardDataError, ProviderError
 from ._llm import MODELS_YAML, MemoryRecorder, ScriptedProvider, ok
 
 HAIKU = "anthropic/claude-haiku-5-5"
-LUNA = "openai/gpt-6-luna"
-EMBEDDING = "openai/text-embedding-3-small"
+SONNET = "anthropic/claude-sonnet-5-5"
+EMBEDDING = "fastembed/BAAI/bge-small-en-v1.5"
 RATE_LIMIT = ProviderError("RateLimitError", transient=True, status_code=429)
 
 
@@ -41,7 +41,7 @@ async def test_recording_calls_model_and_fallback_through_the_gateway(tmp_path: 
     inner = ScriptedProvider(
         {
             HAIKU: [RATE_LIMIT, ok("withdrawal_issue")],
-            LUNA: [ok("withdrawal_issue")],
+            SONNET: [ok("withdrawal_issue")],
             EMBEDDING: [vectors],
         }
     )
@@ -63,7 +63,7 @@ async def test_recording_calls_model_and_fallback_through_the_gateway(tmp_path: 
         (EMBEDDING, LlmCallStatus.OK),
         (HAIKU, LlmCallStatus.RETRY),
         (HAIKU, LlmCallStatus.OK),
-        (LUNA, LlmCallStatus.OK),
+        (SONNET, LlmCallStatus.OK),
     ]
     assert {row.context for row in recorder.rows} == {LlmCallContext.RECORD}
     assert [row.node for row in recorder.rows] == [LlmNode.EMBEDDING] + [LlmNode.TRIAGE] * 3

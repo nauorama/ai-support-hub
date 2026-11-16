@@ -10,11 +10,11 @@
 
 ## Verification output
 ```
-<!-- paste: make lint test (and test-int / eval-smoke when relevant) -->
+<!-- paste: make lint test (and test-int when relevant; eval-smoke only when the owner asked for it) -->
 ```
 
 ## Evaluation (only for changes to prompts, models, retrieval, graph, guardrails)
-<!-- Metrics table before / after from make eval-smoke or make eval-report. -->
+<!-- Only when the owner asked for a paid run (ADR-0018): metrics table before / after from make eval-smoke or make eval-report. -->
 
 ## Security checklist (only for guardrails, tools/permissions, auth, policy.yaml, logging)
 - [ ] No card data, secrets or raw ticket text in logs, traces, errors or fixtures

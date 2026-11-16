@@ -35,9 +35,7 @@ from ._llm import CALL, MemoryRecorder, ScriptedProvider, Sleeps, make_gateway, 
 
 HAIKU = "anthropic/claude-haiku-5-5"
 SONNET = "anthropic/claude-sonnet-5-5"
-LUNA = "openai/gpt-6-luna"
-SOL = "openai/gpt-6.1-sol"
-EMBEDDING = "openai/text-embedding-3-small"
+EMBEDDING = "fastembed/BAAI/bge-small-en-v1.5"
 VISA = "4111 1111 1111 1111"  # public test card number
 
 RATE_LIMIT = ProviderError("RateLimitError", transient=True, status_code=429)
@@ -239,7 +237,7 @@ def test_any_valid_luhn_number_in_any_message_is_found(
 
 
 async def test_provider_error_triggers_retries_then_the_fallback() -> None:
-    provider = ScriptedProvider({HAIKU: [RATE_LIMIT, RATE_LIMIT, RATE_LIMIT], LUNA: [ok("ok")]})
+    provider = ScriptedProvider({HAIKU: [RATE_LIMIT, RATE_LIMIT, RATE_LIMIT], SONNET: [ok("ok")]})
     recorder = MemoryRecorder()
     sleeps = Sleeps()
 
@@ -248,19 +246,22 @@ async def test_provider_error_triggers_retries_then_the_fallback() -> None:
     )
 
     assert result.fallback_used
-    assert result.model == LUNA
+    assert result.model == SONNET
     assert result.content == "ok"
-    assert [request.model for request in provider.requests] == [HAIKU] * (RETRIES + 1) + [LUNA]
+    assert [request.model for request in provider.requests] == [HAIKU] * (RETRIES + 1) + [SONNET]
     assert recorder.statuses() == [
         (HAIKU, LlmCallStatus.RETRY),
         (HAIKU, LlmCallStatus.RETRY),
         (HAIKU, LlmCallStatus.ERROR),
-        (LUNA, LlmCallStatus.OK),
+        (SONNET, LlmCallStatus.OK),
     ]
     assert sleeps.waits == [BACKOFF_S, BACKOFF_S * 2]
     assert recorder.rows[0].error == "RateLimitError (429)"
-    # The fallback gets its own parameters (Luna needs reasoning_effort none).
-    assert provider.requests[-1].params == {"reasoning_effort": "none"}
+    # The fallback gets its own parameters (Sonnet cannot turn thinking off).
+    assert provider.requests[-1].params == {
+        "thinking": {"type": "between_tools"},
+        "reasoning_effort": "low",
+    }
 
 
 async def test_a_transient_error_then_success_stays_on_the_model() -> None:
@@ -272,19 +273,19 @@ async def test_a_transient_error_then_success_stays_on_the_model() -> None:
 
 
 async def test_a_permanent_error_goes_to_the_fallback_without_retries() -> None:
-    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], LUNA: [ok()]})
+    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], SONNET: [ok()]})
     recorder = MemoryRecorder()
     sleeps = Sleeps()
     result = await make_gateway(provider, recorder, sleeps).complete(
         "triage", user("hi"), call=CALL
     )
     assert result.fallback_used
-    assert recorder.statuses() == [(HAIKU, LlmCallStatus.ERROR), (LUNA, LlmCallStatus.OK)]
+    assert recorder.statuses() == [(HAIKU, LlmCallStatus.ERROR), (SONNET, LlmCallStatus.OK)]
     assert sleeps.waits == []
 
 
 async def test_when_everything_fails_the_error_is_typed_and_every_attempt_is_recorded() -> None:
-    provider = ScriptedProvider({HAIKU: [RATE_LIMIT] * 3, LUNA: [RATE_LIMIT] * 3})
+    provider = ScriptedProvider({HAIKU: [RATE_LIMIT] * 3, SONNET: [RATE_LIMIT] * 3})
     recorder = MemoryRecorder()
     with pytest.raises(LlmUnavailableError):
         await make_gateway(provider, recorder).complete("triage", user("hi"), call=CALL)
@@ -293,12 +294,12 @@ async def test_when_everything_fails_the_error_is_typed_and_every_attempt_is_rec
 
 
 async def test_a_role_without_fallback_fails_after_its_retries() -> None:
-    provider = ScriptedProvider({SOL: [RATE_LIMIT] * 3})
+    provider = ScriptedProvider({EMBEDDING: [RATE_LIMIT] * 3})
     recorder = MemoryRecorder()
-    call = CallContext(context=LlmCallContext.EVAL, node=LlmNode.JUDGE)
+    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.EMBEDDING)
     with pytest.raises(LlmUnavailableError):
-        await make_gateway(provider, recorder).complete("judge", user("grade"), call=call)
-    assert [model for model, _ in recorder.statuses()] == [SOL] * 3
+        await make_gateway(provider, recorder).embed(["a"], call=call)
+    assert [model for model, _ in recorder.statuses()] == [EMBEDDING] * 3
 
 
 async def test_a_hanging_call_times_out_and_counts_as_transient() -> None:
@@ -327,14 +328,14 @@ async def test_a_missing_fixture_is_raised_not_retried_or_sent_to_the_fallback()
 
 
 async def test_an_unexpected_provider_failure_is_recorded_and_goes_to_the_fallback() -> None:
-    provider = ScriptedProvider({HAIKU: [IndexError("list index out of range")], LUNA: [ok()]})
+    provider = ScriptedProvider({HAIKU: [IndexError("list index out of range")], SONNET: [ok()]})
     recorder = MemoryRecorder()
     sleeps = Sleeps()
     result = await make_gateway(provider, recorder, sleeps).complete(
         "triage", user("hi"), call=CALL
     )
     assert result.fallback_used
-    assert recorder.statuses() == [(HAIKU, LlmCallStatus.ERROR), (LUNA, LlmCallStatus.OK)]
+    assert recorder.statuses() == [(HAIKU, LlmCallStatus.ERROR), (SONNET, LlmCallStatus.OK)]
     assert recorder.rows[0].error == "IndexError"  # the class only, never the message
     assert sleeps.waits == []
 
@@ -405,7 +406,7 @@ async def test_embeddings_are_recorded_and_priced() -> None:
     call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.EMBEDDING)
     result = await make_gateway(provider, recorder).embed(["a", "b"], call=call)
     assert result.vectors == vectors
-    assert result.cost_usd == Decimal("0.001000")  # 50,000 x 0.02 per million
+    assert result.cost_usd == Decimal("0.000000")  # a local model costs nothing (ADR-0018)
     assert recorder.rows[0].prompt_version is None
 
 
@@ -430,7 +431,7 @@ async def test_tools_are_refused_for_a_role_without_tools(role: str) -> None:
 
 
 async def test_the_research_role_passes_tools_to_model_and_fallback() -> None:
-    provider = ScriptedProvider({SONNET: [BAD_REQUEST], LUNA: [ok()]})
+    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], SONNET: [ok()]})
     await make_gateway(provider).complete("research", user("hi"), tools=[TOOL], call=CALL)
     assert [request.tools for request in provider.requests] == [[TOOL], [TOOL]]
 
@@ -462,13 +463,15 @@ async def test_unknown_role_and_wrong_kind_are_config_errors() -> None:
 
 
 def test_config_refuses_tools_on_a_model_that_cannot_call_them() -> None:
-    # The owner's rule for P3-01: a role mapped to GPT-6.1 Sol must never be given tools.
+    # The owner's rule for P3-01: a role that may get tools never maps to a model (or
+    # fallback) that cannot call them.
+    no_tools = "anthropic/no-tools-model"
     data = {
-        "models": {SOL: {"tools": False}, SONNET: {"tools": True}},
+        "models": {no_tools: {"tools": False}, SONNET: {"tools": True}},
         "roles": {
             "write": {
                 "model": SONNET,
-                "fallback": {"model": SOL},
+                "fallback": {"model": no_tools},
                 "max_tokens": 900,
                 "timeout_s": 60,
                 "tools": True,
@@ -476,5 +479,5 @@ def test_config_refuses_tools_on_a_model_that_cannot_call_them() -> None:
         },
         "prompts": {},
     }
-    with pytest.raises(ConfigError, match=r"may receive tools, but openai/gpt-6.1-sol"):
+    with pytest.raises(ConfigError, match=r"may receive tools, but anthropic/no-tools-model"):
         parse_models(data)

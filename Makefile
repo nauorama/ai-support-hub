@@ -10,7 +10,7 @@ SHELL := /bin/bash
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
 	record-llm
 NOT_IMPLEMENTED := test-e2e \
-	eval eval-smoke eval-attacks eval-report eval-judges web-types retention \
+	eval eval-smoke eval-attacks eval-report web-types retention \
 	leak-scan export-review-candidates rollback
 
 .PHONY: help $(BUILT) $(NOT_IMPLEMENTED)
@@ -90,7 +90,7 @@ test-int:
 	uv run pytest apps/api/tests/integration
 
 # Real model calls through the gateway (G2 scan, retries, llm_calls rows with context `record`):
-# needs ANTHROPIC_API_KEY and OPENAI_API_KEY in .env and the database (`make dev`); costs money.
+# needs ANTHROPIC_API_KEY in .env and the database (`make dev`); costs money.
 # Rewrites the recorded responses that fake mode (LLM_MODE=fake) serves to the tests.
 record-llm:
 	uv run python -m hub.llm.record

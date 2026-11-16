@@ -114,22 +114,24 @@ Priority: **M** must, **S** should, **C** could, **W** won't (this version).
 
 Every number has a reason. "Target" is the goal for the MVP. "Red line" means: below this, auto-reply stays off.
 
+**Budget mode ([ADR-0018](adr/0018-budget-mode.md)).** NFR-4, NFR-5 and NFR-7 are measured on a small evaluation set (about 20 tickets, 16 attacks) and counted in tickets, not percentages. **These numbers are a demo check, not a proof.** Passing them shows that the demo works and that nothing broke badly. It does not show that the real error rate meets the target: 0 errors in 20 tickets still allows up to 16% (95% interval). The percentages in the "Reason" column say what a real rollout would have to prove (section 12).
+
 | ID | Requirement | Target | Red line | Reason |
 |---|---|---|---|---|
 | NFR-1 | Time to answer, auto-reply, end to end | p50 ≤ 8 s, p95 ≤ 20 s | p95 ≤ 30 s | The pipeline has 4–6 model calls, and the answer is checked before the customer sees it, so it cannot be streamed word by word. Progress events are shown from second 1. Today's median is 3 h 40 min. |
 | NFR-2 | Time to first visible reaction (progress event) | ≤ 1 s | ≤ 2 s | The customer must see at once that the message arrived. |
 | NFR-3 | Model cost per ticket (average over all tickets) | ≤ €0.05 | ≤ €0.10 | A human ticket costs €4.50 (assumption). Even at 40% automation the AI must cost under about 3% of the saving. |
-| NFR-4 | Wrong answer sent automatically (on the test set) | ≤ 3% | ≤ 5% | Payments domain: a wrong answer is worse than a slow one. 3% is the level a trained human team reaches on routine answers (assumption). |
-| NFR-5 | Must-escalate tickets that are escalated (recall) | ≥ 98% | ≥ 95% | Missing a fraud or restriction case is the worst error of the system. |
+| NFR-4 | Wrong answer sent automatically (demo check on the ~20 evaluation tickets) | 0 | 0 (any wrong auto-reply keeps auto-reply off) | A real rollout would need ≤ 3% (red line 5%) shown on at least 300 reviewed answers. Payments domain: a wrong answer is worse than a slow one. 3% is the level a trained human team reaches on routine answers (assumption). |
+| NFR-5 | Must-escalate tickets that are escalated (recall; demo check on the ~20 evaluation tickets) | all | 1 miss; hard-handoff tickets: none missed | Missing a fraud or restriction case is the worst error of the system. |
 | NFR-6 | Card numbers that reach a model, a log or the database | 0 | 0 | Card-data rule (PCI DSS idea): do not store or send the PAN. |
-| NFR-7 | Successful prompt-injection attacks in the attack suite | ≤ 2% | ≤ 5% | Public chat input is untrusted; the AI has tools. |
+| NFR-7 | Successful prompt-injection attacks in the attack suite (16 attacks, 2 per category) | 0 | 1 of 16 | Public chat input is untrusted; the AI has tools. |
 | NFR-8 | Internal content shown to a customer | 0 | 0 | Internal procedures and compliance reasons must not leak. |
 | NFR-9 | Capacity | 2,000 tickets/day, 10 runs at the same time | — | Peak day from the world file; about 300 tickets in the peak hour. |
-| NFR-10 | Availability of the chat API | 99.5% (design goal; the free-tier demo is best effort) | — | If the model provider fails, tickets go to operators — support never stops. |
+| NFR-10 | Availability of the chat API | 99.5% (design goal; the free-tier demo is best effort) | — | If the model provider fails, tickets go to operators — support never stops. There is one provider (ADR-0018): the fallback model does not help when Anthropic itself is down, so then every ticket goes to an operator. |
 | NFR-11 | A paused run survives a restart | 100% of paused runs can be resumed | 100% | Operators may answer hours later. |
 | NFR-12 | Audit: every operator action and AI route decision has a record | 100% | 100% | Complaint investigation. |
 | NFR-13 | Data retention | tickets 24 months; traces 30 days; audit log 5 years (all configurable) | — | GDPR storage limitation; payment record-keeping practice. |
-| NFR-14 | Daily model budget cap with safe fallback | configurable, default $3/day in the demo | — | Public demo with private API keys; when the cap is reached, all tickets go to handoff. |
+| NFR-14 | Daily model budget cap with safe fallback | configurable, default $0.50/day in the demo | — | Public demo with private API keys; when the cap is reached, all tickets go to handoff. |
 | NFR-15 | Test coverage of deterministic safety code (masking, policy rules, output checks, auth) | ≥ 95% lines | 90% | This code is the last line of defence and is cheap to test. |
 
 ## 8. Regulatory constraints
@@ -151,7 +153,7 @@ Every number has a reason. "Target" is the goal for the MVP. "Red line" means: b
 - Cost per ticket: AI cost (measured) against €4.50 for a human (assumption).
 - Operator edit rate: share of drafts approved without changes — target ≥ 60%.
 
-**Quality (measured offline, see [eval plan](eval-plan.md))** — classification accuracy, retrieval hit rate, key-fact coverage, faithfulness, escalation recall and precision, attack success rate.
+**Quality (measured offline on a small set, see [eval plan](eval-plan.md); a demo check, not a proof)** — classification accuracy, retrieval hit rate, key-fact coverage, faithfulness (both judged by the same model family, unvalidated), escalation recall and precision, attack success rate.
 
 **Business case (all inputs are assumptions from [the world file](tallybridge-world.md))**
 
@@ -176,9 +178,10 @@ The MVP is everything marked **M** above: one channel (chat), English, 12 intent
 | The model invents facts | Answers only from sources; citation check; groundedness check; no source → handoff. |
 | Customers cannot reach a human | "Talk to a human" always visible; request → immediate handoff. |
 | Prompt injection through the chat | Input is untrusted data; read-only tools bound to the session customer; fixed policy rules outside the model. |
-| Synthetic data hides real problems | Stated openly in the README; hard cases are at least 25% of the data; every label is checked by a human. |
+| Synthetic data hides real problems | Stated openly in the README; at least 6 of the ~20 tickets are hard cases; labels are checked by the reviewer subagent (no human gate since ADR-0018). |
 | Public demo burns the API budget | Access code, rate limit, daily budget cap. |
-| The test set is too small to prove a 3% error rate (about 30 auto-replied tickets in 90) | Results are reported with confidence intervals. Offline numbers only allow the next rollout step (section 12); they do not replace it. |
+| The evaluation set is far too small to prove a 3% error rate (about 20 tickets, a handful auto-replied, no test set; ADR-0018) | Results are reported as counts with confidence intervals and called a demo check, not a proof. The same model family judges the answers. Offline numbers only allow the next rollout step (section 12); they do not replace it. |
+| The project budget runs out (about $5 of model calls in total) | One cheap model for every role, local embeddings, cached evaluation runs, paid runs only when the owner asks, a daily budget cap and a spending limit in the provider console (ADR-0018). |
 
 ## 12. Rollout plan
 
@@ -186,7 +189,7 @@ How a real company would put this system into operation. The demo supports every
 
 | Step | Setting | Exit condition |
 |---|---|---|
-| 1. Shadow | Auto-reply off. Every ticket goes to an operator; drafts are created but the operator sees them only after sending the own answer (in the demo: all drafts go to approval). | Offline red lines pass on the test set. |
+| 1. Shadow | Auto-reply off. Every ticket goes to an operator; drafts are created but the operator sees them only after sending the own answer (in the demo: all drafts go to approval). | Offline red lines pass in the milestone run (in this project a demo check on about 20 tickets; a real company would first build a larger held-out test set). |
 | 2. Copilot | Auto-reply off. Operators approve, edit or reject drafts. | Share of drafts approved unchanged ≥ 60% for two weeks; no red-line breach in the weekly evaluation. |
 | 3. Limited automation | Auto-reply on for two low-risk intents (`fees_fx`, `limits`) through the allow-list, high threshold. A human reviews a random sample of auto-replies every week. | Wrong answers in the sample ≤ 3% with at least 300 reviewed answers. |
 | 4. Wider automation | More intents are added one by one; the threshold is lowered along the risk–coverage curve. | Same check for every new intent. |

@@ -239,7 +239,9 @@ Jira issues:
 - **Dispute tickets** go through research and writing (route: approval). The writer explains the dispute process and adds a `ProposedAction` of type `dispute` with the transaction from the account facts. The operator checks the draft, ticks the action and sends.
 - **Fraud handoffs** skip research, so there is no draft. The console pre-fills the action form (type `fraud`, summary = triage summary, customer reference); the operator sends it with `POST /console/tickets/{id}/actions`. No model output is needed for this.
 
-**Confidence** ([ADR-0009](adr/0009-confidence-and-routing.md)). `confidence = sigmoid(w · features + b)`, weights in `config/confidence.json`, trained offline on the dev set with logistic regression (label: the answer was correct in the evaluation). Features:
+**Confidence** ([ADR-0009](adr/0009-confidence-and-routing.md), layer 2 replaced by [ADR-0018](adr/0018-budget-mode.md)). **In budget mode no model is trained:** about 20 evaluation tickets cannot train or calibrate one. The rule version described at the end of this section is the confidence for the whole project, auto-reply is off by default, and the owner decides whether it goes on in the demo (H7). The rest of this section describes the design that a larger dataset would allow, kept for reference.
+
+The trained design: `confidence = sigmoid(w · features + b)`, weights in `config/confidence.json`, trained offline on the dev set with logistic regression (label: the answer was correct in the evaluation). Features:
 
 | Feature | Source |
 |---|---|
@@ -258,7 +260,7 @@ Training rules (small data: about 210 dev tickets, of which only the ones that r
 - If the trained model is not better than the rule version below in cross-validation, the rule version stays. This is a valid result and is written in the experiments file.
 - Retrain after every change of prompts, models or retrieval.
 
-Until phase 9 there is no trained model: `confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above a fixed value, else 0) and the default threshold is 0.95, with auto-reply **off** by default.
+Rule version (used in budget mode, and in the trained design until phase 9): `confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above a fixed value, else 0) and the default threshold is 0.95, with auto-reply **off** by default.
 
 ## 7. Prompts
 
@@ -287,18 +289,20 @@ Contract of each prompt:
 
 | Role | Model | Fallback | max_tokens | Notes |
 |---|---|---|---|---|
-| `triage` | `anthropic/claude-haiku-5-5` | `openai/gpt-6-luna` | 400 | Haiku: thinking off. Luna: `reasoning_effort: none` |
-| `research` | `anthropic/claude-sonnet-5-5` | `openai/gpt-6-luna` | 800 | the only role that gets tools; Luna calls tools in Chat Completions only at effort `none` |
-| `write` | `anthropic/claude-sonnet-5-5` | `openai/gpt-6.1-sol` | 900 | Sonnet: thinking `between_tools`, effort `low`. Sol: effort `low`, never tools |
-| `verify` | `anthropic/claude-haiku-5-5` | `openai/gpt-6-luna` | 700 | as triage |
-| `judge` | `openai/gpt-6.1-sol` | none | 800 | another provider than the writer, so no fallback |
-| `embedding` | `openai/text-embedding-3-small` | none | — | no fallback: vectors of another model cannot be mixed with the index |
+| `triage` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 400 | Haiku: thinking off. Sonnet: thinking `between_tools`, effort `low` |
+| `research` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 800 | the only role that gets tools |
+| `write` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 900 | as triage |
+| `verify` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 700 | as triage |
+| `judge` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 800 | the same model family as the writer: self-preference is likely, so judge numbers are unvalidated ([eval plan](eval-plan.md) §5) |
+| `embedding` | `fastembed/BAAI/bge-small-en-v1.5` | none | — | local model, 384 dimensions, cost 0; no fallback: vectors of another model cannot be mixed with the index. The local backend lands in P5-01 |
+
+Budget mode ([ADR-0018](adr/0018-budget-mode.md)): one provider, Anthropic, and one small model for every role. The fallback helps when Haiku fails or is overloaded, not when Anthropic itself is down; then the ticket goes to a human (`system_error`).
 
 Prompts: `triage`, `research`, `write`, `verify`, `handoff_summary`, `memory_summary` — all `v1`.
 
 Checked against the provider documentation on 2026-11-14 (sources in the file). Rules that shaped the table:
 - Claude Haiku 5.5 and Sonnet 5.5 reject `temperature`, so no role sends it (the earlier plan had 0 and 0.2). Thinking counts toward `max_tokens` and is billed as output: Haiku runs with thinking off; Sonnet 5.5 cannot turn thinking off and runs `between_tools` with effort `low`.
-- GPT-6.1 Sol has no tool calling in Chat Completions (which LiteLLM uses). The loader refuses a configuration that could give tools to a model that cannot take them.
+- The loader refuses a configuration that could give tools to a model that cannot take them (`tools: false` in `models`, for example the embedding model).
 - Role parameters are limited to `thinking` and `reasoning_effort`; connection parameters (`api_base`, keys) never come from the file.
 
 Every role has a timeout (`timeout_s`); the gateway makes 2 retries with backoff (0.5 s, 1 s) on transient errors (timeout, rate limit, connection, 5xx), then tries the fallback the same way. Prices go to `config/pricing.yaml` from the official pricing pages, with the date; a model without a price stops the app at start.
@@ -312,12 +316,12 @@ Every role has a timeout (`timeout_s`); the gateway makes 2 retries with backoff
 
 ## 10. Baselines kept in the code
 
-For the experiments in the [eval plan](eval-plan.md), the workflow accepts a `variant` in the run config:
+For evaluation runs, the workflow accepts a `variant` in the run config. ADR-0018 removed the experiments that compared them, so only a few are built:
 
 | Variant | Meaning |
 |---|---|
 | `b0_full_kb` | No retrieval: all external articles in the prompt (with prompt caching). |
-| `rag_dense`, `rag_hybrid`, `rag_hybrid_rerank` | Retrieval settings. |
+| `rag_dense`, `rag_hybrid` | Retrieval settings (no reranker variant, ADR-0018). |
 | `no_tools` | Research = the first search only. |
 | `no_retry` | The verify → research loop is off. |
 

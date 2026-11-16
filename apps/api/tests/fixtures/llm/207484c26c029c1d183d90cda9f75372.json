@@ -1,7 +1,7 @@
 {
   "request": {
     "kind": "chat",
-    "model": "openai/gpt-6-luna",
+    "model": "anthropic/claude-sonnet-5-5",
     "messages": [
       {
         "role": "system",
@@ -15,7 +15,10 @@
     "texts": [],
     "max_tokens": 400,
     "params": {
-      "reasoning_effort": "none"
+      "thinking": {
+        "type": "between_tools"
+      },
+      "reasoning_effort": "low"
     },
     "schema_name": null,
     "json_schema": null,

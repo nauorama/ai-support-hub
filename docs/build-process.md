@@ -18,7 +18,7 @@ For the owner. The [build plan](build-plan.md) says **what** is built and in whi
 | Copy the content of this `repo/` folder into it, `git init`, first commit, push to a new **private** GitHub repository. Make it public in phase 12. | Human gate H1. |
 | Protect `main`: changes only through pull requests, CI must be green. Branch protection is not available for a private repository on the free GitHub plan, so until the repository becomes public in phase 12 this holds by process: only the owner merges, after CI is green. See the README, "CI and branch protection". | The agent cannot push broken code to `main`. |
 | API keys go only into the local `.env` file and into GitHub repository secrets. Never paste a key into a chat with an agent. | Keys in a chat end up in transcripts. |
-| Set a monthly spending limit in the Anthropic and OpenAI consoles (for example $30). | The build makes real model calls from phase 3. |
+| Set a spending limit of $5 in the Anthropic console. Anthropic is the only provider ([ADR-0018](adr/0018-budget-mode.md)). | The build makes real model calls from phase 3; the whole project has a budget of about $5. |
 | Permissions of the coding agent: allow `make`, `uv`, `pnpm`, `git`, `gh`, `docker compose`; deny reading `.env`; do not use the mode that skips all permission prompts. | The agent can work without asking for every command, but cannot read secrets or do something unexpected. |
 
 ## 3. Roles
@@ -62,7 +62,7 @@ flowchart LR
 - Size S and M tasks fit in one session. For an L task ask the builder to split it into two or three pull requests in its plan.
 - If the reviewer says "changes needed", give its report to the builder unchanged. Maximum two rounds; if the third round is needed, stop and look at the problem yourself — usually the task or a document is unclear.
 - If the builder says a requirement cannot be met or two documents disagree, it must stop. Decide, fix the document first, then continue.
-- Content tasks (P2-05, P2-08, P4-02, P8-01, P11-01): the prompt is "Use the content-author subagent for task P2-08". After the owner's check the builder only wires the data in.
+- Content tasks (P2-05, P2-08, P4-02, P8-01): the prompt is "Use the content-author subagent for task P2-08". After the owner's check the builder only wires the data in.
 - After each `make eval`: "Use the eval-analyst subagent for run <id>". Then the owner chooses the next experiment.
 
 ## 5. What the owner looks at
@@ -80,7 +80,7 @@ flowchart LR
 3. Write three lines into the dev log: what was built, what surprised you, what you do not understand yet.
 4. Only then tell the builder to start the next phase.
 
-**Human gates** cannot be given to an agent. The biggest ones: checking every evaluation ticket (H4, plan several evenings), labelling 60 answers for the judge (H5), choosing the confidence threshold (H7).
+**Human gates** cannot be given to an agent. The biggest ones: reviewing the attack set (H6) and deciding whether auto-reply goes on in the demo (H7). H4 and H5 (checking every evaluation ticket, labelling answers for the judge) were removed by ADR-0018.
 
 ## 6. Working in parallel
 
@@ -98,7 +98,7 @@ Do not start an agent team that builds a whole phase without stops. The phase ga
 | Cost | Where it comes from | Control |
 |---|---|---|
 | Coding agent | Your subscription or API use | One task per session; fresh sessions; subagents only for the three roles above. |
-| Model calls of the project | Tests use the fake mode and cost nothing. Paid: `make eval*`, `make record-llm`, manual runs with real keys, the demo. | `EVAL_MAX_COST_USD`, the daily budget guard, the provider spending limit. Only the owner starts a full evaluation. |
+| Model calls of the project | Tests use the fake mode and cost nothing. Paid: `make eval*`, `make record-llm`, manual runs with real keys, the demo. | About $5 for the whole project (ADR-0018). `EVAL_MAX_COST_USD` ($1 per run), the daily budget guard ($0.50), the $5 spending limit in the Anthropic console, the evaluation disk cache (on by default). Paid runs (`make eval`, `make eval-smoke`) only when the owner asks; never in CI. |
 | Cloud | Phase 10 | Free plans; budget alert in Google Cloud. |
 
 ## 8. When something goes wrong
@@ -110,4 +110,4 @@ Do not start an agent team that builds a whole phase without stops. The phase ga
 | The same bug comes back, or the session goes in circles | Stop the session. Start a new one with a short description of the bug and what was already tried. |
 | A pull request is much bigger than the task | Do not merge. Ask for a split. |
 | The code and a document disagree after a merge | Decide which is right. A changed decision needs a new ADR. Stale documents make every later session worse. |
-| An evaluation number looks too good | Check for test-set leakage and for a judge that agrees with everything. Ask the eval analyst for 10 "passed" tickets to read. |
+| An evaluation number looks too good | The ~20 tickets are also the tuning set and the judge is the same model family as the writer (ADR-0018), so expect it to look too good. Ask the eval analyst for 5 "passed" tickets to read. |

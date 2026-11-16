@@ -70,7 +70,7 @@ Search field, results with an `internal` / `external` badge, article view.
 
 **Dashboard.** Period picker. Cards: tickets, automation share, median time to answer, cost per ticket, budget used today. Charts: routes per day (stacked), route reasons (bars), draft outcomes (approved unchanged / edited / rejected), latency p50/p95 per day, cost by node, feedback. A box "Last evaluation": date, variant, each metric with target, red line and pass/fail. A simple accessible chart library (for example Recharts) is fine.
 
-**Settings.** Auto-reply switch (with a confirmation dialog that shows the last evaluation result), confidence threshold slider with the risk–coverage curve from the last evaluation next to it, daily budget, intent allow-list. Every change asks for a short reason, which goes to the audit log.
+**Settings.** Auto-reply switch (with a confirmation dialog that shows the last evaluation result), confidence threshold slider with the counts from the last evaluation next to it (tickets that would be auto-replied at this threshold, and how many of those were wrong; no risk–coverage curve, because there is no trained model, ADR-0018), daily budget, intent allow-list. Every change asks for a short reason, which goes to the audit log.
 
 ## 5. Audit page
 Table with filters (entity, actor, action, time), a detail drawer with the JSON, and a "Verify chain" button that shows OK or the first broken record.

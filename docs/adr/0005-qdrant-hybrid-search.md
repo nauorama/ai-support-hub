@@ -1,6 +1,6 @@
 # ADR-0005: Qdrant with hybrid search (dense + BM25, RRF)
 
-- Status: accepted
+- Status: Superseded in part by ADR-0018 (reranker experiment E3)
 - Date: 2026-11-12
 
 ## Context

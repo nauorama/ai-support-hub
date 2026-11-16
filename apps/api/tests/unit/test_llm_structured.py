@@ -31,7 +31,7 @@ from hub.llm.structured import (
 from ._llm import CALL, MemoryRecorder, ScriptedProvider, make_gateway, ok, real_pricing
 
 HAIKU = "anthropic/claude-haiku-5-5"
-LUNA = "openai/gpt-6-luna"
+SONNET = "anthropic/claude-sonnet-5-5"
 VISA = "4111 1111 1111 1111"  # public test card number
 BAD_REQUEST = ProviderError("BadRequestError", transient=False, status_code=400)
 RATE_LIMIT = ProviderError("RateLimitError", transient=True, status_code=429)
@@ -316,7 +316,7 @@ async def test_two_invalid_answers_are_a_typed_error() -> None:
 
 
 async def test_an_invalid_answer_is_not_retried_or_sent_to_the_fallback() -> None:
-    # Only the repair call follows; Luna has no script, so any call to it would fail the test.
+    # Only the repair call follows; Sonnet has no script, so any call to it would fail the test.
     provider = ScriptedProvider({HAIKU: [ProviderResponse(content=None), ok(VALID)]})
     result = await make_gateway(provider).complete_structured(
         "triage", messages(), Triage, call=CALL
@@ -327,47 +327,50 @@ async def test_an_invalid_answer_is_not_retried_or_sent_to_the_fallback() -> Non
 
 
 async def test_the_repair_goes_to_the_fallback_when_the_fallback_answered() -> None:
-    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], LUNA: [ok(MISSING_FIELD), ok(VALID)]})
+    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], SONNET: [ok(MISSING_FIELD), ok(VALID)]})
     recorder = MemoryRecorder()
     result = await make_gateway(provider, recorder).complete_structured(
         "triage", messages(), Triage, call=CALL
     )
-    assert (result.model, result.fallback_used, result.repaired) == (LUNA, True, True)
+    assert (result.model, result.fallback_used, result.repaired) == (SONNET, True, True)
     assert recorder.statuses() == [
         (HAIKU, LlmCallStatus.ERROR),
-        (LUNA, LlmCallStatus.INVALID_OUTPUT),
-        (LUNA, LlmCallStatus.OK),
+        (SONNET, LlmCallStatus.INVALID_OUTPUT),
+        (SONNET, LlmCallStatus.OK),
     ]
-    assert [request.model for request in provider.requests] == [HAIKU, LUNA, LUNA]
-    assert provider.requests[2].params == {"reasoning_effort": "none"}
+    assert [request.model for request in provider.requests] == [HAIKU, SONNET, SONNET]
+    assert provider.requests[2].params == {
+        "thinking": {"type": "between_tools"},
+        "reasoning_effort": "low",
+    }
 
 
 async def test_a_failing_repair_call_gets_retries_then_the_fallback() -> None:
     provider = ScriptedProvider(
-        {HAIKU: [ok(WRONG_ENUM), RATE_LIMIT, RATE_LIMIT, RATE_LIMIT], LUNA: [ok(VALID)]}
+        {HAIKU: [ok(WRONG_ENUM), RATE_LIMIT, RATE_LIMIT, RATE_LIMIT], SONNET: [ok(VALID)]}
     )
     recorder = MemoryRecorder()
     result = await make_gateway(provider, recorder).complete_structured(
         "triage", messages(), Triage, call=CALL
     )
-    assert (result.model, result.fallback_used, result.repaired) == (LUNA, True, True)
+    assert (result.model, result.fallback_used, result.repaired) == (SONNET, True, True)
     assert recorder.statuses() == [
         (HAIKU, LlmCallStatus.INVALID_OUTPUT),
         (HAIKU, LlmCallStatus.RETRY),
         (HAIKU, LlmCallStatus.RETRY),
         (HAIKU, LlmCallStatus.ERROR),
-        (LUNA, LlmCallStatus.OK),
+        (SONNET, LlmCallStatus.OK),
     ]
     # The fallback gets the repair conversation, not the original one.
     assert provider.requests[-1].messages[-2] == {"role": "assistant", "content": WRONG_ENUM}
 
 
 async def test_a_repair_with_no_model_left_is_unavailable() -> None:
-    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], LUNA: [ok(WRONG_ENUM), BAD_REQUEST]})
+    provider = ScriptedProvider({HAIKU: [BAD_REQUEST], SONNET: [ok(WRONG_ENUM), BAD_REQUEST]})
     with pytest.raises(LlmUnavailableError):
         await make_gateway(provider).complete_structured("triage", messages(), Triage, call=CALL)
-    # The repair went to Luna, which wrote the invalid answer, and never back to Haiku.
-    assert [request.model for request in provider.requests] == [HAIKU, LUNA, LUNA]
+    # The repair went to Sonnet, which wrote the invalid answer, and never back to Haiku.
+    assert [request.model for request in provider.requests] == [HAIKU, SONNET, SONNET]
 
 
 async def test_card_data_in_the_invalid_answer_blocks_the_repair() -> None:
@@ -430,7 +433,7 @@ async def test_the_outcome_names_the_model_by_its_place_in_the_role(
 ) -> None:
     # The repair of a fallback answer is sent as a one-request list that starts at the fallback;
     # `first_index` keeps the outcome saying "fallback".
-    provider = ScriptedProvider({LUNA: [ok(VALID)]})
+    provider = ScriptedProvider({SONNET: [ok(VALID)]})
     gateway = make_gateway(provider)
     requests = gateway.chat_requests("triage", messages(), Triage)[1:]
     outcome = await gateway._run(requests, CALL, provider.complete, first_index=first_index)

@@ -1,6 +1,6 @@
 # ADR-0003: LiteLLM as the gateway to several model providers
 
-- Status: accepted
+- Status: Superseded in part by ADR-0018 (several providers, cross-provider judge and fallback)
 - Date: 2026-11-12
 
 ## Context
