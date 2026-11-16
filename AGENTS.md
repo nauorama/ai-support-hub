@@ -36,7 +36,7 @@ make test-int     # integration tests (testcontainers, fake models)
 make test-e2e     # Playwright (fake models)
 make data-check   # validate data/
 make eval-smoke   # small real-model evaluation (costs money; by hand, only when the owner asks)
-make eval         # the ~20 dev tickets with judges (costs money)
+make eval         # the 20 dev tickets with judges (costs money)
 ```
 
 Run `make lint test` before you say a task is done. Run `make test-int` when you touched the database, Qdrant, the graph, tools or the API.

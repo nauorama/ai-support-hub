@@ -239,7 +239,7 @@ Jira issues:
 - **Dispute tickets** go through research and writing (route: approval). The writer explains the dispute process and adds a `ProposedAction` of type `dispute` with the transaction from the account facts. The operator checks the draft, ticks the action and sends.
 - **Fraud handoffs** skip research, so there is no draft. The console pre-fills the action form (type `fraud`, summary = triage summary, customer reference); the operator sends it with `POST /console/tickets/{id}/actions`. No model output is needed for this.
 
-**Confidence** ([ADR-0009](adr/0009-confidence-and-routing.md), layer 2 replaced by [ADR-0018](adr/0018-budget-mode.md)). **In budget mode no model is trained:** about 20 evaluation tickets cannot train or calibrate one. The rule version described at the end of this section is the confidence for the whole project, auto-reply is off by default, and the owner decides whether it goes on in the demo (H7). The rest of this section describes the design that a larger dataset would allow, kept for reference.
+**Confidence** ([ADR-0009](adr/0009-confidence-and-routing.md), layer 2 replaced by [ADR-0018](adr/0018-budget-mode.md)). **In budget mode no model is trained:** 20 evaluation tickets cannot train or calibrate one. The rule version described at the end of this section is the confidence for the whole project, auto-reply is off by default, and the owner decides whether it goes on in the demo (H7). The rest of this section describes the design that a larger dataset would allow, kept for reference.
 
 The trained design: `confidence = sigmoid(w · features + b)`, weights in `config/confidence.json`, trained offline on the dev set with logistic regression (label: the answer was correct in the evaluation). Features:
 
@@ -254,7 +254,7 @@ The trained design: `confidence = sigmoid(w · features + b)`, weights in `confi
 | `ticket_length_tokens`, `answer_length_tokens` | text |
 | `intent_<name>` | one-hot |
 
-Training rules (small data: about 210 dev tickets, of which only the ones that reach `write` have a label):
+Training rules (kept for reference; they assumed the earlier 210-ticket dev set, of which only the tickets that reach `write` have a label):
 - L2-regularised logistic regression; at most 6–8 features, chosen by 5-fold cross-validation. The one-hot intent features are used only if they help in cross-validation.
 - The risk–coverage curve and the threshold use **cross-validated** scores, not scores on the training rows.
 - If the trained model is not better than the rule version below in cross-validation, the rule version stays. This is a valid result and is written in the experiments file.
@@ -316,13 +316,11 @@ Every role has a timeout (`timeout_s`); the gateway makes 2 retries with backoff
 
 ## 10. Baselines kept in the code
 
-For evaluation runs, the workflow accepts a `variant` in the run config. ADR-0018 removed the experiments that compared them, so only a few are built:
+For evaluation runs, the workflow accepts a `variant` in the run config. ADR-0018 removed the experiments that compared variants, so only these are built:
 
 | Variant | Meaning |
 |---|---|
 | `b0_full_kb` | No retrieval: all external articles in the prompt (with prompt caching). |
 | `rag_dense`, `rag_hybrid` | Retrieval settings (no reranker variant, ADR-0018). |
-| `no_tools` | Research = the first search only. |
-| `no_retry` | The verify → research loop is off. |
 
 Variants are for evaluation only; production uses the default.

@@ -29,7 +29,7 @@ For the owner. The [build plan](build-plan.md) says **what** is built and in whi
 | **Builder** | Main session of the coding agent. Its rules are `AGENTS.md`. | Takes one task from the build plan, writes tests and code, opens a pull request, fixes review findings. Writes the phase walkthrough locally (`docs/walkthrough/`, git-ignored, no pull request). | Merge. Start the next task or phase on its own. Review itself. |
 | **Reviewer** | Subagent [`reviewer`](../.claude/agents/reviewer.md), read-only | Checks the pull request against the task, the documents and the never-do rules. Runs the checks again. Gives a verdict. | Edit files. |
 | **Content author** | Subagent [`content-author`](../.claude/agents/content-author.md) | Writes knowledge-base articles, seed data, draft evaluation tickets and attack cases from the world file. | Write application code. Invent facts. |
-| **Eval analyst** | Subagent [`eval-analyst`](../.claude/agents/eval-analyst.md), read-only | Reads evaluation results, sorts failures into categories, proposes the next experiment. | Change prompts, code or data. Run paid evaluations. |
+| **Eval analyst** | Subagent [`eval-analyst`](../.claude/agents/eval-analyst.md), read-only | Reads evaluation results, sorts failures into categories, proposes the next fix. | Change prompts, code or data. Run paid evaluations. |
 
 Why these and not more:
 - **Reviewer** — the builder's context is full of its own reasoning, so it sees what it meant, not what it wrote. A fresh context finds different errors. This is the most useful role after the builder.
@@ -63,7 +63,7 @@ flowchart LR
 - If the reviewer says "changes needed", give its report to the builder unchanged. Maximum two rounds; if the third round is needed, stop and look at the problem yourself — usually the task or a document is unclear.
 - If the builder says a requirement cannot be met or two documents disagree, it must stop. Decide, fix the document first, then continue.
 - Content tasks (P2-05, P2-08, P4-02, P8-01): the prompt is "Use the content-author subagent for task P2-08". After the owner's check the builder only wires the data in.
-- After each `make eval`: "Use the eval-analyst subagent for run <id>". Then the owner chooses the next experiment.
+- After each `make eval`: "Use the eval-analyst subagent for run <id>". Then the owner chooses the next fix.
 
 ## 5. What the owner looks at
 
@@ -110,4 +110,4 @@ Do not start an agent team that builds a whole phase without stops. The phase ga
 | The same bug comes back, or the session goes in circles | Stop the session. Start a new one with a short description of the bug and what was already tried. |
 | A pull request is much bigger than the task | Do not merge. Ask for a split. |
 | The code and a document disagree after a merge | Decide which is right. A changed decision needs a new ADR. Stale documents make every later session worse. |
-| An evaluation number looks too good | The ~20 tickets are also the tuning set and the judge is the same model family as the writer (ADR-0018), so expect it to look too good. Ask the eval analyst for 5 "passed" tickets to read. |
+| An evaluation number looks too good | The 20 tickets are also the tuning set and the judge is the same model family as the writer (ADR-0018), so expect it to look too good. Ask the eval analyst for 5 "passed" tickets to read. |

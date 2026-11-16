@@ -10,7 +10,7 @@ AI customer support for **Tallybridge**, a payments platform for freelancers and
 
 1. A customer writes in the chat. Card numbers are masked before anything is stored.
 2. The workflow classifies the ticket, searches the knowledge base, reads the customer's own account data through tools, writes an answer with citations and checks it.
-3. Fixed policy rules and a calibrated confidence score choose a route: **auto-reply**, **operator approval** or **handoff**.
+3. Fixed policy rules and a rule-based confidence score (uncalibrated, ADR-0018) choose a route: **auto-reply**, **operator approval** or **handoff**.
 4. Operators review drafts in a console. A support lead sees quality, cost and automation numbers and can switch auto-replies off.
 5. Every model call is traced and costed. Every decision is in an audit log. Quality is measured on labelled tickets before anything is automated.
 
@@ -37,7 +37,7 @@ AI customer support for **Tallybridge**, a payments platform for freelancers and
 
 Python 3.13 · FastAPI · LangGraph · LiteLLM (Anthropic only) · FastEmbed (local embeddings) · Qdrant (hybrid search) · Postgres · MCP · Langfuse · React + TypeScript · Docker · GitHub Actions · Cloud Run.
 
-**Budget mode** ([ADR-0018](docs/adr/0018-budget-mode.md)): the whole project spends about $5 on model calls. Every model role runs on Claude Haiku 5.5 (fallback Claude Sonnet 5.5); embeddings come from a local model. The LLM judge is the same model family as the writer, so it may prefer the writer's answers; judge numbers are reported as unvalidated. Evaluation uses about 20 tickets and 16 attacks: a demo check that the system works, not a proof of quality ([eval plan](docs/eval-plan.md)).
+**Budget mode** ([ADR-0018](docs/adr/0018-budget-mode.md)): the whole project spends about $5 on model calls. Every model role runs on Claude Haiku 5.5 (fallback Claude Sonnet 5.5); embeddings come from a local model. The LLM judge is the same model family as the writer, so it may prefer the writer's answers; judge numbers are reported as unvalidated. Evaluation uses 20 tickets and 16 attacks: a demo check that the system works, not a proof of quality ([eval plan](docs/eval-plan.md)).
 
 ## How this project is built
 

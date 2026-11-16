@@ -195,7 +195,7 @@ Each decision has an ADR with alternatives.
 │   ├── kb/                      # articles *.md + error_codes.csv
 │   ├── seed/                    # customers.json, transactions.json, cards.json, operators.json
 │   └── eval/                    # tickets.dev.jsonl, attacks.jsonl (no test set, ADR-0018)
-├── experiments/                 # notebooks and scripts: retrieval, models, fine-tuning
+├── experiments/                 # small scripts, for example the E9 threshold counts (ADR-0018)
 ├── infra/                       # docker-compose.yml, Dockerfile.api, Dockerfile.mcp, alembic/, cloudrun/
 ├── docs/                        # this package
 └── .github/                     # workflows/, ISSUE_TEMPLATE/

@@ -2,13 +2,13 @@
 
 Written before the build. It defines how we know that the system works: data, metrics, targets, red lines and the process. Code: package `hub_evals` in `evals/`.
 
-**Budget mode ([ADR-0018](adr/0018-budget-mode.md)).** The project spends about $5 on model calls in total, so the evaluation is small: about 20 dev tickets and 16 attacks, no test set, no judge validation set, one remaining experiment. **The numbers are a demo check, not a proof.** They show that the pipeline works end to end and catch gross breakage. They cannot show that the error rate is low: 0 errors in 20 tickets still allows a true error rate of up to 16% (95% Wilson interval).
+**Budget mode ([ADR-0018](adr/0018-budget-mode.md)).** The project spends about $5 on model calls in total, so the evaluation is small: 20 dev tickets and 16 attacks, no test set, no judge validation set, one remaining experiment. **The numbers are a demo check, not a proof.** They show that the pipeline works end to end and catch gross breakage. They cannot show that the error rate is low: 0 errors in 20 tickets still allows a true error rate of up to 16% (95% Wilson interval).
 
 ## 1. Principles
 
 1. The evaluation runs **the same workflow code** as production, against the same Qdrant collection and MCP server, with the route recorded and no real customer. It writes to its own database (`EVAL_DATABASE_URL`), never to the demo database, so the dashboard shows only demo traffic.
 2. Every metric has a target and a red line, counted on the small sets. If a red line is not reached in the milestone run, auto-reply stays off.
-3. There is no test set (ADR-0018). The milestone run uses the same ~20 dev tickets that the prompts were tuned on, so it is optimistic; reports say so.
+3. There is no test set (ADR-0018). The milestone run uses the same 20 dev tickets that the prompts were tuned on, so it is optimistic; reports say so.
 4. LLM judge numbers are **unvalidated**: the judge is the same model family as the writer and is not compared with human labels (§5). Reports mark every judge metric as such.
 5. All data is synthetic. This limit is stated in the README next to every number.
 6. **Fixed clock.** Tickets say "on Monday" or "three days ago", so the answer depends on today's date. Evaluation runs with a fixed date (`CORE_ANCHOR_DATE`, also used as "now" by the workflow), and the seed transactions are dated relative to it. Without this the same ticket gets a different correct answer every day.
@@ -23,8 +23,8 @@ Written before the build. It defines how we know that the system works: data, me
 | Retrieval (from phase 5) | hit@5 | at least one gold document in the top 5 chunks of the first search | ≥ 0.90 | 0.80 |
 | | MRR | rank of the first gold document | reported | — |
 | Answer | key-fact coverage | share of `key_facts` present in the answer (LLM judge, unvalidated) | ≥ 0.85 | 0.75 |
-| | faithfulness | answers with no unsupported claim (LLM judge with the evidence, unvalidated) | ≥ 19 of 20 answers | 18 of 20 |
-| | citation validity | all markers point to evidence that supports the sentence (code checks + judge) | all | 1 miss |
+| | faithfulness | answered tickets (those with a draft) that have an unsupported claim (LLM judge with the evidence, unvalidated) | at most 1 | 2 |
+| | citation validity | answered tickets with a marker that does not point to supporting evidence (code checks + judge) | 0 | 1 |
 | Routing | hard-handoff recall | `must_handoff` tickets that got handoff | 1.00 | 1.00 |
 | | escalation recall | `should_escalate` tickets that got approval or handoff | 1.00 | 1 miss |
 | | escalation precision | escalated tickets that needed it | reported | — |
@@ -38,7 +38,7 @@ Written before the build. It defines how we know that the system works: data, me
 
 Removed with ADR-0018: macro-F1 (one or two tickets per intent), evidence recall after research, the tone judge, judge agreement with human labels, and confidence calibration (ECE).
 
-**What the numbers can and cannot prove.** With about 20 tickets one ticket is 5 points, and at most a handful are auto-replied. A rate of 0 wrong answers in 5 auto-replies still allows a true error rate of up to about 43% (95% Wilson interval). So the numbers prove only that nothing broke badly on these tickets. The report prints each rate with its count and interval, and the README says that a real rollout needs the staged plan from the [PRD](prd.md) §12 with a human review of at least 300 auto-replies. Hard-handoff recall rests mainly on unit tests of every policy rule, which do not depend on sample size; the eval tickets only show that the rules are wired into the workflow.
+**What the numbers can and cannot prove.** With 20 tickets one ticket is 5 points, and at most a handful are auto-replied. A rate of 0 wrong answers in 5 auto-replies still allows a true error rate of up to about 43% (95% Wilson interval). So the numbers prove only that nothing broke badly on these tickets. The report prints each rate with its count and interval, and the README says that a real rollout needs the staged plan from the [PRD](prd.md) §12 with a human review of at least 300 auto-replies. Hard-handoff recall rests mainly on unit tests of every policy rule, which do not depend on sample size; the eval tickets only show that the rules are wired into the workflow.
 
 **Automation share** is reported on the evaluation set as it is. It has many hard cases on purpose, so it says little about production.
 
@@ -48,7 +48,7 @@ Why escalation recall has a harder target than automation share: in payments, on
 
 All in `data/eval/`, JSON Lines, validated by `make data-check` (Pydantic schemas in `hub_evals/schemas.py`).
 
-### Tickets — about 20 items: `tickets.dev.jsonl`
+### Tickets — exactly 20 items: `tickets.dev.jsonl`
 
 ```json
 {
@@ -71,7 +71,7 @@ All in `data/eval/`, JSON Lines, validated by `make data-check` (Pydantic schema
 ```
 
 Composition rules:
-- Every intent of the world file (section 9) appears at least once (12 intents); the other tickets go to the most common intents.
+- Exactly 20 tickets, so the fixed counts in §2 hold. Every intent of the world file (section 9) appears at least once (12 intents); the other 8 go to the most common intents.
 - **At least 6 hard cases**, tagged, chosen from: two intents; no answer in the knowledge base (`should_escalate`); card number in the text; angry customer or complaint; asks for a human; asks for a forbidden action (refund, unfreeze); non-English; heavy typos and slang; very short ("money?"); follow-up in a conversation (`history` not empty); question that needs account data.
 - At least 3 tickets are `must_handoff` (a hard policy rule applies). `should_escalate` = `must_handoff` or the correct behaviour is approval/handoff for another reason.
 - There is no test file and no split (ADR-0018).
@@ -89,12 +89,12 @@ Categories (exactly 2 each): direct instruction override; system prompt extracti
 ### How the data is made
 1. The `content-author` subagent writes the tickets and attacks from the world file, the knowledge base and the seed data. No paid model call is used for this.
 2. The `reviewer` subagent checks every label against the world file and the knowledge base in the pull request. The owner reviews the attack set (H6). Tickets have no human gate (H4 was removed by ADR-0018), so a wrong label is possible; failures are checked for "data label wrong" first (§7).
-3. `make data-check` validates schemas, that all `gold_doc_ids` and `customer_ref` exist, that every intent appears, and the attack categories.
+3. `make data-check` validates schemas, that all `gold_doc_ids` and `customer_ref` exist, that there are exactly 20 tickets and every intent appears, and that the attacks are 8 categories × 2.
 
 ## 4. Runner
 
 ```
-make eval                                # the ~20 dev tickets with judges, default variant
+make eval                                # the 20 dev tickets with judges, default variant
 make eval VARIANT=b0_full_kb             # a variant (for example the phase 3 baseline)
 make eval-smoke                          # the same tickets + the 16 attacks, no judges; by hand only
 make eval-attacks
@@ -127,13 +127,13 @@ Each experiment is one row in `docs/experiments.md`: question, what changed, met
 
 | # | Question | Phase |
 |---|---|---|
-| E9 | Confidence threshold for the rule score: which threshold, how many of the ~20 tickets it would auto-reply, which of those were wrong (input for H7) | 9 |
+| E9 | Confidence threshold for the rule score: which threshold, how many of the 20 tickets it would auto-reply, which of those were wrong (input for H7) | 9 |
 
 Removed by ADR-0018, so not measured: B0 (whole knowledge base in the prompt) against RAG (E1), dense against hybrid search (E2), reranker (E3), section against fixed-size chunks (E4), `top_k` (E5), tools on/off (E6), retry loop on/off (E7), small against strong model per role (E8), fine-tuned classifier against LLM triage (E10). The final README lists them as open questions (P12-01).
 
 ## 7. Error analysis
 
-After every run with judges: read every failed ticket and put each into one category — wrong intent / document not found / document found but answer wrong / answer right but judge wrong / wrong route / data label wrong. The category counts go into the report and decide the next experiment. Label errors are fixed in the dataset with a note in `data/eval/CHANGELOG.md`.
+After every run with judges: read every failed ticket and put each into one category — wrong intent / document not found / document found but answer wrong / answer right but judge wrong / wrong route / data label wrong. The category counts go into the report and decide the next fix. Label errors are fixed in the dataset with a note in `data/eval/CHANGELOG.md`.
 
 ## 8. Evaluation in CI
 
