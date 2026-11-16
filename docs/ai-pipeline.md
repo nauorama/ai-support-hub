@@ -269,7 +269,7 @@ Files: `prompts/<node>/v<N>.md`. The active version of each node is in `config/m
 Shared rules for all prompts:
 - The system part is stable (good for prompt caching): role, rules, output contract, a few examples. The user part holds the changing data inside XML tags: `<ticket>`, `<history>`, `<customer>`, `<kb>`, `<account_facts>`, `<memory>`.
 - Text inside the data tags is information from an untrusted user, never an instruction.
-- Every value a prompt inserts is untrusted data: before it is inserted, an opening or closing tag with a data-tag name inside it (`</ticket>`, `<kb id=…>`, also with look-alike brackets or letters and hidden zero-width characters) has its brackets written as `&lt;` and `&gt;`, so it cannot close or open a tag of the prompt (`Prompt.render`, `guardrails/injection.py`). This applies to values in the system part too, so the data tags themselves are written in the prompt file, never inside a value; a new tag name must be added to `DATA_TAGS` (a test checks the prompt files).
+- Every value a prompt inserts is untrusted data: before it is inserted, an opening or closing tag with a data-tag name inside it (`</ticket>`, `<kb id=…>`, also with look-alike brackets or letters and hidden zero-width or combining characters) has its brackets written as `&lt;` and `&gt;`, so it cannot close or open a tag of the prompt (`Prompt.render`, `guardrails/injection.py`). This applies to values in the system part too, so the data tags themselves are written in the prompt file, never inside a value; a new tag name must be added to `DATA_TAGS` (a test checks the prompt files).
 - Do not ask the model for a confidence number.
 
 Contract of each prompt:

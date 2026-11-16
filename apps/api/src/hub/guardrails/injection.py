@@ -9,8 +9,9 @@ would otherwise close the prompt's data tag early, and a ``<kb>`` would open a f
 opening or closing tag with a data-tag name inside untrusted text has its angle brackets
 written as ``&lt;`` and ``&gt;``.
 
-Both work on the same folded view of the text (``_fold``): NFKC, format characters such as
-zero-width spaces and soft hyphens removed, case-folded, and common look-alike letters and
+Both work on the same folded view of the text (``_fold``): NFKD, format characters such as
+zero-width spaces and soft hyphens, combining marks such as variation selectors and Hangul
+fillers removed, case-folded, and common look-alike letters and
 angle brackets mapped to ASCII. So a tag or a phrase written with full-width letters, a
 Cyrillic ``\u0456`` or a hidden zero-width space is still found.
 
@@ -29,7 +30,7 @@ DATA_TAGS: tuple[str, ...] = ("ticket", "history", "customer", "kb", "account_fa
 # Starting value (docs/security.md §3, G4); P6-02 moves it into config/policy.yaml.
 HIGH_INJECTION_SCORE = 0.5
 
-# Look-alikes NFKC does not fold: Cyrillic and Greek letters that look like Latin ones, and
+# Look-alikes NFKD does not fold: Cyrillic and Greek letters that look like Latin ones, and
 # angle brackets (single guillemets, CJK and mathematical angle brackets, modifier letters).
 _LOOKALIKES = str.maketrans(
     {
@@ -46,11 +47,25 @@ _LOOKALIKES = str.maketrans(
 )  # fmt: skip
 
 
+# Invisible characters that are not format characters (Cf) or combining marks: Hangul fillers.
+_INVISIBLE_LETTERS = frozenset("\u115f\u1160\u3164\uffa0")
+# Dropped in the folded view: format characters (zero-width space, soft hyphen, ...),
+# combining marks (variation selectors, the combining grapheme joiner, accents) and enclosing
+# marks. Tag names and pattern words are ASCII, and the original text is kept, so this only
+# widens what is found.
+_DROPPED_CATEGORIES = frozenset({"Cf", "Mn", "Me"})
+
+
 def _fold_char(char: str) -> str:
-    if unicodedata.category(char) == "Cf":
-        return ""
-    folded = unicodedata.normalize("NFKC", char.translate(_LOOKALIKES)).casefold()
-    return folded.translate(_LOOKALIKES)
+    # NFKD, not NFKC: it splits a sign with a combining overlay (U+226E, "not less-than") into
+    # `<` and the mark, and the mark is then dropped.
+    decomposed = unicodedata.normalize("NFKD", char.translate(_LOOKALIKES))
+    kept = "".join(
+        part
+        for part in decomposed
+        if unicodedata.category(part) not in _DROPPED_CATEGORIES and part not in _INVISIBLE_LETTERS
+    )
+    return kept.casefold().translate(_LOOKALIKES)
 
 
 def _fold(text: str) -> tuple[str, list[int]]:

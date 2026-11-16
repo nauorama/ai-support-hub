@@ -104,6 +104,11 @@ def replace_pii(text: str, mapping: Mapping[str, str] | None = None) -> PiiRepla
     ``mapping`` is the run's mapping so far (from an earlier call); the result's mapping holds
     it plus the new placeholders. The same value always gets the same placeholder, and a new
     value gets the next free number of its type.
+
+    ``text`` must be original text masked by G1, never text that already holds our
+    placeholders (e.g. history stored after an earlier replacement): those would be escaped
+    like placeholders the customer typed and never restored. Keep the original masked text and
+    replace it again with the run's mapping.
     """
     text = _escape_typed_placeholders(text)
     known = dict(mapping or {})

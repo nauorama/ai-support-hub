@@ -1,5 +1,6 @@
 """Prompt files (ai-pipeline §7, ADR-0013): front matter, two parts, strict placeholders."""
 
+import re
 from pathlib import Path
 from typing import get_args
 
@@ -12,6 +13,8 @@ from hub.llm.prompts import PromptError, active_prompt, load_prompt, parse_promp
 from ._llm import MODELS_YAML, ROOT
 
 PROMPTS = ROOT / "prompts"
+# A tag in a prompt file: any case, hyphens, attributes.
+PROMPT_TAG = re.compile(r"</?([A-Za-z][\w-]*)(?:\s[^<>]*)?>")
 
 GOOD = """---
 version: v2
@@ -92,19 +95,20 @@ def test_the_recorded_triage_tickets_are_not_changed_by_tag_neutralisation() -> 
 def test_every_tag_used_in_a_prompt_file_is_a_data_tag() -> None:
     """A new data tag (e.g. `<draft>` for verify) must be added to DATA_TAGS, or a customer could
     close it from inside a value."""
-    import re
-
     from hub.guardrails.injection import DATA_TAGS
 
     files = sorted(PROMPTS.glob("*/v*.md"))
     assert files
-    tags = {
-        name
-        for path in files
-        for name in re.findall(r"</?([a-z_]+)(?:\s[^<>]*)?>", path.read_text(encoding="utf-8"))
-    }
+    tags = {name for path in files for name in PROMPT_TAG.findall(path.read_text(encoding="utf-8"))}
     assert "ticket" in tags
     assert tags <= set(DATA_TAGS), sorted(tags - set(DATA_TAGS))
+
+
+@pytest.mark.parametrize("tag", ["<Draft>", "</account-facts>", "<evidence id=1>"])
+def test_the_prompt_tag_check_sees_tags_with_capitals_hyphens_and_attributes(tag: str) -> None:
+    names = PROMPT_TAG.findall(f"text {tag} text")
+    assert names
+    assert not set(names) <= {"ticket"}
 
 
 def test_a_missing_placeholder_value_is_an_error_that_does_not_show_values() -> None:
