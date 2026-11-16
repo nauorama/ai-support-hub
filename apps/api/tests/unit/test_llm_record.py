@@ -225,7 +225,7 @@ def test_the_schema_probe_has_the_shapes_the_first_real_calls_must_confirm() -> 
     assert set(properties["item"]) == {"$ref", "description"}
     assert {"type": "null"} in properties["maybe"]["anyOf"]
     assert "at most 9" in properties["count"]["description"]
-    assert set(SCHEMAS) == {"TriageResult", "SchemaProbe"}
+    assert set(SCHEMAS) == {"TriageResult", "DraftAnswer", "SchemaProbe"}
 
 
 def test_the_command_takes_only_force(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,13 +26,13 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make web-types` | generate TypeScript types from OpenAPI |
 | `make retention` | run the retention job once |
 | `make record-llm` | refresh recorded model responses for tests (real calls); skips models that already have a real recording, `FORCE=1` records them again |
-| `make llm-requests` | rewrite the triage recording requests from the example tickets and the active prompt (no model call); run before `make record-llm` after a triage prompt change |
+| `make llm-requests` | rewrite the recording requests (no model call): triage from the example tickets, the run tickets (`tests/fixtures/run/tickets.jsonl`) for triage and write with the KB from `data/kb`; run before `make record-llm` after a prompt or KB change (a KB change changes every write request) |
 | `make eval-report RUN=<id> BASE=<id>` | compare two evaluation runs; see [eval plan](eval-plan.md) |
 | `make leak-scan` | scan database, logs and recorded model requests for card patterns and canary strings |
 | `make export-review-candidates` | export rejected and heavily edited drafts as candidates for new eval tickets |
 | `make rollback` | send traffic back to the previous deployed revision |
 
-**Fake model provider.** `LLM_MODE=fake` makes the gateway return deterministic recorded or scripted responses. Unit, integration and e2e tests run with it, so tests need no API key and cost nothing. Recordings live in `apps/api/tests/fixtures/llm/` and are refreshed with `make record-llm` (real calls).
+**Fake model provider.** `LLM_MODE=fake` makes the gateway return deterministic recorded or scripted responses. Unit, integration and e2e tests run with it, so tests need no API key and cost nothing. Recordings live in `apps/api/tests/fixtures/llm/` and are refreshed with `make record-llm` (real calls). The compose `api` service mounts them read-only where the gateway looks (`FIXTURES_DIR`), with `config/` and `prompts/` (the app loads both at start), so `make dev` runs in fake mode; a ticket whose text has no recording is handed to a human (`system_error`). Only the run tickets have recordings; use `LLM_MODE=real` for other texts.
 
 ## 2. Configuration
 
@@ -50,6 +50,7 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `ANTHROPIC_API_KEY` | | read by LiteLLM; the only provider key (ADR-0018) |
 | `LLM_MODE` | `real` \| `fake` | |
 | `MODELS_CONFIG` | `config/models.yaml` | |
+| `PROMPTS_DIR` | `prompts` | prompt files; the active versions are in `MODELS_CONFIG` |
 | `MCP_SERVER_URL`, `MCP_SERVER_TOKEN` | `http://mcp:8001/mcp` | |
 | `JIRA_MODE`, `SLACK_MODE` | `mock` \| `real` | plus `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID` |
 | `SESSION_SECRET` | random 32 bytes | |

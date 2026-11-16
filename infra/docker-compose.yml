@@ -70,6 +70,13 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ../apps/api/src:/app/apps/api/src:ro
+      # The app loads the model config and the prompt files at start (P3-05).
+      - ../config:/app/config:ro
+      - ../prompts:/app/prompts:ro
+      # LLM_MODE defaults to fake: the recorded answers must be where `FIXTURES_DIR`
+      # (hub/llm/gateway.py) looks for them, or every model call fails (deferred from P3-01).
+      # Dev image only; the production image (phase 10) runs real mode without them.
+      - ../apps/api/tests/fixtures/llm:/app/apps/api/tests/fixtures/llm:ro
     depends_on:
       postgres:
         condition: service_healthy

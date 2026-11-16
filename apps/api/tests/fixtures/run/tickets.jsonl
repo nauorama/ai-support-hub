@@ -1,0 +1,2 @@
+{"id": "run_01", "case": "SEPA withdrawal time: the answer is in withdrawal-times", "ticket": "Hi, I withdrew 420 EUR to my bank account by SEPA yesterday afternoon and it is still not there. How long does a SEPA withdrawal take?"}
+{"id": "run_02", "case": "no answer in the knowledge base: can_answer is false", "ticket": "Hello, do you pay interest on the money I keep in my EUR balance? If yes, how much per year?"}

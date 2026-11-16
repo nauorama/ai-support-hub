@@ -17,6 +17,9 @@ from hub.config import load_settings
 from hub.deps import Container, build_container
 from hub.observability.logging import configure_logging
 
+# Longest run: triage + write timeouts with retries are longer, but a stop must not hang.
+RUN_SHUTDOWN_WAIT_S = 30.0
+
 
 def create_app(container: Container | None = None) -> FastAPI:
     """Build the app. Without a container, settings are read now, so a bad `.env` stops start."""
@@ -27,6 +30,9 @@ def create_app(container: Container | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
+        # Runs are tasks of their own (`hub.graph.linear.RunTasks`): let the ones in flight finish
+        # before the database goes away. A run cut off here stays `running` for `recover-runs`.
+        await container.runs.wait(timeout_s=RUN_SHUTDOWN_WAIT_S)
         if container.database is not None:
             await container.database.dispose()
 

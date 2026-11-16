@@ -6,11 +6,18 @@ request schema (4,000 characters), which runs before the handler, so an over-lon
 refused before the mask sees it; the body cap in `hub/api/limits.py` runs before that. The raw
 text lives only in this request's memory: it is never logged, stored or put in an error.
 
-Until the workflow exists (phase 6), the stream is `ticket.created` → a placeholder system
-message → `done`. The placeholder is not stored: it stands in for the run and would otherwise
-leave invented history in every ticket.
+A new ticket starts a run of the phase-3 workflow (`hub.graph.linear`: intake → triage →
+write) after the commit. The run is a task of its own, so a closed stream does not stop it; the
+stream relays its events: `ticket.created` → `run.status` (understanding, writing) → `message`
+(a placeholder system message) → `ticket.status` (`pending_approval`, or `handed_off` after an
+`error` event) → `done`, with a `: ping` comment every 10 s while the run works. A follow-up
+message starts no run yet: without auto-reply, every ticket is owned by a human after its first
+run. Its stream, a replay, and a ticket handed off because masking failed are `ticket.created`
+→ placeholder → (`ticket.status`) → `done`. The placeholder is not stored: it stands in for an
+answer and would otherwise leave invented history in every ticket.
 """
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -45,6 +52,7 @@ from hub.db.repositories import (
 )
 from hub.deps import Container
 from hub.domain.enums import ActorType, MessageRole, Route, TicketStatus
+from hub.graph.linear import Pipeline, run_ticket
 from hub.guardrails.masking import CARD_ENTITIES, MaskResult, mask
 
 router = APIRouter(prefix="/api/v1/tickets", tags=["tickets"])
@@ -66,6 +74,9 @@ SSE_RESPONSES: dict[int | str, dict[str, Any]] = {
         "content": {"text/event-stream": {}},
     }
 }
+
+# api.md §4: a comment line every 10 s keeps the connection open while the run works.
+PING_INTERVAL_S = 10.0
 
 IdempotencyKey = Annotated[uuid.UUID, Header(alias="Idempotency-Key")]
 
@@ -134,10 +145,58 @@ def _stream(
             yield _event("ticket.status", {"status": status.value})
         yield _event("done", {})
 
+    return _sse(events())
+
+
+def _sse(events: AsyncIterator[bytes]) -> EventSourceResponse:
     # No buffering in proxies, no caching: the events must reach the browser as they are sent.
     return EventSourceResponse(
-        events(), headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        events, headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+
+def _run_stream(
+    container: Container, pipeline: Pipeline, message: MessageOut, ticket_id: uuid.UUID
+) -> EventSourceResponse:
+    """Start the run and relay its events (module docstring). The queue ends with `None`."""
+    created = TicketCreatedEvent(ticket_id=ticket_id, message=message).model_dump(mode="json")
+    queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
+
+    async def emit(name: str, data: dict[str, Any]) -> None:
+        queue.put_nowait((name, data))
+
+    async def job() -> None:
+        try:
+            await run_ticket(pipeline, ticket_id=ticket_id, message_id=message.id, emit=emit)
+        finally:
+            queue.put_nowait(None)
+
+    container.runs.start(job())
+
+    async def events() -> AsyncIterator[bytes]:
+        yield _event("ticket.created", created)
+        status_sent = False
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=PING_INTERVAL_S)
+            except TimeoutError:
+                yield b": ping\n\n"
+                continue
+            if item is None:
+                break
+            name, data = item
+            if name == "ticket.status":
+                status_sent = True
+                yield _event("message", _placeholder().model_dump(mode="json"))
+            yield _event(name, data)
+        if not status_sent:
+            # A run that ended without a status (it crashed in a way `run_ticket` does not
+            # catch): the stream still follows api.md §4; the ticket waits in the queue.
+            yield _event("message", _placeholder().model_dump(mode="json"))
+            yield _event("ticket.status", {"status": TicketStatus.PROCESSING.value})
+        yield _event("done", {})
+
+    return _sse(events())
 
 
 # --- shared steps ---------------------------------------------------------------------------
@@ -262,10 +321,14 @@ async def _save_or_replay(
     *,
     ticket_id: uuid.UUID | None,
     masked_body: str,
+    run_in: Container | None = None,
 ) -> EventSourceResponse:
     """Run `save` (writes and commit), then stream its message. When a concurrent request with
     the same key saved first, the unique constraint on `messages.idempotency_key` fails (at the
     flush of the message or at commit); answer with that request's message instead.
+
+    `run_in`: start a run for the saved message with this container's pipeline, unless the save
+    already handed the ticket to a human. A replay never starts a run.
 
     `ticket_id` is passed as a value: the rollback expires every loaded object."""
     try:
@@ -276,7 +339,10 @@ async def _save_or_replay(
         if stored is None:
             raise
         return await _replay(session, stored, expected_ticket_id=ticket_id, masked_body=masked_body)
-    return _stream(message.ticket_id, await _message_out(session, message), status)
+    out = await _message_out(session, message)
+    if run_in is not None and run_in.pipeline is not None and status is None:
+        return _run_stream(run_in, run_in.pipeline, out, message.ticket_id)
+    return _stream(message.ticket_id, out, status)
 
 
 def _human_owns(ticket: Ticket) -> bool:
@@ -330,7 +396,9 @@ async def create_ticket(
         await session.commit()
         return message, status
 
-    return await _save_or_replay(session, save, scoped_key, ticket_id=None, masked_body=masked.text)
+    return await _save_or_replay(
+        session, save, scoped_key, ticket_id=None, masked_body=masked.text, run_in=container
+    )
 
 
 @router.post("/{ticket_id}/messages", responses=SSE_RESPONSES)

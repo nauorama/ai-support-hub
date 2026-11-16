@@ -95,10 +95,12 @@ test-int:
 record-llm:
 	uv run python -m hub.llm.record $(if $(FORCE),--force,)
 
-# Rewrites tests/fixtures/llm/requests/triage_*.json from the triage examples and the active
-# prompt (no model call). Run it after a triage prompt change, then `make record-llm`.
+# Rewrites tests/fixtures/llm/requests/triage_*.json from the triage examples and run_*.json from
+# the run tickets, with the active prompts and data/kb (no model call). Run it after a prompt or
+# KB change, then `make record-llm` (a KB change changes every write request).
 llm-requests:
 	uv run python apps/api/tests/unit/_triage_requests.py
+	uv run python apps/api/tests/unit/_run_requests.py
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"

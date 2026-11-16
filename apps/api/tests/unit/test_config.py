@@ -62,10 +62,17 @@ def test_unknown_name_in_env_file_stops_app_start(
 
 
 def test_app_starts_with_a_valid_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_env(tmp_path, "APP_ENV=test\nCORE_ANCHOR_DATE=2026-11-12\n")
+    # The app loads the model config and the prompts at start (P3-05): point at the repo's.
+    _write_env(
+        tmp_path,
+        "APP_ENV=test\nCORE_ANCHOR_DATE=2026-11-12\n"
+        f"MODELS_CONFIG={ROOT / 'config' / 'models.yaml'}\nPROMPTS_DIR={ROOT / 'prompts'}\n",
+    )
     monkeypatch.chdir(tmp_path)
     app = create_app()
     assert app.state.container.settings.core_anchor_date == date(2026, 11, 12)
+    assert app.state.container.pipeline is not None
+    assert app.state.container.pipeline.write_prompt.version == "write/v1"
 
 
 @pytest.mark.parametrize(

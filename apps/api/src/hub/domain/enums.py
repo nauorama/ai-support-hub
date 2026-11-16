@@ -127,3 +127,31 @@ class LlmCallStatus(StrEnum):
     RETRY = "retry"
     ERROR = "error"
     INVALID_OUTPUT = "invalid_output"
+
+
+class RunStatus(StrEnum):
+    """One execution of the workflow for one customer message (data model §1, `runs`)."""
+
+    RUNNING = "running"
+    INTERRUPTED = "interrupted"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class DraftStatus(StrEnum):
+    """`superseded`: the operator answered with a free reply or closed the ticket without using
+    the draft (data model §1, `drafts`)."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    EDITED = "edited"
+    REJECTED = "rejected"
+    SUPERSEDED = "superseded"
+
+
+class RejectReason(StrEnum):
+    WRONG_FACTS = "wrong_facts"
+    WRONG_TONE = "wrong_tone"
+    MISSING_INFO = "missing_info"
+    POLICY = "policy"
+    OTHER = "other"
