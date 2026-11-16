@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from hub.config import load_settings
 from hub.db.session import connect
+from hub.domain.draft import DraftAnswer
 from hub.domain.enums import LlmCallContext, LlmNode
 from hub.domain.triage import TriageResult
 from hub.llm.config import load_models
@@ -76,6 +77,7 @@ class SchemaProbe(BaseModel):
 # Schemas a request file may name. A fixed list: a file never names arbitrary code.
 SCHEMAS: dict[str, type[BaseModel]] = {
     "TriageResult": TriageResult,
+    "DraftAnswer": DraftAnswer,
     "SchemaProbe": SchemaProbe,
 }
 
@@ -87,7 +89,9 @@ class RequestSpec(BaseModel):
     messages: list[dict[str, Any]] = []
     texts: list[str] = []
     tools: list[dict[str, Any]] | None = None
-    schema_name: Literal["TriageResult", "SchemaProbe"] | None = Field(default=None, alias="schema")
+    schema_name: Literal["TriageResult", "DraftAnswer", "SchemaProbe"] | None = Field(
+        default=None, alias="schema"
+    )
     prompt_version: str | None = None
     models: Literal["all", "primary"] = "all"
 

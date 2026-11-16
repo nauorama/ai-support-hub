@@ -92,7 +92,7 @@ stateDiagram-v2
 
 Ownership rule: after the first handoff or approval in a ticket, a human owns the ticket. New customer messages do not start a new AI run; they appear in the operator queue.
 
-`processing → answered` is the AI's auto-reply only; an operator never takes it. Until the workflow exists (phase 6) a ticket in `processing` has no run; it reaches the operators through the queue, and a claim hands it off first (`processing → handed_off`, reason `operator_takeover`, [ai-pipeline](ai-pipeline.md) §6). Then the operator replies (`handed_off → answered`).
+`processing → answered` is the AI's auto-reply only; an operator never takes it. From P3-05 a new ticket gets a run of the linear workflow, which ends in `pending_approval` (or `handed_off` on an error); while it runs, or if no run started, it reaches the operators through the queue, and a claim hands it off first (`processing → handed_off`, reason `operator_takeover`, [ai-pipeline](ai-pipeline.md) §6). Then the operator replies (`handed_off → answered`).
 
 The status changes only through `TicketRepository.change_status`, which checks this diagram. A status set any other way is refused when the session flushes, and every `INSERT`, `UPDATE` or `DELETE` statement on `tickets` run with `Session.execute` (a bulk statement, which the flush checks never see) is refused too. Many tickets, such as the `close-stale` job, are changed one by one.
 
@@ -108,7 +108,7 @@ Closing: an operator closes a ticket by hand, or the scheduled job `close-stale`
 | body | text | card data already masked; never the raw text |
 | is_ai_generated | bool | drives the label in the UI |
 | author_operator_id | uuid FK null | |
-| run_id | uuid FK null | the foreign key is added with the `runs` table (phase 6) |
+| run_id | uuid FK null | `ON DELETE SET NULL` (P3-05) |
 | citations | jsonb | `[{"marker": 1, "chunk_id": "...", "doc_id": "...", "title": "...", "url": "..."}]` |
 | masked_entities | jsonb | counts by type only, e.g. `{"PAN": 1}` or `{"IBAN": 1}` (ADR-0017; an IBAN is not card data and does not set the customer's `masked` flag); `{"failed": 1}` when masking failed (every digit hidden, counts unknown) |
 | idempotency_key | text null unique | |
@@ -122,7 +122,7 @@ One execution of the workflow for one customer message.
 |---|---|---|
 | id | uuid PK | |
 | ticket_id | uuid FK | |
-| trigger_message_id | uuid FK | |
+| trigger_message_id | uuid FK null | `ON DELETE SET NULL`: erasure deletes messages but keeps runs | |
 | status | text | `running` \| `interrupted` \| `completed` \| `failed` |
 | route | text null | |
 | route_reasons | jsonb | |
@@ -143,12 +143,14 @@ One execution of the workflow for one customer message.
 | Column | Type | Note |
 |---|---|---|
 | id | uuid PK | |
-| run_id | uuid FK unique | |
+| run_id | uuid FK unique | `ON DELETE CASCADE` |
 | ticket_id | uuid FK | |
-| body | text | AI draft |
-| citations | jsonb | |
-| evidence | jsonb | retrieved chunks (id, title, section, score, text) and account facts shown to the operator |
-| proposed_actions | jsonb | `[{"type": "jira_create_issue", "params": {...}}]` |
+| can_answer | bool | from `DraftAnswer` (P3-05); an unchanged draft with `false` cannot be approved |
+| missing_information | text null | from `DraftAnswer`, shown to the operator; placeholders restored |
+| body | text | AI draft (placeholders restored); empty when `can_answer` is false |
+| citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`; in baseline B0 `source_id` is a document id |
+| evidence | jsonb | object: retrieved chunks (id, title, section, score, text) and account facts shown to the operator; in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}]}` (the cited documents) |
+| proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
 | groundedness | numeric(4,3) null | |
 | unsupported_claims | jsonb | from the verify step |
 | status | text | `pending` \| `approved` \| `edited` \| `rejected` \| `superseded` (the operator answered with a free reply or closed the ticket without using the draft) |
@@ -165,7 +167,7 @@ Own record of every model call. Source of truth for cost.
 | Column | Type | Note |
 |---|---|---|
 | id | uuid PK | |
-| run_id | uuid FK null | null for eval judges, embeddings and background calls. The foreign key to `runs` is added in P3-05 (the table did not exist in P3-01) |
+| run_id | uuid FK null | null for eval judges, embeddings and background calls. `ON DELETE SET NULL`: deleting an old run never deletes its cost rows (foreign key added in P3-05) |
 | context | text | `online` \| `eval` \| `memory` \| `record` (`make record-llm`) |
 | node | text | `triage`, `research`, `write`, `verify`, `handoff_prep`, `memory_summary`, `judge`, `embedding` |
 | model | text | provider model id |

@@ -47,6 +47,11 @@ VISA = "4111 1111 1111 1111"  # public test card number
 # is in those details, and a random uuid can contain "4111" (it did in a CI run).
 BLOCKED_RUN_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000c0de")
 IBAN_RUN_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000beef")
+RUN_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000a001")
+# `llm_calls.run_id` refers to `runs.id` (P3-05): every run id a test uses exists.
+RUN_IDS = (BLOCKED_RUN_ID, IBAN_RUN_ID, RUN_ID)
+CUSTOMER_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000c001")
+TICKET_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000c002")
 
 
 @pytest.fixture(scope="module")
@@ -67,7 +72,23 @@ def llm_db(postgres_url: str) -> Iterator[tuple[str, str]]:
 @pytest.fixture
 async def database(llm_db: tuple[str, str]) -> AsyncIterator[Database]:
     with psycopg.connect(libpq_url(llm_db[0]), autocommit=True) as connection:
-        connection.execute("TRUNCATE llm_calls, audit_log RESTART IDENTITY")
+        connection.execute("TRUNCATE llm_calls, audit_log, runs, tickets, customers CASCADE")
+        connection.execute(
+            "INSERT INTO customers (id, external_ref, display_name, email, tier, country)"
+            " VALUES (%s, 'CUS-0001', 'Ana Novak', 'cus-0001@example.com', 'verified', 'SK')",
+            (CUSTOMER_ID,),
+        )
+        connection.execute(
+            "INSERT INTO tickets (id, customer_id, channel, status, ai_disclosed_at)"
+            " VALUES (%s, %s, 'chat', 'processing', now())",
+            (TICKET_ID, CUSTOMER_ID),
+        )
+        for run_id in RUN_IDS:
+            connection.execute(
+                "INSERT INTO runs (id, ticket_id, status, graph_version)"
+                " VALUES (%s, %s, 'running', 'test')",
+                (run_id, TICKET_ID),
+            )
     db = connect(llm_db[1])
     yield db
     await db.dispose()
@@ -76,7 +97,7 @@ async def database(llm_db: tuple[str, str]) -> AsyncIterator[Database]:
 def _record(**changes: object) -> LlmCallRecord:
     values: dict[str, object] = {
         "id": uuid.uuid4(),
-        "run_id": uuid.uuid4(),
+        "run_id": RUN_ID,
         "context": LlmCallContext.ONLINE,
         "node": LlmNode.TRIAGE,
         "model": "anthropic/claude-haiku-5-5",
@@ -229,7 +250,7 @@ async def _rows(database: Database) -> list[LlmCall]:
 
 
 async def test_an_invalid_answer_and_its_repair_are_both_recorded(database: Database) -> None:
-    run_id = uuid.uuid4()
+    run_id = RUN_ID
     call = CallContext(
         context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, run_id=run_id, prompt_version="v1"
     )
@@ -254,7 +275,7 @@ async def test_an_invalid_answer_and_its_repair_are_both_recorded(database: Data
 
 
 async def test_two_invalid_answers_leave_two_invalid_output_rows(database: Database) -> None:
-    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, run_id=uuid.uuid4())
+    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, run_id=RUN_ID)
     gateway = _structured_gateway(database, "not json", json.dumps({"urgency": "panic"}))
 
     with pytest.raises(StructuredOutputError):
@@ -265,3 +286,9 @@ async def test_two_invalid_answers_leave_two_invalid_output_rows(database: Datab
     rows = await _rows(database)
     assert [row.status for row in rows] == [LlmCallStatus.INVALID_OUTPUT] * 2
     assert all(row.error and row.error.startswith("ValidationError") for row in rows)
+
+
+async def test_a_row_for_an_unknown_run_is_refused(database: Database) -> None:
+    """The foreign key `llm_calls.run_id → runs.id` (P3-05)."""
+    with pytest.raises(IntegrityError):
+        await DbCallRecorder(database).record(_record(run_id=uuid.uuid4()))

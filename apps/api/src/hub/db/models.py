@@ -46,6 +46,7 @@ from hub.domain.enums import (
     ActorType,
     Channel,
     CustomerTier,
+    DraftStatus,
     FeedbackRating,
     Intent,
     LlmCallContext,
@@ -53,8 +54,10 @@ from hub.domain.enums import (
     LlmNode,
     MessageRole,
     OperatorRole,
+    RejectReason,
     Resolution,
     Route,
+    RunStatus,
     SettingKey,
     TicketStatus,
     Urgency,
@@ -313,8 +316,7 @@ class Message(Base):
     body: Mapped[str]
     is_ai_generated: Mapped[bool] = mapped_column(default=False, server_default=text("false"))
     author_operator_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("operators.id"))
-    # The foreign key to `runs` is added with that table (phase 6).
-    run_id: Mapped[uuid.UUID | None]
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
     citations: Mapped[list[Any]] = mapped_column(default=list, server_default=text("'[]'::jsonb"))
     masked_entities: Mapped[dict[str, Any]] = mapped_column(
         default=dict, server_default=text("'{}'::jsonb")
@@ -396,8 +398,8 @@ class LlmCall(Base):
     )
 
     id: Mapped[uuid.UUID] = _id_column()
-    # No foreign key yet: `runs` is created in P3-05, whose migration adds it (build plan).
-    run_id: Mapped[uuid.UUID | None]
+    # SET NULL: deleting an old run (retention) never deletes the cost record.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
     context: Mapped[LlmCallContext] = mapped_column(TextEnum(LlmCallContext))
     node: Mapped[LlmNode] = mapped_column(TextEnum(LlmNode))
     model: Mapped[str]
@@ -410,6 +412,108 @@ class LlmCall(Base):
     latency_ms: Mapped[int]
     status: Mapped[LlmCallStatus] = mapped_column(TextEnum(LlmCallStatus))
     error: Mapped[str | None]
+    created_at: Mapped[datetime] = _created_at_column()
+
+
+class Run(Base):
+    """One execution of the workflow for one customer message (data model §1). Written by
+    `hub.graph.linear` in phase 3; the LangGraph workflow takes over in phase 6."""
+
+    __tablename__ = "runs"
+    __table_args__ = (
+        enum_check("status", RunStatus),
+        enum_check("route", Route),
+        CheckConstraint("confidence BETWEEN 0 AND 1", name="confidence"),
+        CheckConstraint("jsonb_typeof(route_reasons) = 'array'", name="route_reasons"),
+        CheckConstraint("jsonb_typeof(features) = 'object'", name="features"),
+        CheckConstraint("jsonb_typeof(prompt_versions) = 'object'", name="prompt_versions"),
+        CheckConstraint("jsonb_typeof(models) = 'object'", name="models"),
+        CheckConstraint(
+            "total_cost_usd >= 0 AND input_tokens >= 0 AND output_tokens >= 0", name="usage"
+        ),
+        CheckConstraint("latency_ms >= 0", name="latency_ms"),
+        Index("ix_runs_ticket_id_started_at", "ticket_id", "started_at"),
+        Index("ix_runs_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = _id_column()
+    ticket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tickets.id"))
+    # SET NULL: erasure deletes the customer's messages but keeps runs (security §6).
+    trigger_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL")
+    )
+    status: Mapped[RunStatus] = mapped_column(TextEnum(RunStatus))
+    route: Mapped[Route | None] = mapped_column(TextEnum(Route))
+    route_reasons: Mapped[list[Any]] = mapped_column(
+        default=list, server_default=text("'[]'::jsonb")
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    features: Mapped[dict[str, Any]] = mapped_column(
+        default=dict, server_default=text("'{}'::jsonb")
+    )
+    graph_version: Mapped[str]
+    # node -> version without the node prefix, e.g. {"triage": "v1"} (data model §1).
+    prompt_versions: Mapped[dict[str, Any]] = mapped_column(
+        default=dict, server_default=text("'{}'::jsonb")
+    )
+    # role -> model id used
+    models: Mapped[dict[str, Any]] = mapped_column(default=dict, server_default=text("'{}'::jsonb"))
+    total_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 6), default=Decimal(0), server_default=text("0")
+    )
+    input_tokens: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    output_tokens: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    latency_ms: Mapped[int | None]
+    # An error class only, never a message text (it can echo customer input).
+    error: Mapped[str | None]
+    trace_id: Mapped[str | None]
+    started_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    finished_at: Mapped[datetime | None]
+
+
+class Draft(Base):
+    """The AI draft of a run that waits for an operator (data model §1)."""
+
+    __tablename__ = "drafts"
+    __table_args__ = (
+        enum_check("status", DraftStatus),
+        enum_check("reject_reason", RejectReason),
+        CheckConstraint("groundedness BETWEEN 0 AND 1", name="groundedness"),
+        CheckConstraint("edit_ratio BETWEEN 0 AND 1", name="edit_ratio"),
+        CheckConstraint("jsonb_typeof(citations) = 'array'", name="citations"),
+        CheckConstraint("jsonb_typeof(evidence) = 'object'", name="evidence"),
+        CheckConstraint("jsonb_typeof(proposed_actions) = 'array'", name="proposed_actions"),
+        CheckConstraint("jsonb_typeof(unsupported_claims) = 'array'", name="unsupported_claims"),
+        Index("ix_drafts_ticket_id", "ticket_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _id_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), unique=True
+    )
+    ticket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tickets.id"))
+    can_answer: Mapped[bool]
+    missing_information: Mapped[str | None]
+    # Card data already masked (the model only ever saw masked text); placeholders restored.
+    body: Mapped[str]
+    citations: Mapped[list[Any]] = mapped_column(default=list, server_default=text("'[]'::jsonb"))
+    evidence: Mapped[dict[str, Any]] = mapped_column(
+        default=dict, server_default=text("'{}'::jsonb")
+    )
+    proposed_actions: Mapped[list[Any]] = mapped_column(
+        default=list, server_default=text("'[]'::jsonb")
+    )
+    groundedness: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    unsupported_claims: Mapped[list[Any]] = mapped_column(
+        default=list, server_default=text("'[]'::jsonb")
+    )
+    status: Mapped[DraftStatus] = mapped_column(TextEnum(DraftStatus))
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("operators.id"))
+    reviewed_at: Mapped[datetime | None]
+    final_body: Mapped[str | None]
+    edit_ratio: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
+    reject_reason: Mapped[RejectReason | None] = mapped_column(TextEnum(RejectReason))
+    reject_note: Mapped[str | None]
     created_at: Mapped[datetime] = _created_at_column()
 
 

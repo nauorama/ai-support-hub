@@ -5,7 +5,10 @@ then exactly two parts, `# System` and `# User`, with `{{placeholders}}`. The ac
 each node is named in `config/models.yaml` (`prompts`). Every model call made with a prompt
 records its id (`<node>/v<N>`) in `llm_calls.prompt_version`.
 
-A `{{` or `}}` that is not part of a valid placeholder makes the file invalid. Rendering is
+A `{{` or `}}` that is not part of a valid placeholder makes the file invalid, so a nested JSON
+example such as `{"a": {"b": 1}}` cannot be written in a prompt (write `{"a": { "b": 1 } }`), and
+every line that starts with a single `#` is a part heading: only `# System` and `# User` are
+allowed (use `##` for headings inside a part). Rendering is
 strict both ways: a placeholder without a value and a value without a placeholder are errors,
 so a renamed placeholder cannot silently send an empty or stale prompt. Values are inserted in
 one pass, so text inside a value (a ticket that contains `{{x}}`) is never expanded. Every value
@@ -104,7 +107,10 @@ def parse_prompt(text: str, node: str, version: str) -> Prompt:
     body = text.replace("\r\n", "\n")[match.end() :]
     headings = [heading.group(0).strip() for heading in _LEVEL_1_HEADING.finditer(body)]
     if headings != ["# System", "# User"]:
-        raise PromptError(f"{name}: expected the parts `# System` then `# User`, got {headings}")
+        raise PromptError(
+            f"{name}: expected the parts `# System` then `# User`, got {headings}; every line "
+            "that starts with a single `#` is a part heading (use `##` inside a part)"
+        )
     parts = _PART_HEADING.split(body)
     # split -> [before, "System", system text, "User", user text]
     if parts[0].strip():
@@ -115,8 +121,10 @@ def parse_prompt(text: str, node: str, version: str) -> Prompt:
     for part, text in (("System", system), ("User", user)):
         if _BRACES.search(PLACEHOLDER.sub("", text)):
             raise PromptError(
-                f"{name}: malformed placeholder in the {part} part "
-                "(lowercase letters, digits and `_`, e.g. `{{ticket}}`)"
+                f"{name}: malformed placeholder or stray `{{{{`/`}}}}` in the {part} part. A "
+                "placeholder is lowercase letters, digits and `_`, e.g. `{{ticket}}`; any other "
+                "`{{` or `}}` is refused, also in a nested JSON example such as "
+                '`{"a": {"b": 1}}` (write `{"a": { "b": 1 } }` instead)'
             )
     return Prompt(node=node, front=front, system=system, user=user)
 
@@ -143,3 +151,22 @@ def active_prompt(directory: Path, models: ModelsConfig, node: str) -> Prompt:
     if role is None or role.kind != "chat":
         raise PromptError(f"{prompt.version}: role {prompt.front.role} is not a chat role")
     return prompt
+
+
+def cache_system(messages: list[Message]) -> list[Message]:
+    """The same messages with the system message as one text block marked for prompt caching
+    (`cache_control: ephemeral`, Anthropic's 5-minute cache). The system part is the stable
+    prefix of every call of a prompt (ai-pipeline §7); the gateway passes the block through
+    LiteLLM unchanged. Only for prompts whose system part is long enough to be cached (512
+    tokens on Claude Haiku 5.5); a shorter one is not an error, it is just not cached."""
+    return [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": message["content"], "cache_control": {"type": "ephemeral"}}
+            ],
+        }
+        if message["role"] == "system"
+        else message
+        for message in messages
+    ]

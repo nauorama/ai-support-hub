@@ -321,7 +321,7 @@ For evaluation runs, the workflow accepts a `variant` in the run config. ADR-001
 
 | Variant | Meaning |
 |---|---|
-| `b0_full_kb` | No retrieval: all external articles in the prompt (with prompt caching). |
+| `b0_full_kb` | No retrieval: all external articles in the system part of the write prompt inside one `<kb>` tag, separated by plain-text `Document id:` lines (with prompt caching); citations point to document ids (P3-05, `hub/graph/linear.py`, `hub/kb/full_text.py`). |
 | `rag_dense`, `rag_hybrid` | Retrieval settings (no reranker variant, ADR-0018). |
 
 Variants are for evaluation only; production uses the default.

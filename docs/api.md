@@ -103,7 +103,9 @@ Conflict rule: every state-changing draft or ticket request sends `ticket_versio
 | `error` | problem details | the run failed; the ticket was handed off |
 | `done` | `{}` | always the last event |
 
-`POST /tickets/{id}/messages` also starts with `ticket.created`, carrying the new message. Until the workflow exists (phase 6), the stream is `ticket.created` → `message` (a placeholder system message, not stored) → `done`. When masking fails, the ticket is handed to a human (reason `system_error`) and `ticket.status` (`handed_off`) comes before `done`.
+`POST /tickets/{id}/messages` also starts with `ticket.created`, carrying the new message.
+
+**Phase 3 (P3-05).** `POST /tickets` starts a run of the linear workflow (intake → triage → write). The stream is `ticket.created` → `run.status` (`understanding`, `writing`) → `message` (a placeholder system message, not stored) → `ticket.status` (`pending_approval`) → `done`. Every run ends in `pending_approval` (no auto-reply yet). When the run fails, the ticket is handed to a human (reason `system_error`): `error` (problem details, `code` `internal_error`, a fixed `detail`) comes before the placeholder and `ticket.status` (`handed_off`). The run is a task of its own: a closed stream does not stop it. `POST /tickets/{id}/messages`, a replayed `Idempotency-Key` and a new ticket whose masking failed start no run: their stream is `ticket.created` → placeholder → (`ticket.status` `handed_off` after a failed mask) → `done`. The LangGraph workflow (phase 6) replaces the linear run.
 
 The server sends a comment line (`: ping`) every 10 s to keep the connection open. If the stream breaks, the client falls back to polling `GET /tickets/{id}/messages`.
 

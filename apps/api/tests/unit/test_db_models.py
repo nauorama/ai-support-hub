@@ -15,6 +15,7 @@ from hub.domain.enums import (
     ActorType,
     Channel,
     CustomerTier,
+    DraftStatus,
     FeedbackRating,
     Intent,
     LlmCallContext,
@@ -22,8 +23,10 @@ from hub.domain.enums import (
     LlmNode,
     MessageRole,
     OperatorRole,
+    RejectReason,
     Resolution,
     Route,
+    RunStatus,
     SettingKey,
     TicketStatus,
     Urgency,
@@ -47,6 +50,10 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("llm_calls", "context", LlmCallContext),
     ("llm_calls", "node", LlmNode),
     ("llm_calls", "status", LlmCallStatus),
+    ("runs", "status", RunStatus),
+    ("runs", "route", Route),
+    ("drafts", "status", DraftStatus),
+    ("drafts", "reject_reason", RejectReason),
     ("kb_documents", "product", Product),
     ("kb_documents", "visibility", Visibility),
 ]
@@ -63,6 +70,8 @@ TABLES = {
     "feedback",
     "audit_log",
     "llm_calls",
+    "runs",
+    "drafts",
     "kb_documents",
     "kb_chunks",
 }
@@ -115,8 +124,9 @@ def test_every_enum_column_has_a_check() -> None:
 
 @pytest.mark.parametrize("table", sorted(TABLES))
 def test_every_table_has_a_creation_time(table: str) -> None:
-    # audit_log names it `ts` (data model §1).
-    column = _table(table).c["ts" if table == "audit_log" else "created_at"]
+    # audit_log names it `ts`, runs `started_at` (data model §1).
+    name = {"audit_log": "ts", "runs": "started_at"}.get(table, "created_at")
+    column = _table(table).c[name]
     assert column.server_default is not None
     assert not column.nullable
 

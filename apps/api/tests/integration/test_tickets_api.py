@@ -65,7 +65,11 @@ def _sql(api_db: tuple[str, str], query: str, *params: Any) -> list[tuple[Any, .
 
 @pytest.fixture(autouse=True)
 def empty_tables(api_db: tuple[str, str]) -> None:
-    _sql(api_db, "TRUNCATE audit_log, feedback, messages, tickets, customers RESTART IDENTITY")
+    _sql(
+        api_db,
+        "TRUNCATE audit_log, feedback, llm_calls, drafts, runs, messages, tickets, customers"
+        " RESTART IDENTITY",
+    )
 
 
 @pytest.fixture
