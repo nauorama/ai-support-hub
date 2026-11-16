@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.llm.gateway import FixtureProvider, Gateway, RecordingProvider
 from hub.llm.record import (
     SCHEMAS,
@@ -24,7 +24,7 @@ from hub.llm.record import (
     recording_gateway,
     spec_requests,
 )
-from hub.llm.schemas import OutboundCardDataError, ProviderError
+from hub.llm.schemas import CallContext, OutboundCardDataError, ProviderError
 from hub.llm.structured import provider_schema
 
 from ._llm import MODELS_YAML, MemoryRecorder, ScriptedProvider, ok
@@ -204,6 +204,23 @@ def test_a_spec_names_only_a_known_schema(tmp_path: Path) -> None:
     _write_spec(tmp_path, "bad", {**PROBE_SPEC, "schema": "os.system"})
     with pytest.raises(ValidationError):
         load_specs(tmp_path)
+
+
+async def test_record_mode_writes_real_rows_that_count_against_the_budget(
+    tmp_path: Path,
+) -> None:
+    """`make record-llm` makes real, paid calls: its rows must be `real`, or the daily budget
+    would stop counting them (owner decision, P3-01)."""
+    recorder = MemoryRecorder()
+    inner = ScriptedProvider({HAIKU: [ok()]})
+    gateway = recording_gateway(inner, recorder, tmp_path, MODELS_YAML)
+    assert gateway.mode == LlmCallMode.REAL
+    await gateway.complete(
+        "triage",
+        [{"role": "user", "content": "hi"}],
+        call=CallContext(context=LlmCallContext.RECORD, node=LlmNode.TRIAGE),
+    )
+    assert [row.mode for row in recorder.rows] == [LlmCallMode.REAL]
 
 
 def test_spec_requests_match_the_gateway_requests() -> None:

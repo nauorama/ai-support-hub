@@ -3,7 +3,8 @@
 B0 (ai-pipeline §10) has no retrieval: every external KB document is in the system part of the
 prompt (`hub.kb.full_text`), marked for prompt caching, and the ticket and history are in the
 user part. The texts are already masked (G1) and hold placeholders (G3). Any gateway error is
-raised to the caller, which hands the ticket to a human with reason `system_error`.
+raised to the caller, which hands the ticket to a human with reason `system_error`
+(`budget_exceeded` for a G8 budget stop).
 """
 
 import uuid

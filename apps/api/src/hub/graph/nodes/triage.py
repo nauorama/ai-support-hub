@@ -1,8 +1,9 @@
 """Triage node (docs/ai-pipeline.md §3): one structured call on the `triage` role.
 
 The ticket text is already masked (G1 runs in the API before anything else). Any gateway error
-(`StructuredOutputError`, `LlmUnavailableError`, a G2 block) is raised to the caller, which hands
-the ticket to a human with reason `system_error`; this function never guesses a result.
+(`StructuredOutputError`, `LlmUnavailableError`, a G2 block, a G8 budget stop) is raised to the
+caller, which hands the ticket to a human with reason `system_error` (`budget_exceeded` for the
+budget stop); this function never guesses a result.
 
 The caller writes the `triage.done` audit record with `audit_details` (security §5): the
 decision and the prompt version, never the ticket text or the summary.

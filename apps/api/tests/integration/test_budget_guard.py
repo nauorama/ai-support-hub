@@ -10,6 +10,7 @@ import dataclasses
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -52,8 +53,6 @@ TICKETS = {
     if line.strip()
 }
 SEPA = TICKETS["run_01"]
-# 00:00 UTC today, as Postgres sees it.
-TODAY_UTC = "(date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
 
 
 @pytest.fixture(scope="module")
@@ -302,6 +301,31 @@ async def test_the_run_checks_the_budget_at_its_start(budget_db: Urls) -> None:
 
 
 @dataclasses.dataclass
+class NoCheck:
+    async def check(self) -> None:
+        return None
+
+
+async def test_the_apps_gateway_checks_the_budget_itself(budget_db: Urls) -> None:
+    """The gateway of `build_pipeline` holds the same guard as the run, and refuses on its own
+    when the run-start check is out of the way."""
+    _set_budget(budget_db, 0)
+    settings = _settings(budget_db)
+    database = connect(settings.database_url.get_secret_value())
+    try:
+        built = build_pipeline(settings, database)
+        assert isinstance(built.budget, BudgetGuard)
+        assert built.gateway.budget is built.budget
+        pipeline, spy = _spied(dataclasses.replace(built, budget=NoCheck()))
+        ticket_id = await _run_with(pipeline, budget_db)
+    finally:
+        await database.dispose()
+    assert spy.requests == []
+    assert run_sql(budget_db, "SELECT count(*) FROM llm_calls") == [(0,)]
+    _assert_budget_handoff(budget_db, ticket_id)
+
+
+@dataclasses.dataclass
 class RefuseAfter:
     allowed: int
     checks: int = 0
@@ -338,13 +362,21 @@ async def test_a_run_that_reaches_the_budget_half_way_is_handed_off(budget_db: U
 
 
 async def test_the_day_is_the_utc_calendar_day(budget_db: Urls) -> None:
-    _add_call(budget_db, mode="real", cost="0.40", created_at=f"{TODAY_UTC} - interval '1 second'")
-    _add_call(budget_db, mode="real", cost="0.10", created_at=TODAY_UTC)
-    _add_call(budget_db, mode="real", cost="0.05")
-    _add_call(budget_db, mode="fake", cost="0.70")
+    """Fixed times on both sides (rows and the guard's clock), so the test never depends on
+    when it runs."""
+    _add_call(budget_db, mode="real", cost="0.40", created_at="'2026-11-15 23:59:59.999+00'")
+    _add_call(budget_db, mode="real", cost="0.10", created_at="'2026-11-16 00:00:00+00'")
+    # 00:30 in Bratislava (UTC+1) is still the 15th in UTC: does not count.
+    _add_call(budget_db, mode="real", cost="0.20", created_at="'2026-11-16 00:30:00+01'")
+    _add_call(budget_db, mode="real", cost="0.05", created_at="'2026-11-16 17:00:00+00'")
+    _add_call(budget_db, mode="fake", cost="0.70", created_at="'2026-11-16 12:00:00+00'")
     database = connect(_settings(budget_db).database_url.get_secret_value())
     try:
-        guard = BudgetGuard(database, default_limit=Decimal("0.5"))
+        guard = BudgetGuard(
+            database,
+            default_limit=Decimal("0.5"),
+            now=lambda: datetime(2026, 11, 16, 18, tzinfo=UTC),
+        )
         assert await guard.spent_today() == Decimal("0.15")
         await guard.check()  # 0.15 < 0.50
     finally:
