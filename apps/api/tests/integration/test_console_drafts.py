@@ -18,6 +18,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from hub.audit import ChainCheck, verify_chain
+from hub.db.models import Draft, Message
+from hub.db.repositories import DraftRepository, MessageRepository
 from hub.main import create_app
 
 from . import _api
@@ -330,6 +332,50 @@ def test_an_edit_equal_to_the_draft_is_an_approve(
     assert _audit(urls, "draft.edited") == []
 
 
+def test_an_edit_that_only_adds_surrounding_whitespace_is_an_approve(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """A text area often adds a trailing newline; that does not make the operator the author
+    (owner decision, review round 2). The draft text itself is sent."""
+    ticket_id, draft_id = _with_draft(urls, customer)
+
+    response = _review(staff["operator"], ticket_id, draft_id, "edit", body=f"  {DRAFT_BODY}\n\n")
+
+    assert response.status_code == 200, response.text
+    out = response.json()
+    assert out["draft"]["status"] == "approved"
+    assert out["draft"]["final_body"] == DRAFT_BODY
+    assert out["draft"]["edit_ratio"] == "0.000"
+    assert out["message"]["body"] == DRAFT_BODY
+    assert out["message"]["author_label"] == "AI assistant · reviewed by Marta"
+
+
+def test_an_edit_that_masks_to_the_draft_still_records_the_masked_card(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """The operator typed a card number that masks to the draft's `[CARD ****1111]`: the send
+    is an approve, but the masking is counted and audited (review round 1, note 3)."""
+    draft_body = "Your card [CARD ****1111] is active [1]."
+    ticket_id, draft_id = _with_draft(urls, customer, body=draft_body)
+
+    response = _review(
+        staff["operator"],
+        ticket_id,
+        draft_id,
+        "edit",
+        body=f"Your card {TEST_CARD} is active [1].",
+    )
+
+    assert response.status_code == 200, response.text
+    out = response.json()
+    assert out["draft"]["status"] == "approved"
+    assert out["message"]["role"] == "assistant"
+    assert out["message"]["body"] == draft_body
+    assert out["message"]["masked_entities"] == {"PAN": 1}
+    assert _audit(urls, "guardrail.masked") == [{"counts": {"PAN": 1}, "failed": False}]
+    assert RAW_DIGITS not in json.dumps(run_sql(urls, "SELECT details FROM audit_log"))
+
+
 def test_an_edit_with_a_marker_without_a_source_is_422(
     staff: dict[str, TestClient], customer: TestClient, urls: Urls
 ) -> None:
@@ -445,6 +491,39 @@ def test_reject_with_a_reply_sends_the_operators_answer(
     assert _audit(urls, "draft.rejected")[0]["with_reply"] is True
 
 
+def test_a_reject_reply_with_card_data_is_stored_masked(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """Review round 1, blocking 2 (AGENTS.md never-do 1): the reply is an operator string too."""
+    ticket_id, draft_id = _with_draft(urls, customer)
+
+    response = _review(
+        staff["operator"],
+        ticket_id,
+        draft_id,
+        "reject",
+        reason="other",
+        reply_body=f"Please never send your card {TEST_CARD} in the chat.",
+    )
+
+    assert response.status_code == 200, response.text
+    out = response.json()
+    masked = "Please never send your card [CARD ****1111] in the chat."
+    assert out["draft"]["final_body"] == masked
+    assert out["message"]["body"] == masked
+    assert out["message"]["masked_entities"] == {"PAN": 1}
+    assert _customer_messages(customer, ticket_id)[-1]["masked"] is True
+    [masking] = run_sql(
+        urls,
+        "SELECT entity_id, details FROM audit_log WHERE action = 'guardrail.masked'"
+        " AND entity_type = 'message'",
+    )
+    assert str(masking[0]) == out["message"]["id"]
+    for table in ("messages", "drafts", "audit_log"):
+        rows = run_sql(urls, f"SELECT count(*) FROM {table} WHERE {table}::text LIKE %s", "%4111%")  # noqa: S608
+        assert rows == [(0,)], table
+
+
 def test_reject_needs_a_known_reason(
     staff: dict[str, TestClient], customer: TestClient, urls: Urls
 ) -> None:
@@ -476,6 +555,105 @@ def test_a_stale_version_or_a_reviewed_draft_is_409(
         assert again.status_code == 409, action
         assert again.json()["code"] == "conflict"
     assert len(_customer_messages(customer, ticket_id)) == 2
+
+
+def test_the_second_of_two_operators_learns_the_draft_was_reviewed(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """Review round 1: both loaded the same version; the loser gets `conflict` (draft already
+    reviewed), not `stale_draft` ("the customer wrote again")."""
+    ticket_id, draft_id = _with_draft(urls, customer)
+    loaded = _version(staff["operator"], ticket_id)
+
+    first = _review(staff["lead"], ticket_id, draft_id, "approve", version=loaded)
+    second = _review(staff["operator"], ticket_id, draft_id, "approve", version=loaded)
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409
+    assert second.json()["code"] == "conflict"
+
+
+def _late_key_lookup(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The request looks up its key before the first request committed: it sees nothing then,
+    and finds the stored message only on the second lookup (under the ticket lock)."""
+    real_lookup = MessageRepository.get_by_idempotency_key
+    calls: list[int] = []
+
+    async def late_lookup(self: MessageRepository, scoped: str) -> Message | None:
+        calls.append(1)
+        return None if len(calls) == 1 else await real_lookup(self, scoped)
+
+    monkeypatch.setattr(MessageRepository, "get_by_idempotency_key", late_lookup)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("action", "body", "role", "record"),
+    [
+        ("approve", {}, "assistant", "draft.approved"),
+        (
+            "reject",
+            {"reason": "wrong_tone", "reply_body": "Own answer."},
+            "operator",
+            "draft.rejected",
+        ),
+    ],
+)
+def test_a_concurrent_duplicate_review_answers_with_the_first_result(
+    staff: dict[str, TestClient],
+    customer: TestClient,
+    urls: Urls,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    body: dict[str, Any],
+    role: str,
+    record: str,
+) -> None:
+    """A double click: the replay is re-checked after the lock (review round 1, blocking 1).
+    The old version is sent again, so without that re-check the answer would be 409."""
+    ticket_id, draft_id = _with_draft(urls, customer)
+    headers, version = key(), _version(staff["operator"], ticket_id)
+    first = _review(staff["operator"], ticket_id, draft_id, action, headers, version, **body)
+    assert first.status_code == 200, first.text
+
+    calls = _late_key_lookup(monkeypatch)
+    second = _review(staff["operator"], ticket_id, draft_id, action, headers, version, **body)
+
+    assert len(calls) == 2
+    assert second.status_code == 200, second.text
+    assert second.json()["message"]["id"] == first.json()["message"]["id"]
+    assert second.json()["draft"] == first.json()["draft"]
+    count = "SELECT count(*) FROM messages WHERE ticket_id = %s AND role = %s"
+    assert run_sql(urls, count, ticket_id, role) == [(1,)]
+    assert len(_audit(urls, record)) == 1
+    assert len(_audit(urls, "message.sent")) == 1
+
+
+def test_a_review_committed_while_waiting_for_the_lock_is_seen(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The draft is reloaded under `FOR UPDATE`: a review that committed after this request
+    first read the draft is seen, and nothing is sent twice (review round 1, blocking 1)."""
+    ticket_id, draft_id = _with_draft(urls, customer)
+    version = _version(staff["operator"], ticket_id)
+    real_get = DraftRepository.get
+
+    async def get_then_race(
+        self: DraftRepository, draft_id: uuid.UUID, *, for_update: bool = False
+    ) -> Draft | None:
+        draft = await real_get(self, draft_id, for_update=for_update)
+        if not for_update:
+            # Another operator's review commits now (ticket untouched to isolate the check).
+            run_sql(urls, "UPDATE drafts SET status = 'approved' WHERE id = %s", draft_id)
+        return draft
+
+    monkeypatch.setattr(DraftRepository, "get", get_then_race)
+    response = _review(staff["operator"], ticket_id, draft_id, "approve", version=version)
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "conflict"
+    assert run_sql(urls, "SELECT 1 FROM messages WHERE role <> 'customer'") == []
+    assert _audit(urls, "draft.approved") == []
 
 
 def test_another_operators_claim_blocks_the_review_but_not_a_lead(
@@ -537,7 +715,7 @@ def test_the_same_key_returns_the_first_result_and_another_request_is_409(
         staff["operator2"], ticket_id, draft_id, "edit", headers, version, body="Edited [1]."
     )
     assert other.status_code == 409
-    assert other.json()["code"] == "stale_draft"
+    assert other.json()["code"] == "conflict"  # already reviewed, checked before the version
 
     missing = staff["operator"].post(
         f"/api/v1/console/drafts/{draft_id}/approve", json={"ticket_version": version}

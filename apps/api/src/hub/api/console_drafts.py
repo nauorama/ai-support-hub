@@ -111,11 +111,14 @@ async def edit_draft(
     session: SessionDep,
 ) -> DraftReviewOut:
     """Send the operator's text. It is masked (G1); every `[n]` marker in it must have a
-    citation in the draft (otherwise `422 validation_error`). Unchanged text is an approve."""
+    citation in the draft (otherwise `422 validation_error`). Text equal to the draft, apart from
+    leading and trailing whitespace (a text area often adds a newline), is an approve."""
     draft = await _draft_or_404(session, draft_id)
     masked = mask(body.body)
-    if masked.text == draft.body:
-        review = _approve(draft, body.approved_actions)
+    if masked.text.strip() == draft.body.strip():
+        # The draft text is sent; the mask result still counts what the operator typed (a card
+        # number that masks to the draft's `[CARD ****1111]`) for the message and the audit log.
+        review = _approve(draft, body.approved_actions, masked=masked)
     else:
         if unknown_markers(masked.text, draft.citations):
             raise ProblemError(
@@ -180,7 +183,9 @@ async def _draft_or_404(session: AsyncSession, draft_id: uuid.UUID) -> Draft:
     return draft
 
 
-def _approve(draft: Draft, approved_actions: list[str]) -> _Review:
+def _approve(
+    draft: Draft, approved_actions: list[str], *, masked: MaskResult | None = None
+) -> _Review:
     if not draft.can_answer:
         raise ProblemError(
             409,
@@ -190,11 +195,12 @@ def _approve(draft: Draft, approved_actions: list[str]) -> _Review:
     return _Review(
         status=DraftStatus.APPROVED,
         # The draft body was masked when it was stored (OutputMask); it is not masked again.
+        # `masked` is set only for an edit equal to the draft (`edit_draft`).
         outgoing=_Outgoing(
             role=MessageRole.ASSISTANT,
             body=draft.body,
             citations=[dict(citation) for citation in draft.citations],
-            masked=None,
+            masked=masked,
         ),
         approved_actions=approved_actions,
     )
@@ -243,9 +249,13 @@ async def _apply(
     if replay is not None:
         return replay
     _check_not_closed(ticket)
+    # Before the version: when two operators review one draft, the second learns that the
+    # draft was already reviewed, not that "the customer wrote again" (review round 1).
+    if draft.status != DraftStatus.PENDING:
+        raise _no_longer_waits()
     _check_version(ticket, ticket_version)
-    if ticket.status != TicketStatus.PENDING_APPROVAL or draft.status != DraftStatus.PENDING:
-        raise ProblemError(409, "conflict", "This draft no longer waits for review.")
+    if ticket.status != TicketStatus.PENDING_APPROVAL:
+        raise _no_longer_waits()
     _check_not_claimed_by_other(ticket, operator)
     _check_actions(draft, review.approved_actions)
 
@@ -371,6 +381,10 @@ async def _replay(
     if repeated_reject:
         return await _result(session, draft.ticket_id, draft.id, None)
     return None
+
+
+def _no_longer_waits() -> ProblemError:
+    return ProblemError(409, "conflict", "This draft no longer waits for review.")
 
 
 def _key_reused() -> ProblemError:

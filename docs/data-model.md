@@ -80,7 +80,7 @@ stateDiagram-v2
     processing --> answered: auto-reply
     processing --> pending_approval: draft waits
     processing --> handed_off: handoff / error
-    pending_approval --> answered: approve / edit
+    pending_approval --> answered: approve / edit / reject with reply
     pending_approval --> handed_off: reject without reply
     handed_off --> answered: operator reply
     answered --> processing: customer message (AI owns)
@@ -156,10 +156,10 @@ One execution of the workflow for one customer message.
 | status | text | `pending` \| `approved` \| `edited` \| `rejected` \| `superseded` (the operator answered with a free reply or closed the ticket without using the draft) |
 | reviewed_by | uuid FK null | |
 | reviewed_at | timestamptz null | |
-| final_body | text null | what was sent |
+| final_body | text null | what was sent; card data masked (G1): an operator's text is masked before it is stored, an approved draft was masked when it was written |
 | edit_ratio | numeric(4,3) null | how much the operator changed: `1 - difflib.SequenceMatcher(None, body, final_body, autojunk=False).ratio()`, rounded to 3 decimals (an approximation of a normalised edit distance, not Levenshtein; no extra dependency). `0` for an approved draft; null for a rejected one (a reply is not an edit of the draft) |
 | reject_reason | text null | `wrong_facts` \| `wrong_tone` \| `missing_info` \| `policy` \| `other` |
-| reject_note | text null | |
+| reject_note | text null | the operator's note, at most 1,000 characters; card data masked (G1) |
 
 ### llm_calls
 Own record of every model call. Source of truth for cost.
