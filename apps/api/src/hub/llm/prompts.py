@@ -8,7 +8,9 @@ records its id (`<node>/v<N>`) in `llm_calls.prompt_version`.
 A `{{` or `}}` that is not part of a valid placeholder makes the file invalid. Rendering is
 strict both ways: a placeholder without a value and a value without a placeholder are errors,
 so a renamed placeholder cannot silently send an empty or stale prompt. Values are inserted in
-one pass, so text inside a value (a ticket that contains `{{x}}`) is never expanded.
+one pass, so text inside a value (a ticket that contains `{{x}}`) is never expanded. Every value
+is untrusted data, so a data tag inside it (`</ticket>`, `<kb>`, ai-pipeline §7) is neutralised
+before it is inserted and cannot close or open a tag of the prompt (`guardrails/injection.py`).
 """
 
 import re
@@ -20,6 +22,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from hub.guardrails.injection import neutralise_data_tags
 from hub.llm.config import ModelsConfig
 from hub.llm.schemas import LlmError, Message
 
@@ -74,8 +77,10 @@ class Prompt:
         if unused:
             raise PromptError(f"{self.version}: no placeholder for {sorted(unused)}")
 
+        safe = {name: neutralise_data_tags(value) for name, value in values.items()}
+
         def fill(text: str) -> str:
-            return PLACEHOLDER.sub(lambda match: values[match.group(1)], text)
+            return PLACEHOLDER.sub(lambda match: safe[match.group(1)], text)
 
         return [
             {"role": "system", "content": fill(self.system)},
