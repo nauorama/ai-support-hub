@@ -2,7 +2,7 @@
 
 Each evaluation ticket becomes a ticket of a seed customer in the evaluation database
 (`EVAL_DATABASE_URL`, never the demo database) and goes through **the same `run_ticket`** as a
-customer message to `POST /tickets` (`hub.graph.linear`; the LangGraph workflow in phase 6). The
+customer message to `POST /tickets` (`hub.graph.run`, the LangGraph workflow of P6-01). The
 pipeline differs only in what an evaluation needs: `llm_calls.context = eval`, the variant, the
 run's own cost limit in place of the daily budget, and the disk cache.
 
@@ -82,22 +82,22 @@ from hub.domain.enums import (
 )
 from hub.domain.triage import TriageResult
 from hub.domain.verification import ClaimsAnswer
-from hub.graph.linear import (
-    B0_VARIANT,
-    GRAPH_VERSION,
-    KbSearch,
-    Pipeline,
-    WriterEvidence,
-    run_ticket,
-    write_prompt_for,
-    writer_evidence,
-)
-from hub.graph.linear import VARIANT as RAG_DEFAULT
-from hub.graph.linear import VARIANTS as WORKFLOW_VARIANTS
+from hub.graph.checkpoint import CheckpointStore
+from hub.graph.draft import WriterEvidence, writer_evidence
 from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import triage_messages
 from hub.graph.nodes.verify import verify_messages
 from hub.graph.nodes.write import write_messages
+from hub.graph.pipeline import (
+    B0_VARIANT,
+    GRAPH_VERSION,
+    KbSearch,
+    Pipeline,
+    write_prompt_for,
+)
+from hub.graph.pipeline import VARIANT as RAG_DEFAULT
+from hub.graph.pipeline import VARIANTS as WORKFLOW_VARIANTS
+from hub.graph.run import run_ticket
 from hub.guardrails.masking import MaskResult, mask
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
@@ -904,6 +904,10 @@ def build_pipeline(
         else None,
         context=LlmCallContext.EVAL,
         variant=variant,
+        # The graph's checkpoints go to the evaluation database too (migration 0009 runs there).
+        checkpoints=CheckpointStore.postgres(
+            database.engine.url.render_as_string(hide_password=False)
+        ),
     )
     return pipeline, limit, cache
 
@@ -1022,6 +1026,21 @@ async def _run(
         cache_dir=options.cache_dir if options.cache else None,
         provider=provider,
     )
+    try:
+        return await _run_with(settings, options, tickets, database, pipeline, limit, cache)
+    finally:
+        await pipeline.checkpoints.close()
+
+
+async def _run_with(
+    settings: Settings,
+    options: Options,
+    tickets: list[Ticket],
+    database: Database,
+    pipeline: Pipeline,
+    limit: CostLimit,
+    cache: CachingProvider | None,
+) -> Report:
     judge_set = (
         judging.load_judges(settings.prompts_dir, pipeline.gateway.models)
         if options.judges

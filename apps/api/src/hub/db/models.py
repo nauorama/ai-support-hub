@@ -424,8 +424,8 @@ class LlmCall(Base):
 
 
 class Run(Base):
-    """One execution of the workflow for one customer message (data model §1). Written by
-    `hub.graph.linear` in phase 3; the LangGraph workflow takes over in phase 6."""
+    """One execution of the workflow for one customer message (data model §1). Written by the
+    workflow graph (`hub.graph.run` and its nodes, P6-01)."""
 
     __tablename__ = "runs"
     __table_args__ = (
@@ -502,7 +502,7 @@ class Draft(Base):
     ticket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tickets.id"))
     can_answer: Mapped[bool]
     missing_information: Mapped[str | None]
-    # Model output after `OutputMask` (hub/graph/linear.py): placeholders restored, then card
+    # Model output after `OutputMask` (hub/graph/draft.py): placeholders restored, then card
     # data masked (G1). Never stored unmasked.
     body: Mapped[str]
     citations: Mapped[list[Any]] = mapped_column(default=list, server_default=text("'[]'::jsonb"))

@@ -1,4 +1,4 @@
-"""Customer ticket endpoints (docs/api.md §2), phase 2: no AI run yet.
+"""Customer ticket endpoints (docs/api.md §2).
 
 Order inside a message handler (ADR-0010, security G1): validate → mask → save → audit, in one
 transaction that is committed before the first byte of the SSE stream. Validation is the
@@ -6,15 +6,20 @@ request schema (4,000 characters), which runs before the handler, so an over-lon
 refused before the mask sees it; the body cap in `hub/api/limits.py` runs before that. The raw
 text lives only in this request's memory: it is never logged, stored or put in an error.
 
-A new ticket starts a run of the phase-3 workflow (`hub.graph.linear`: intake → triage →
-write) after the commit. The run is a task of its own, so a closed stream does not stop it; the
-stream relays its events: `ticket.created` → `run.status` (understanding, writing) → `message`
-(a placeholder system message) → `ticket.status` (`pending_approval`, or `handed_off` after an
-`error` event) → `done`, with a `: ping` comment every 10 s while the run works. A follow-up
-message starts no run yet: without auto-reply, every ticket is owned by a human after its first
-run. Its stream, a replay, and a ticket handed off because masking failed are `ticket.created`
-→ placeholder → (`ticket.status`) → `done`. The placeholder is not stored: it stands in for an
-answer and would otherwise leave invented history in every ticket.
+A new ticket starts a run of the workflow graph (`hub.graph.run`, P6-01) after the commit. The
+run is a task of its own, so a closed stream does not stop it; the stream relays its events:
+`ticket.created` → `run.status` (understanding, searching, writing, checking) → `message` (a
+placeholder system message) → `ticket.status` (`pending_approval`, or `handed_off` after an
+`error` event) → `done`, with a `: ping` comment every 10 s while the run works (sent by
+`_run_stream` itself: FastAPI's own 15 s keep-alive applies only to generator endpoints, which
+these are not). A follow-up message starts no run yet: without auto-reply, every ticket is owned
+by a human after its first run. Its stream and a ticket handed off because masking failed are
+`ticket.created` → placeholder → (`ticket.status`) → `done`; a replay of the same request
+(`Idempotency-Key`) always carries the ticket's current status. The placeholder is not stored:
+it stands in for an answer and would otherwise leave invented history in every ticket.
+
+Audit order, the same for a new ticket and a follow-up: `ticket.created` or `message.received`,
+then `guardrail.masked`, then `route.decided` when a failed mask handed the ticket off.
 """
 
 import asyncio
@@ -52,7 +57,8 @@ from hub.db.repositories import (
 )
 from hub.deps import Container
 from hub.domain.enums import ActorType, MessageRole, Route, TicketStatus
-from hub.graph.linear import Pipeline, run_ticket
+from hub.graph.pipeline import Pipeline
+from hub.graph.run import run_ticket
 from hub.guardrails.masking import CARD_ENTITIES, MaskResult, mask
 
 router = APIRouter(prefix="/api/v1/tickets", tags=["tickets"])
@@ -134,7 +140,8 @@ def _event(name: str, data: Any) -> bytes:  # noqa: ANN401 - any JSON-ready valu
 def _stream(
     ticket_id: uuid.UUID, message: MessageOut, status: TicketStatus | None = None
 ) -> EventSourceResponse:
-    """`status` is sent as `ticket.status` when this request handed the ticket to a human."""
+    """`status` is sent as `ticket.status`: when this request handed the ticket to a human, and
+    on a replay."""
     created = TicketCreatedEvent(ticket_id=ticket_id, message=message).model_dump(mode="json")
     placeholder = _placeholder().model_dump(mode="json")
 
@@ -241,7 +248,9 @@ async def _replay(
     expected_ticket_id: uuid.UUID | None,
     masked_body: str,
 ) -> EventSourceResponse:
-    """The stream for a repeated `Idempotency-Key`: the first message, not a new one.
+    """The stream for a repeated `Idempotency-Key`: the first message, not a new one, and the
+    ticket's current status (the first response may have carried one, e.g. after a failed
+    mask, and a replay must not look different).
 
     The key must have been used for the same request: same ticket (for a follow-up message),
     the first message of its ticket (for a new ticket), and the same text after masking.
@@ -258,7 +267,9 @@ async def _replay(
             "idempotency_key_reused",
             "This Idempotency-Key was already used for a different request.",
         )
-    return _stream(stored.ticket_id, await _message_out(session, stored))
+    current = await session.get(Ticket, stored.ticket_id)
+    status = current.status if current is not None else None
+    return _stream(stored.ticket_id, await _message_out(session, stored), status)
 
 
 async def _audit_message(
@@ -437,11 +448,6 @@ async def add_message(
             masked_entities=masked_entities(masked),
             idempotency_key=scoped_key,
         )
-        status = await _hand_off_after_mask_failure(session, ticket, masked)
-        if status is None and ticket.status == TicketStatus.ANSWERED:
-            # AI owns → a new run (phase 6); human owns → the operator queue.
-            target = TicketStatus.HANDED_OFF if _human_owns(ticket) else TicketStatus.PROCESSING
-            await _change_status_or_409(session, ticket, target)
         await _audit_message(
             session,
             customer_id=customer_id,
@@ -450,6 +456,11 @@ async def add_message(
             masked=masked,
             action="message.received",
         )
+        status = await _hand_off_after_mask_failure(session, ticket, masked)
+        if status is None and ticket.status == TicketStatus.ANSWERED:
+            # AI owns → a new run (phase 6); human owns → the operator queue.
+            target = TicketStatus.HANDED_OFF if _human_owns(ticket) else TicketStatus.PROCESSING
+            await _change_status_or_409(session, ticket, target)
         await session.commit()
         return message, status
 

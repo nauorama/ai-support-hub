@@ -27,7 +27,7 @@ import pytest
 from psycopg import sql
 
 from hub.config import Settings
-from hub.graph.linear import B0_VARIANT
+from hub.graph.pipeline import B0_VARIANT
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider
 from hub.llm.schemas import ProviderError, ProviderRequest, ProviderResponse, Usage
 from hub.observability.readiness import libpq_url

@@ -13,19 +13,30 @@
    cannot split into claims gives no basis for trust (the rule version of confidence uses
    groundedness, ai-pipeline §6).
 
-Any gateway error is raised to the caller, which hands the ticket to a human.
+In the graph (`run`, P6-01) a failed LLM check counts as an unsupported draft (ai-pipeline §3):
+no claims, groundedness 0, `passed = false`, and the error class is kept in `verify_error` for
+the `verify.done` record. A budget stop (G8) is not a failed check: it ends the run like any
+budget stop, with a handoff. B0 has no verify step.
 """
 
+import logging
 import uuid
 from collections.abc import Collection
 
 from hub.domain.enums import LlmCallContext, LlmNode
 from hub.domain.verification import ClaimCheck, ClaimsAnswer, Verification
+from hub.graph.context import GraphContext, ids
+from hub.graph.draft import draft_to_check, evidence_for_writer, internal_text
+from hub.graph.nodes.intake import intake_result
+from hub.graph.state import TicketState
+from hub.guardrails.output_checks import check_draft
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt, PromptError, cache_system
-from hub.llm.schemas import CallContext, Message, Structured
+from hub.llm.schemas import BudgetExceededError, CallContext, Message, Structured
 
 NODE = LlmNode.VERIFY
+
+logger = logging.getLogger(__name__)
 
 
 def verify_messages(
@@ -79,4 +90,46 @@ def verification(answer: ClaimsAnswer, known_sources: Collection[str]) -> Verifi
         groundedness=round(supported / len(claims), 3) if claims else 0.0,
         policy_violations=[],
         passed=bool(claims) and supported == len(claims),
+    )
+
+
+def unavailable() -> Verification:
+    """The result when the LLM check failed: the draft counts as unsupported."""
+    return Verification(claims=[], groundedness=0.0, policy_violations=[], passed=False)
+
+
+async def run(state: TicketState, ctx: GraphContext) -> TicketState:
+    pipeline = ctx.pipeline
+    answer = state.get("draft")
+    if not pipeline.verifies or answer is None or pipeline.verify_prompt is None:
+        return TicketState()
+    _, run_id = ids(state)
+    research = state.get("evidence")
+    evidence = await evidence_for_writer(pipeline, research.chunks if research else ())
+    intake = intake_result(state)
+    violations = check_draft(
+        draft_to_check(answer, evidence, intake), internal=await internal_text(pipeline)
+    )
+    if violations:
+        return TicketState(verification=failed_checks(violations))
+    try:
+        checked = await check_claims(
+            pipeline.gateway,
+            pipeline.verify_prompt,
+            draft=answer.answer,
+            kb=evidence.kb,
+            ticket=intake.message_for_llm,
+            history=intake.history_for_llm,
+            run_id=run_id,
+            context=pipeline.context,
+        )
+    except BudgetExceededError:
+        raise
+    except Exception as exc:
+        error = type(exc).__name__
+        logger.warning("verify check failed", extra={"run_id": str(run_id), "error": error})
+        return TicketState(verification=unavailable(), verify_error=error)
+    return TicketState(
+        verification=verification(checked.value, evidence.citable.keys()),
+        models={**state.get("models", {}), "verify": checked.model},
     )

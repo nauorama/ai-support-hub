@@ -19,6 +19,19 @@ dependencies = [
     "itsdangerous==2.2.0",
     # Model gateway, used only in hub.llm.gateway (ADR-0003). 1.108.6 (LTS, 2026-11-12) is the
     # first 1.108 release with the fix for GHSA-2rwg-2wh4-7c4f; 1.108.3 is affected.
+    # Workflow graph and its Postgres checkpointer (ADR-0002, ADR-0008), used only in hub.graph and
+    # the migrations. 1.2.20: 2026-11-05; checkpoint-postgres 3.2.0: 2026-10-14. The packages they
+    # pull in are held at releases at least a week old (P6-01): langgraph-checkpoint 4.3.1,
+    # langgraph-prebuilt 1.1.1, langchain-core 1.7.6, langsmith 0.14.17, jsonpatch 1.44,
+    # jsonpointer 3.10. No LangChain chat-model wrapper is used (design §8).
+    "jsonpatch==1.44",
+    "jsonpointer==3.10",
+    "langchain-core==1.7.6",
+    "langgraph==1.2.20",
+    "langgraph-checkpoint==4.3.1",
+    "langgraph-checkpoint-postgres==3.2.0",
+    "langgraph-prebuilt==1.1.1",
+    "langsmith==0.14.17",
     "litellm==1.108.6",
     # Native code of fastembed. Held at 2.5.4 (2026-10-10) and 1.31.1 (2026-10-26): numpy 2.5.5
     # and onnxruntime 1.32.0 were under a week old at P5-01.
@@ -36,7 +49,10 @@ dependencies = [
     "sqlalchemy[asyncio]==2.1.8",
     "starlette==1.10.0",
     "structlog==26.1.0",
-    "uuid-utils==1.2.0",
+    # uuid7 for primary keys (`uuid_utils.compat`). The 0.x line, released alongside 1.x
+    # (0.19.0 and 1.2.0 both 2026-10-26): langsmith, through langchain-core and langgraph, needs
+    # uuid-utils<1.0 (P6-01).
+    "uuid-utils==0.19.0",
     "uvicorn==0.54.0",
 ]
 

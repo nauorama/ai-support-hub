@@ -1,6 +1,6 @@
 """`make llm-requests`: write the recording requests of the run tickets (P3-05, retrieval P5-03).
 
-A plain module, imported by `test_linear_run.py` and run as a script by the Make target; it
+A plain module, imported by `test_graph_run.py` and run as a script by the Make target; it
 imports only from `hub`. Each ticket in `tests/fixtures/run/tickets.jsonl` becomes two request
 files, `run_NN_triage.json` and `run_NN_write.json`, built with the same functions the run uses
 (`intake`, `triage_messages`, `write_messages`, `rag_evidence`), so a ticket sent through the API
@@ -38,17 +38,12 @@ from pydantic import BaseModel, ConfigDict
 
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import LlmCallContext, LlmCallMode, LlmNode
-from hub.graph.linear import (
-    SEARCH_MODES,
-    SEARCH_TOP_K,
-    VARIANT,
-    draft_to_check,
-    rag_evidence,
-)
+from hub.graph.draft import draft_to_check, rag_evidence
 from hub.graph.nodes.intake import intake
 from hub.graph.nodes.triage import triage_messages
 from hub.graph.nodes.verify import verify_messages
 from hub.graph.nodes.write import write_messages
+from hub.graph.pipeline import SEARCH_MODES, SEARCH_TOP_K, VARIANT
 from hub.guardrails.masking import mask
 from hub.guardrails.output_checks import InternalText, check_draft
 from hub.kb.loader import KbFile, read_kb
