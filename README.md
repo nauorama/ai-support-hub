@@ -4,7 +4,7 @@ AI customer support for **Tallybridge**, a payments platform for freelancers and
 
 > Tallybridge is a fictional company made for this project. It has no relation to any real company. All data is synthetic.
 
-**Status:** design package complete; build not started. This README is replaced by the final version in phase 12 (demo link, numbers, diagram).
+**Status:** build in progress (phase 4, evaluation). This README is replaced by the final version in phase 12 (demo link, numbers, diagram).
 
 ## What the system does
 
@@ -38,6 +38,27 @@ AI customer support for **Tallybridge**, a payments platform for freelancers and
 Python 3.13 · FastAPI · LangGraph · LiteLLM (Anthropic only) · FastEmbed (local embeddings) · Qdrant (hybrid search) · Postgres · MCP · Langfuse · React + TypeScript · Docker · GitHub Actions · Cloud Run.
 
 **Budget mode** ([ADR-0018](docs/adr/0018-budget-mode.md)): the whole project spends about $5 on model calls. Every model role runs on Claude Haiku 5.5 (fallback Claude Sonnet 5.5); embeddings come from a local model. The LLM judge is the same model family as the writer, so it may prefer the writer's answers; judge numbers are reported as unvalidated. Evaluation uses 20 tickets and 16 attacks: a demo check that the system works, not a proof of quality ([eval plan](docs/eval-plan.md)).
+
+## First numbers (phase 4, baseline B0)
+
+> **Synthetic data. Demo check, not a proof.** 20 synthetic tickets that are also the tuning set; one ticket is 5 points, and 0 errors in 20 still allows a true error rate of up to 16%. Metrics marked *judged* come from an LLM judge that is **unvalidated and the same model family** as the writer (Claude Haiku 5.5).
+
+Run `2026-11-17-b0_full_kb-4bc48fc`: the phase 3 linear pipeline (whole knowledge base in the prompt, no retrieval, no routing yet). Full report: [evals/runs/2026-11-17-b0_full_kb-4bc48fc/report.md](evals/runs/2026-11-17-b0_full_kb-4bc48fc/report.md); history: [docs/experiments.md](docs/experiments.md).
+
+| Metric | Value (count, 95% Wilson interval) | Target | Red line | Result |
+|---|---|---|---|---|
+| Triage accuracy | 17 of 20 (64%–95%) | ≥ 18 of 20 | 16 of 20 | below target |
+| Flag recall (3 flags) | 1 of 1 each | all | all | pass |
+| Key-fact coverage *(judged)* | 0.61 (14 tickets) | ≥ 0.85 | 0.75 | red line missed |
+| Answered tickets with an unsupported claim *(judged)* | 12 of 13 (67%–99%) | ≤ 1 | 2 | red line missed |
+| Answered tickets with an invalid citation *(judged)* | 10 of 13 (50%–92%) | 0 | 1 | red line missed |
+| Hard-handoff recall | 0 of 8 (0%–32%) | 1.00 | 1.00 | red line missed (no routing before phase 6) |
+| Escalation recall | 10 of 10 (72%–100%) | 1.00 | 1 miss | pass |
+| Wrong auto-reply | 0 of 0 (auto-reply is off) | 0 | any | pass |
+| Cost per ticket | $0.0015 | ≤ €0.05 | €0.10 | pass |
+| Retrieval, latency of auto-replies, safety | not measured yet (phases 5, 6 and 8) | | | — |
+
+Every ticket went to operator approval: B0 has no policy gate or handoff yet, so the hard-handoff red line cannot be met until P6-02. Auto-reply stays off.
 
 ## How this project is built
 
