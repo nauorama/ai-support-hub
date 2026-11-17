@@ -26,7 +26,7 @@ from psycopg import sql
 
 from hub.config import Settings
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider
-from hub.llm.schemas import ProviderRequest, ProviderResponse
+from hub.llm.schemas import ProviderError, ProviderRequest, ProviderResponse
 from hub.observability.readiness import libpq_url
 from hub_evals import results as files
 from hub_evals.runner import TICKETS_FILE, EvalSetupError, Options, load_tickets, run
@@ -94,26 +94,25 @@ def test_make_migrate_upgrades_the_eval_database_for_the_app_role(
                 " VALUES (gen_random_uuid(), 'CUS-0001', 'A', 'a@example.com', 'verified', 'SK')"
             )
         assert run_sql(urls, "SELECT count(*) FROM customers") == [(1,)]
-        wrong = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "alembic",
-                "-c",
-                str(ALEMBIC_INI),
-                "-x",
-                "db=other",
-                "upgrade",
-                "head",
-            ],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        wrong = _alembic(tmp_path, env, "db=other")
         assert wrong.returncode != 0
         assert "unknown -x db=other" in wrong.stderr
+        # An older .env without an evaluation database: skipped, `make migrate` still passes.
+        skipped = _alembic(tmp_path, env | {"EVAL_DATABASE_URL": ""}, "db=eval")
+        assert skipped.returncode == 0
+        assert "evaluation database skipped" in skipped.stdout
+        # The evaluation database must never be the app database.
+        same = _alembic(
+            tmp_path,
+            env
+            | {
+                "EVAL_DATABASE_URL": app_url(postgres_url),
+                "DATABASE_URL_DIRECT": env["DATABASE_URL_DIRECT"],
+            },
+            "db=eval",
+        )
+        assert same.returncode != 0
+        assert "is the app database" in same.stderr
     finally:
         with psycopg.connect(libpq_url(postgres_url), autocommit=True) as connection:
             connection.execute(
@@ -121,6 +120,17 @@ def test_make_migrate_upgrades_the_eval_database_for_the_app_role(
                     sql.Identifier(MIGRATE_DATABASE)
                 )
             )
+
+
+def _alembic(cwd: Path, env: dict[str, str], target: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", str(ALEMBIC_INI), "-x", target, "upgrade", "head"],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 # --- the runner ---------------------------------------------------------------------------------
@@ -235,6 +245,9 @@ async def test_resume_cache_and_results(eval_db: Urls, tmp_path: Path) -> None:
     # The same tickets again from the start: every answer comes from the cache.
     third = await run(settings, dataclass_replace(options, restart=True), provider=provider)
     assert third.ran == 2
+    # The earlier results are kept beside the new ones, never deleted.
+    (kept,) = run_dir.glob("results.before-*.jsonl")
+    assert len(files.read_results(kept)) == 3
     assert provider.calls == 5
     assert (third.cache_hits, third.cache_misses) == (4, 0)
     assert third.estimate is not None
@@ -260,6 +273,34 @@ async def test_resume_cache_and_results(eval_db: Urls, tmp_path: Path) -> None:
     _tickets_file(tickets, [RUN_TICKETS["run_02"]])
     with pytest.raises(EvalSetupError, match="tickets_sha256"):
         await run(settings, options, provider=provider)
+
+
+@dataclass
+class DownProvider:
+    """A provider that is down: every call fails."""
+
+    calls: int = 0
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        self.calls += 1
+        raise ProviderError("ServiceUnavailable", transient=False)
+
+    async def embed(self, request: ProviderRequest) -> ProviderResponse:
+        return await self.complete(request)
+
+
+async def test_a_ticket_failed_by_an_outage_runs_again_on_resume(
+    eval_db: Urls, tmp_path: Path
+) -> None:
+    tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
+    options = Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache")
+    down = DownProvider()
+    report = await run(_settings(eval_db), options, provider=down)
+    assert down.calls == 2  # the model and its fallback
+    assert (report.ran, report.unavailable) == (0, 1)
+    assert files.read_results(tmp_path / "run" / files.RESULTS_FILE) == []
+    resumed = await run(_settings(eval_db), options, provider=CountingProvider())
+    assert (resumed.skipped, resumed.ran) == (0, 1)
 
 
 async def test_the_estimate_above_the_limit_stops_before_any_call(

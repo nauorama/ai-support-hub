@@ -13,7 +13,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from hub.config import load_settings
@@ -28,26 +28,40 @@ if config.config_file_name is not None and not config.attributes.get("url"):
 target_metadata = Base.metadata
 
 
-def _url() -> str:
+def _database(url: str) -> tuple[str | None, int, str | None]:
+    parsed = make_url(url)
+    return parsed.host, parsed.port or 5432, parsed.database
+
+
+def _url() -> str | None:
+    """The migrator URL, or None when there is nothing to migrate (`-x db=eval` without an
+    evaluation database: an older `.env` keeps `make migrate` working)."""
     url = config.attributes.get("url")
     if isinstance(url, str) and url:
         return url
     settings = load_settings()
     target = context.get_x_argument(as_dictionary=True).get("db", "app")
+    app_url = settings.database_url_for_migrations.get_secret_value()
     if target == "app":
-        return settings.database_url_for_migrations.get_secret_value()
+        return app_url
     if target == "eval":
         eval_url = settings.eval_database_url_for_migrations.get_secret_value()
         if not eval_url:
-            raise SystemExit("EVAL_DATABASE_URL is empty: no evaluation database to migrate")
+            print("migrate: EVAL_DATABASE_URL is empty, evaluation database skipped")
+            return None
+        if _database(eval_url) == _database(app_url):
+            raise SystemExit("the evaluation database is the app database; set EVAL_DATABASE_URL")
         return eval_url
     raise SystemExit(f"unknown -x db={target}; use app or eval")
 
 
 def run_migrations_offline() -> None:
     """`alembic upgrade --sql`: print the SQL instead of running it."""
+    url = _url()
+    if url is None:
+        return
     context.configure(
-        url=_url(),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -68,7 +82,10 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    engine = create_async_engine(_url(), poolclass=pool.NullPool)
+    url = _url()
+    if url is None:
+        return
+    engine = create_async_engine(url, poolclass=pool.NullPool)
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await engine.dispose()

@@ -23,6 +23,7 @@ from hub_evals.runner import (
     estimate_cost,
     estimate_tokens,
     eval_database_url,
+    files_sha256,
     git_state,
     history_turns,
     load_tickets,
@@ -31,6 +32,7 @@ from hub_evals.runner import (
     parse_args,
     pending,
     run_name,
+    same_database,
 )
 from hub_evals.schemas import HistoryMessage, Ticket
 
@@ -144,10 +146,36 @@ def test_run_name_marks_uncommitted_changes() -> None:
         "2026-11-17-b0_full_kb-abc1234"
     )
     assert run_name("2026-11-17", "b0_full_kb", "abc1234", dirty=True).endswith("-dirty")
+    assert run_name("2026-11-17", "b0_full_kb", "abc1234", dirty=False, llm_mode="fake").endswith(
+        "abc1234-fake"
+    )
 
 
 def test_git_state_without_git(tmp_path: Path) -> None:
-    assert git_state(tmp_path) == ("nogit", False)
+    assert git_state(tmp_path) == ("nogit", None)
+
+
+def test_git_state_hashes_the_uncommitted_changes() -> None:
+    sha, diff = git_state()
+    assert sha != "nogit"
+    assert diff is None or len(diff) == 64
+
+
+def test_files_sha256_sees_content_and_names(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("one", encoding="utf-8")
+    first = files_sha256([tmp_path / "a.md"], tmp_path)
+    (tmp_path / "a.md").write_text("two", encoding="utf-8")
+    assert files_sha256([tmp_path / "a.md"], tmp_path) != first
+    (tmp_path / "a.md").rename(tmp_path / "b.md")
+    assert files_sha256([tmp_path / "b.md"], tmp_path) != first
+
+
+def test_same_database_ignores_login_and_query() -> None:
+    assert same_database(
+        "postgresql+psycopg://hub_api:x@db:5432/hub", "postgresql+psycopg://other@db/hub?sslmode=x"
+    )
+    assert not same_database("postgresql+psycopg://a@db/hub", "postgresql+psycopg://a@db/hub_eval")
+    assert not same_database("postgresql+psycopg://a@db/hub", "postgresql+psycopg://a@other/hub")
 
 
 def test_a_cut_off_line_is_dropped_and_the_first_result_wins(tmp_path: Path) -> None:
@@ -163,6 +191,7 @@ def test_a_cut_off_line_is_dropped_and_the_first_result_wins(tmp_path: Path) -> 
         ("T-0002", "approval"),
     ]
     files.rewrite_results(path, done)
+    assert list(tmp_path.glob("*.tmp")) == []
     files.append_result(path, _result("T-0003"))
     assert [r.ticket_id for r in files.read_results(path)] == ["T-0001", "T-0002", "T-0003"]
 
@@ -260,6 +289,14 @@ def test_the_demo_database_is_refused() -> None:
     same = "postgresql+psycopg://a@h/hub"
     with pytest.raises(EvalSetupError, match="demo database"):
         eval_database_url(Settings(_env_file=None, database_url=same, eval_database_url=same))
+    with pytest.raises(EvalSetupError, match="demo database"):
+        eval_database_url(
+            Settings(
+                _env_file=None,
+                database_url=same,
+                eval_database_url="postgresql+psycopg://b:pw@h:5432/hub?application_name=x",
+            )
+        )
 
 
 def test_parse_args() -> None:
@@ -288,9 +325,17 @@ def test_main_reports_a_setup_error(
 
 def test_describe_names_counts_only(tmp_path: Path) -> None:
     report = Report(
-        run_dir=tmp_path / "r", planned=10, skipped=4, ran=6, stopped_at_cost_limit=True
+        run_dir=tmp_path / "r",
+        planned=10,
+        skipped=4,
+        ran=6,
+        stopped_at_cost_limit=True,
+        stopped_by_estimate=True,
+        unavailable=2,
     )
     lines = describe(report, Settings(_env_file=None))
+    assert any("2 tickets failed because the model was unavailable" in line for line in lines)
+    assert any("estimate is above" in line for line in lines)
     assert any("10 tickets, 4 already finished, 6 run now" in line for line in lines)
     assert any("EVAL_MAX_COST_USD" in line for line in lines)
 

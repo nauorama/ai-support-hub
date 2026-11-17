@@ -42,6 +42,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from hub.audit import record
@@ -88,6 +89,10 @@ CONCURRENCY = 5
 # A ticket's first message in the evaluation database says where it came from (audit only).
 SOURCE = "eval"
 BUDGET_REASON = "budget_exceeded"
+# Run errors that are not written as results, so a resume runs the ticket again: the model and
+# its fallback failed (outage, rate limit). A missing recording in fake mode is deterministic and
+# stays a result.
+RETRY_ERRORS = frozenset({"LlmUnavailableError"})
 # Characters per token for the estimate: a rough rule for English text.
 CHARS_PER_TOKEN = 4
 # Output tokens of a role without `max_tokens` in the estimate.
@@ -131,8 +136,12 @@ class CostLimit:
 # --- pure helpers -------------------------------------------------------------------------------
 
 
-def run_name(day: str, variant: str, sha: str, *, dirty: bool) -> str:
-    return f"{day}-{variant}-{sha}{'-dirty' if dirty else ''}"
+def run_name(day: str, variant: str, sha: str, *, dirty: bool, llm_mode: str = "real") -> str:
+    """`<date>-<variant>-<git sha>` (eval plan §4); `-dirty` with uncommitted changes, `-fake` for
+    a fake-mode check, so a real run never meets the results of a fake one."""
+    return (
+        f"{day}-{variant}-{sha}{'-dirty' if dirty else ''}{'-fake' if llm_mode == 'fake' else ''}"
+    )
 
 
 def load_tickets(path: Path, limit: int | None = None) -> list[Ticket]:
@@ -227,8 +236,9 @@ def estimate_cost(
     return Estimate(calls=calls, cached_calls=cached, cost_usd=total)
 
 
-def git_state(root: Path = ROOT) -> tuple[str, bool]:
-    """Short commit id and whether the working tree has changes; `nogit` without git."""
+def git_state(root: Path = ROOT) -> tuple[str, str | None]:
+    """Short commit id and the SHA-256 of the uncommitted changes of tracked files (`git diff
+    HEAD`), None for a clean tree: two dirty states never pass for one. `nogit` without git."""
     try:
         sha = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607 - git from PATH
@@ -237,20 +247,34 @@ def git_state(root: Path = ROOT) -> tuple[str, bool]:
             text=True,
             check=True,
         ).stdout.strip()
-        status = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],  # noqa: S607
+        diff = subprocess.run(
+            ["git", "diff", "HEAD", "--binary"],  # noqa: S607
             cwd=root,
             capture_output=True,
-            text=True,
             check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError):
-        return "nogit", False
-    return sha, bool(status.strip())
+        return "nogit", None
+    return sha, hashlib.sha256(diff).hexdigest() if diff.strip() else None
 
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def files_sha256(paths: Sequence[Path], root: Path) -> str:
+    """One digest of several files, names included (a renamed file is a change)."""
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(root)).encode("utf-8") + b"\0")
+        digest.update(path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
+def same_database(first: str, second: str) -> bool:
+    """Same server and database name, whatever the login or the query string."""
+    a, b = make_url(first), make_url(second)
+    return (a.host, a.port or 5432, a.database) == (b.host, b.port or 5432, b.database)
 
 
 # --- database -----------------------------------------------------------------------------------
@@ -261,7 +285,7 @@ def eval_database_url(settings: Settings) -> str:
     url = settings.eval_database_url.get_secret_value()
     if not url:
         raise EvalSetupError("EVAL_DATABASE_URL is empty")
-    if url == settings.database_url.get_secret_value():
+    if same_database(url, settings.database_url.get_secret_value()):
         raise EvalSetupError("EVAL_DATABASE_URL is the demo database; use its own database")
     return url
 
@@ -447,6 +471,7 @@ class Report:
     ran: int
     stopped_at_cost_limit: bool = False
     stopped_by_estimate: bool = False
+    unavailable: int = 0
     estimate: Estimate | None = None
     cache_hits: int = 0
     cache_misses: int = 0
@@ -485,8 +510,12 @@ def build_pipeline(
 
 
 def run_config(settings: Settings, pipeline: Pipeline, options: Options) -> files.RunConfig:
-    sha, dirty = git_state()
+    sha, diff = git_state()
     models = pipeline.gateway.models
+    prompt_files = [
+        settings.prompts_dir / prompt.node / f"{prompt.front.version}.md"
+        for prompt in (pipeline.triage_prompt, pipeline.write_prompt)
+    ]
     return files.RunConfig(
         variant=pipeline.variant,
         llm_mode=settings.llm_mode,
@@ -500,7 +529,12 @@ def run_config(settings: Settings, pipeline: Pipeline, options: Options) -> file
         },
         prompt_versions=pipeline.prompt_versions,
         git_sha=sha,
-        git_dirty=dirty,
+        git_dirty=diff is not None,
+        git_diff_sha256=diff,
+        prompts_sha256=files_sha256(prompt_files, settings.prompts_dir),
+        kb_sha256=files_sha256(
+            [p for p in options.kb_dir.rglob("*") if p.is_file()], options.kb_dir
+        ),
         core_anchor_date=settings.core_anchor_date,
         tickets_file=_relative(options.tickets),
         tickets_sha256=file_sha256(options.tickets),
@@ -550,15 +584,17 @@ async def _run(
     config = run_config(settings, pipeline, options)
     day = datetime.now(UTC).date().isoformat()
     run_dir = options.run_dir or options.runs_dir / run_name(
-        day, config.variant, config.git_sha, dirty=config.git_dirty
+        day, config.variant, config.git_sha, dirty=config.git_dirty, llm_mode=config.llm_mode
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     results_path = run_dir / files.RESULTS_FILE
     config_path = run_dir / files.CONFIG_FILE
 
     stored = files.read_config(config_path)
-    if options.restart:
-        results_path.unlink(missing_ok=True)
+    if options.restart and results_path.exists():
+        # Kept, not deleted: a restart by mistake must not lose paid results.
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        results_path.replace(run_dir / f"results.before-{stamp}.jsonl")
     elif stored is not None:
         differences = files.config_differences(stored, config)
         if differences:
@@ -598,6 +634,11 @@ async def _run(
             if BUDGET_REASON in result.route_reasons:
                 # Not a result: the ticket never ran. A resume with a higher limit runs it.
                 report.stopped_at_cost_limit = True
+                return
+            if result.error in RETRY_ERRORS:
+                # The provider was down: says nothing about the workflow. A resume runs it again
+                # (cheap: answers that came are in the cache).
+                report.unavailable += 1
                 return
             files.append_result(results_path, result)
             report.ran += 1
@@ -675,6 +716,11 @@ def describe(report: Report, settings: Settings) -> list[str]:
         f"eval: {report.planned} tickets, {report.skipped} already finished, {report.ran} run now"
     )
     lines.append(f"eval: cache hits {report.cache_hits}, misses {report.cache_misses}")
+    if report.unavailable:
+        lines.append(
+            f"eval: {report.unavailable} tickets failed because the model was unavailable; "
+            "they are not written, run again to retry them"
+        )
     if report.stopped_by_estimate:
         lines.append("eval: the estimate is above EVAL_MAX_COST_USD; nothing was run")
     if report.stopped_at_cost_limit:

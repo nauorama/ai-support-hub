@@ -41,6 +41,9 @@ class RunConfig(_Frozen):
     prompt_versions: dict[str, str]
     git_sha: str
     git_dirty: bool
+    git_diff_sha256: str | None = None
+    prompts_sha256: str = ""
+    kb_sha256: str = ""
     core_anchor_date: date | None
     tickets_file: str
     tickets_sha256: str
@@ -119,8 +122,11 @@ def read_results(path: Path) -> list[TicketResult]:
 
 
 def rewrite_results(path: Path, results: Iterable[TicketResult]) -> None:
-    """Keep only the valid lines, so a resumed run appends after a complete line."""
-    path.write_text("".join(_line(result) for result in results), encoding="utf-8")
+    """Keep only the valid lines, so a resumed run appends after a complete line. Written to a
+    temporary file and moved into place: an interruption here never loses finished tickets."""
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text("".join(_line(result) for result in results), encoding="utf-8")
+    temporary.replace(path)
 
 
 def append_result(path: Path, result: TicketResult) -> None:

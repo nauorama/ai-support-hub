@@ -325,8 +325,11 @@ class CachingProvider:
     format. The key covers the model, its parameters and everything the model sees (the prompt
     text, so a new prompt version is a new key), so a prompt change re-runs only the calls whose
     input changed. A hit returns the stored answer marked `replayed` and calls nothing; a miss
-    calls `inner` and stores a successful answer. Failures are never stored. `hits` and `misses`
-    count the calls of this process, for the run summary.
+    calls `inner`. The gateway calls `store` only for an answer that passed its check (P4-03
+    review): a failed call or an answer the schema check rejects is never stored, so a passing
+    model glitch is not replayed forever. A store that fails (disk full, permissions) is logged
+    and ignored: the answer was paid and must reach the caller and its `llm_calls` row. `hits`
+    and `misses` count the calls of this process, for the run summary.
 
     Callers keep one directory per `LLM_MODE`, so a fake answer is never replayed as a real
     one."""
@@ -348,9 +351,12 @@ class CachingProvider:
             stored = Fixture.model_validate_json(self.path(request).read_bytes())
         except FileNotFoundError:
             return None
-        except ValidationError:
-            # A broken cache file (an interrupted write of an older version): call again.
-            logger.warning("evaluation cache file is invalid; calling the model again")
+        except (OSError, ValidationError) as exc:
+            # An unreadable or broken cache file: a miss, never a failed call.
+            logger.warning(
+                "evaluation cache file is unreadable; calling the model again",
+                extra={"error": type(exc).__name__},
+            )
             return None
         return stored.response.model_copy(update={"replayed": True})
 
@@ -364,10 +370,20 @@ class CachingProvider:
             self.hits += 1
             return cached
         self.misses += 1
-        response = await send(request)
-        self._directory.mkdir(parents=True, exist_ok=True)
-        write_fixture(self._directory, request, response)
-        return response
+        return await send(request)
+
+    def store(self, request: ProviderRequest, response: ProviderResponse) -> None:
+        """Keep a checked answer. Never raises: a cache that cannot write must not fail the
+        call. Only the error class is logged."""
+        if response.replayed:
+            return
+        try:
+            self._directory.mkdir(parents=True, exist_ok=True)
+            write_fixture(self._directory, request, response)
+        except (OSError, OutboundBlockedError) as exc:
+            logger.warning(
+                "evaluation cache could not store an answer", extra={"error": type(exc).__name__}
+            )
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
         return await self._call(request, self._inner.complete)
@@ -658,6 +674,8 @@ class Gateway:
                         raise OutputCheckError(
                             f"node {call.node.value}: the answer check failed ({kind})"
                         ) from None
+                    if invalid is None and isinstance(self.provider, CachingProvider):
+                        self.provider.store(request, response)
                     await self.recorder.record(
                         self._row(
                             call,

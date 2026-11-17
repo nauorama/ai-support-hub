@@ -27,6 +27,9 @@ test-results/
 # Evaluation: only small reports are committed, never raw results
 results.jsonl
 **/results.jsonl
+# Earlier results kept by RESTART=1, and the temporary file of a resume
+**/results.*.jsonl
+**/results.jsonl.tmp
 evals/runs/**/raw/
 # Disk cache of model answers of evaluation runs (eval plan §4)
 evals/.cache/

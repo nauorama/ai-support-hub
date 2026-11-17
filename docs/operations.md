@@ -12,7 +12,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 |---|---|
 | `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks |
 | `make up` / `make down` | start / stop the compose stack |
-| `make migrate` | Alembic upgrade of the app database, then of the evaluation database (`-x db=eval`, migrator `EVAL_DATABASE_URL_DIRECT`; P4-03) + LangGraph checkpointer setup |
+| `make migrate` | Alembic upgrade of the app database, then of the evaluation database (`-x db=eval`, migrator `EVAL_DATABASE_URL_DIRECT`; skipped when `EVAL_DATABASE_URL` is empty, refused when it names the app database; P4-03) + LangGraph checkpointer setup |
 | `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
 | `make kb-load` | load `data/kb` into Postgres and Qdrant (only changed documents); the Qdrant part arrives in phase 5 |
 | `make dev` | `up` + `migrate` + `seed` + `kb-load` |
