@@ -22,5 +22,6 @@ One file per decision. To change a decision, add a new ADR that replaces the old
 | [0016](0016-web-ui-and-auth.md) | React console served by the API; cookie sessions |
 | [0017](0017-ibans-always-partly-masked.md) | IBANs are always partly masked (replaces part of 0010) |
 | [0018](0018-budget-mode.md) | Budget mode: Anthropic only, local embeddings, small evaluation (replaces parts of 0003, 0005, 0009, 0013) |
+| [0019](0019-scope-cuts.md) | Scope cuts: phase 9 removed, one review round per pull request, Jira and Slack mock only (replaces parts of 0014, 0018) |
 
 Template: Context → Decision → Alternatives considered → Consequences. Half a page.

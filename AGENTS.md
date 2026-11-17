@@ -58,7 +58,7 @@ Run `make lint test` before you say a task is done. Run `make test-int` when you
 
 ## Always do
 
-- One task = one small pull request with: what changed, how it was verified (command output), which "Done when" lines are met, what you were unsure about.
+- One task = one small pull request (small neighbouring tasks may share one when the owner agrees; say which in the plan) with: what changed, how it was verified (command output), which "Done when" lines are met, what you were unsure about.
 - Tests with the change. Deterministic safety code (masking, policy, routing, permissions, output checks, auth): ≥ 95% line coverage.
 - Tests never need an API key: use the fake model mode and recorded fixtures.
 - A change to prompts, models, retrieval or the graph: new prompt version file. Run `make eval-smoke` by hand and put its numbers in the pull request only when the owner asks for it (it costs money and never runs in CI; ADR-0018).
