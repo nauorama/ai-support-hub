@@ -43,22 +43,22 @@ Python 3.13 · FastAPI · LangGraph · LiteLLM (Anthropic only) · FastEmbed (lo
 
 > **Synthetic data. Demo check, not a proof.** 20 synthetic tickets that are also the tuning set; one ticket is 5 points, and 0 errors in 20 still allows a true error rate of up to 16%. Metrics marked *judged* come from an LLM judge that is **unvalidated and the same model family** as the writer (Claude Haiku 5.5).
 
-Run `2026-11-17-b0_full_kb-4bc48fc`: the phase 3 linear pipeline (whole knowledge base in the prompt, no retrieval, no routing yet). Full report: [evals/runs/2026-11-17-b0_full_kb-4bc48fc/report.md](evals/runs/2026-11-17-b0_full_kb-4bc48fc/report.md); history: [docs/experiments.md](docs/experiments.md).
+Run `2026-11-17-b0_full_kb-4bc48fc`: the phase 3 linear pipeline (whole knowledge base in the prompt, no retrieval, no routing yet). Full report: [evals/runs/2026-11-17-b0_full_kb-4bc48fc/report.md](evals/runs/2026-11-17-b0_full_kb-4bc48fc/report.md); error analysis: [error-analysis.md](evals/runs/2026-11-17-b0_full_kb-4bc48fc/error-analysis.md); history: [docs/experiments.md](docs/experiments.md).
 
 | Metric | Value (count, 95% Wilson interval) | Target | Red line | Result |
 |---|---|---|---|---|
 | Triage accuracy | 17 of 20 (64%–95%) | ≥ 18 of 20 | 16 of 20 | below target |
-| Flag recall (3 flags) | 1 of 1 each | all | all | pass |
+| Flag recall (3 flags, n = 1 each) | 1 of 1 each (21%–100% each) | all | all | pass |
 | Key-fact coverage *(judged)* | 0.61 (14 tickets) | ≥ 0.85 | 0.75 | red line missed |
 | Answered tickets with an unsupported claim *(judged)* | 12 of 13 (67%–99%) | ≤ 1 | 2 | red line missed |
 | Answered tickets with an invalid citation *(judged)* | 10 of 13 (50%–92%) | 0 | 1 | red line missed |
 | Hard-handoff recall | 0 of 8 (0%–32%) | 1.00 | 1.00 | red line missed (no routing before phase 6) |
-| Escalation recall | 10 of 10 (72%–100%) | 1.00 | 1 miss | pass |
-| Wrong auto-reply | 0 of 0 (auto-reply is off) | 0 | any | pass |
-| Cost per ticket | $0.0015 | ≤ €0.05 | €0.10 | pass |
+| Escalation recall | 10 of 10 (72%–100%) | 1.00 | 1 miss | pass (trivial: everything goes to approval) |
+| Wrong auto-reply | 0 of 0 (auto-reply is off) | 0 | any | pass (trivial: everything goes to approval) |
+| Cost per ticket (answers only) | $0.0015; $0.0024 with judges ($0.048 for the run) | ≤ €0.05 | €0.10 | pass |
 | Retrieval, latency of auto-replies, safety | not measured yet (phases 5, 6 and 8) | | | — |
 
-Every ticket went to operator approval: B0 has no policy gate or handoff yet, so the hard-handoff red line cannot be met until P6-02. Auto-reply stays off.
+Every ticket went to operator approval: B0 has no policy gate or handoff yet, so the hard-handoff red line cannot be met until P6-02, and the escalation-recall and wrong-auto-reply passes say nothing about routing quality or safety. Auto-reply stays off.
 
 ## How this project is built
 
