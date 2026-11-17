@@ -1,9 +1,12 @@
-"""The phase-3 run through the API against Postgres, with recorded model answers (P3-05).
+"""The phase-3 run through the API against Postgres and Qdrant, with recorded model answers
+(P3-05, retrieval P5-03).
 
-`POST /tickets` starts `intake → triage → write`; every run ends with the ticket in
+`POST /tickets` starts `intake → triage → search → write`; every run ends with the ticket in
 `pending_approval` and a draft, or, on any error, `handed_off` with reason `system_error`. The
 model answers come from `tests/fixtures/llm` (fake mode): the tickets are the ones in
-`tests/fixtures/run/tickets.jsonl`, whose requests `make llm-requests` wrote with the same KB.
+`tests/fixtures/run/tickets.jsonl`, whose requests `make llm-requests` wrote with the search hits
+in `tests/fixtures/run/evidence.json`. The search here runs on the real Qdrant server with the
+real local models, and a test checks it finds those same hits.
 """
 
 import dataclasses
@@ -12,7 +15,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -26,9 +29,20 @@ from hub.db.session import connect
 from hub.deps import Container, build_pipeline
 from hub.domain.enums import TicketStatus
 from hub.graph import linear
-from hub.graph.linear import GRAPH_VERSION, RUN_FAILED_DETAIL, RunOutcome, run_ticket
+from hub.graph.linear import (
+    GRAPH_VERSION,
+    RUN_FAILED_DETAIL,
+    SEARCH_MODES,
+    SEARCH_TOP_K,
+    VARIANT,
+    RunOutcome,
+    run_ticket,
+)
 from hub.kb.full_text import load_external_sources, sources_from_files
-from hub.kb.loader import load_kb, read_kb
+from hub.kb.loader import read_kb
+from hub.kb.service import EMBEDDING_CALL, KbServices, build_kb_services, reload_kb
+from hub.llm.gateway import build_gateway, embedder
+from hub.llm.recorder import DbCallRecorder
 from hub.llm.schemas import ProviderRequest, ProviderResponse, Usage
 from hub.main import create_app
 
@@ -45,6 +59,7 @@ from ._api import (
     run_sql,
 )
 from ._compose import ROOT
+from ._kb import MODEL_DIR
 
 DATABASE = "hub_linear_run_test"
 KB_DIR = ROOT / "data" / "kb"
@@ -55,32 +70,53 @@ TICKETS = {
 }
 SEPA, NO_ANSWER = TICKETS["run_01"], TICKETS["run_02"]
 NOT_RECORDED = "This exact text has no recorded model answer, so the run must fail."
+EVIDENCE = json.loads((ROOT / "apps/api/tests/fixtures/run/evidence.json").read_text())
+SEPA_SECTION = "/help/withdrawal-times#sepa-withdrawals"
 
 
 @pytest.fixture(scope="module")
-def run_db(postgres_url: str) -> Iterator[Urls]:
+def qdrant(qdrant_url: str) -> str:
+    """The session's Qdrant; other modules clear it, so this module indexes it again."""
+    return qdrant_url
+
+
+@pytest.fixture(scope="module")
+def run_db(postgres_url: str, qdrant: str) -> Iterator[Urls]:
     with own_database(postgres_url, DATABASE) as urls:
-        _load_kb(urls)
+        _index_kb(urls, qdrant)
         yield urls
 
 
-def _load_kb(urls: Urls) -> None:
+def _kb_services(settings: Settings, database: Any) -> KbServices:  # noqa: ANN401
+    gateway = build_gateway(settings, DbCallRecorder(database), None)
+    return build_kb_services(settings, embedder(gateway, EMBEDDING_CALL))
+
+
+def _index_kb(urls: Urls, qdrant_url: str) -> None:
+    """`make kb-load`: Postgres, then a full re-index of Qdrant (a stale collection of another
+    module is replaced)."""
     import asyncio
 
-    async def load() -> None:
-        engine = create_async_engine(urls[1])
-        async with AsyncSession(engine) as session, session.begin():
-            await load_kb(session, read_kb(KB_DIR))
-        await engine.dispose()
+    async def index() -> None:
+        settings = _settings(urls, qdrant_url)
+        database = connect(settings.database_url.get_secret_value())
+        services = _kb_services(settings, database)
+        try:
+            await reload_kb(database, services.index, KB_DIR, full=True)
+        finally:
+            await services.close()
+            await database.dispose()
 
-    asyncio.run(load())
+    asyncio.run(index())
 
 
-def _settings(urls: Urls) -> Settings:
+def _settings(urls: Urls, qdrant_url: str) -> Settings:
     return Settings(
         _env_file=None,
         app_env="test",
         database_url=urls[1],
+        qdrant_url=qdrant_url,
+        embedding_cache_dir=MODEL_DIR,
         session_secret=SESSION_SECRET,
         demo_access_code=ACCESS_CODE,
         llm_mode="fake",
@@ -89,20 +125,27 @@ def _settings(urls: Urls) -> Settings:
     )
 
 
-@pytest.fixture
-def app(run_db: Urls) -> Iterator[FastAPI]:
+def _container(urls: Urls, qdrant_url: str, *, search: bool = True) -> Container:
+    settings = _settings(urls, qdrant_url)
+    database = connect(settings.database_url.get_secret_value())
+    kb = _kb_services(settings, database)
+    pipeline = build_pipeline(settings, database, kb.retriever if search else None)
+    return Container(settings=settings, database=database, pipeline=pipeline, kb=kb)
+
+
+def _truncate(urls: Urls) -> None:
     run_sql(
-        run_db,
+        urls,
         "TRUNCATE audit_log, llm_calls, drafts, runs, feedback, messages, tickets, customers,"
         " operators RESTART IDENTITY CASCADE",
     )
+
+
+@pytest.fixture
+def app(run_db: Urls, qdrant: str) -> Iterator[FastAPI]:
+    _truncate(run_db)
     add_customer(run_db)
-    settings = _settings(run_db)
-    database = connect(settings.database_url.get_secret_value())
-    container = Container(
-        settings=settings, database=database, pipeline=build_pipeline(settings, database)
-    )
-    application = create_app(container)
+    application = create_app(_container(run_db, qdrant))
     with TestClient(application):  # runs the lifespan: waits for runs at the end
         yield application
 
@@ -147,7 +190,7 @@ def test_an_operator_approves_the_sepa_draft_and_the_customer_sees_it(
     operator = operator_client(app, "marta@tallybridge.test")
     ticket_id, _ = _post(customer, SEPA)
     detail = operator.get(f"/api/v1/console/tickets/{ticket_id}").json()
-    assert detail["latest_run"]["prompt_versions"] == {"triage": "v1", "write": "v1"}
+    assert detail["latest_run"]["prompt_versions"] == {"triage": "v1", "write": "v2"}
     draft = detail["draft"]
     assert draft["status"] == "pending"
 
@@ -162,7 +205,14 @@ def test_an_operator_approves_the_sepa_draft_and_the_customer_sees_it(
     sent = messages[-1]
     assert sent["author_label"] == "AI assistant · reviewed by Marta"
     assert sent["body"] == draft["body"]
-    assert "/help/withdrawal-times" in {citation["url"] for citation in sent["citations"]}
+    # P5-03 done when: the customer message shows article links (title + section URL), built
+    # by the server; chunk and document ids stay internal.
+    assert {
+        "marker": 1,
+        "title": "How long does a withdrawal take?",
+        "url": SEPA_SECTION,
+    } in sent["citations"]
+    assert all(set(citation) == {"marker", "title", "url"} for citation in sent["citations"])
     assert customer.get(f"/api/v1/tickets/{ticket_id}").json()["status"] == "answered"
 
 
@@ -175,15 +225,17 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         "ticket.created",
         "run.status",
         "run.status",
+        "run.status",
         "message",
         "ticket.status",
         "done",
     ]
     assert [data["step"] for name, data in events if name == "run.status"] == [
         "understanding",
+        "searching",
         "writing",
     ]
-    assert events[4][1] == {"status": "pending_approval"}
+    assert events[5][1] == {"status": "pending_approval"}
 
     status, intent, urgency, summary, route, reasons = _one(
         run_db,
@@ -207,7 +259,7 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         ticket_id,
     )
     assert (run_status, run_route, graph) == ("completed", "approval", GRAPH_VERSION)
-    assert versions == {"triage": "v1", "write": "v1"}
+    assert versions == {"triage": "v1", "write": "v2"}
     assert models == {
         "triage": "anthropic/claude-haiku-5-5",
         "write": "anthropic/claude-haiku-5-5",
@@ -222,7 +274,7 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     )
     assert [(node, version, call) for node, version, call, _, _ in calls] == [
         ("triage", "triage/v1", "ok"),
-        ("write", "write/v1", "ok"),
+        ("write", "write/v2", "ok"),
     ]
     assert cost == sum((row[3] for row in calls), Decimal(0))
     assert cost > 0
@@ -235,10 +287,47 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         run_id,
     )
     assert (can_answer, draft_status, missing) == (True, "pending", None)
-    assert "withdrawal-times" in {citation["doc_id"] for citation in citations}
-    assert all(citation["url"] == f"/help/{citation['doc_id']}" for citation in citations)
     assert all(f"[{citation['marker']}]" in body for citation in citations)
-    assert evidence["variant"] == "b0_full_kb"
+    # P5-03 done when: every citation resolves to an existing external chunk, and its link is
+    # the title of the chunk's article and the URL of the chunk's section.
+    assert "withdrawal-times#0" in {citation["source_id"] for citation in citations}
+    for citation in citations:
+        doc_id, title, url, visibility = _one(
+            run_db,
+            "SELECT c.doc_id, d.title, d.url, d.visibility FROM kb_chunks c"
+            " JOIN kb_documents d ON d.id = c.doc_id WHERE c.id = %s",
+            citation["source_id"],
+        )
+        assert (citation["doc_id"], citation["title"], visibility) == (doc_id, title, "external")
+        assert citation["url"].startswith(f"{url}#")
+    sepa = next(c for c in citations if c["source_id"] == "withdrawal-times#0")
+    assert sepa["url"] == SEPA_SECTION
+    assert evidence["variant"] == VARIANT
+    assert [chunk["chunk_id"] for chunk in evidence["chunks"]] == EVIDENCE["run_01"]
+    assert [chunk["rank"] for chunk in evidence["chunks"]] == list(range(1, 7))
+
+
+async def test_the_live_search_finds_the_recorded_hits(run_db: Urls, qdrant: str) -> None:
+    """The write recordings were made with `evidence.json`; the real server and models must
+    return the same chunks in the same order, or fake mode would test a stale request. After a
+    KB or search change: `make llm-requests` (it runs the search again) and `make record-llm`."""
+    from hub.graph.nodes.intake import intake
+
+    settings = _settings(run_db, qdrant)
+    database = connect(settings.database_url.get_secret_value())
+    services = _kb_services(settings, database)
+    try:
+        for ticket_id, text in TICKETS.items():
+            hits = await services.retriever.search(
+                intake(text).message_for_llm,
+                "external",
+                top_k=SEARCH_TOP_K,
+                mode=SEARCH_MODES[VARIANT],
+            )
+            assert [hit.chunk_id for hit in hits] == EVIDENCE[ticket_id], ticket_id
+    finally:
+        await services.close()
+        await database.dispose()
 
 
 def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_db: Urls) -> None:
@@ -260,9 +349,11 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     triage = rows["triage.done"]
     assert (triage["intent"], triage["prompt_version"]) == ("withdrawal_issue", "triage/v1")
     assert "summary" not in triage
-    assert rows["draft.created"]["prompt_version"] == "write/v1"
+    assert rows["draft.created"]["prompt_version"] == "write/v2"
+    assert rows["draft.created"]["variant"] == VARIANT
+    assert [c["chunk_id"] for c in rows["draft.created"]["chunks"]] == EVIDENCE["run_01"]
     assert rows["route.decided"]["reasons"] == ["auto_reply_off"]
-    assert rows["route.decided"]["prompt_versions"] == {"triage": "v1", "write": "v1"}
+    assert rows["route.decided"]["prompt_versions"] == {"triage": "v1", "write": "v2"}
     assert rows["draft.created"]["masked"] == {}
     assert rows["triage.done"]["summary_masked"] == {}
     # The audit log holds ids, codes and numbers, never message text (security §5).
@@ -330,12 +421,11 @@ def test_a_failed_model_call_hands_the_ticket_to_a_human(app: FastAPI, run_db: U
     assert _actions(run_db)[-1] == "route.decided"
 
 
-def test_an_empty_kb_hands_the_ticket_to_a_human(app: FastAPI, run_db: Urls) -> None:
-    run_sql(run_db, "DELETE FROM kb_documents")
-    try:
-        ticket_id, events = _post(customer_client(app), SEPA)
-    finally:
-        _load_kb(run_db)
+def test_a_run_without_a_search_hands_the_ticket_to_a_human(run_db: Urls, qdrant: str) -> None:
+    _truncate(run_db)
+    add_customer(run_db)
+    with TestClient(create_app(_container(run_db, qdrant, search=False))) as application:
+        ticket_id, events = _post(customer_client(cast(FastAPI, application.app)), SEPA)
     assert events[-2] == ("ticket.status", {"status": "handed_off"})
     assert _one(run_db, "SELECT error FROM runs WHERE ticket_id = %s", ticket_id) == (
         "KbUnavailableError",
@@ -386,14 +476,16 @@ class _Scripted:
 
 async def _run(
     urls: Urls,
+    qdrant_url: str,
     ticket_id: uuid.UUID,
     message_id: uuid.UUID,
     on_event: Callable[[str, dict[str, Any]], None] = lambda _name, _data: None,
     provider: _Scripted | None = None,
 ) -> tuple[RunOutcome, list[tuple[str, dict[str, Any]]]]:
-    settings = _settings(urls)
+    settings = _settings(urls, qdrant_url)
     database = connect(settings.database_url.get_secret_value())
-    pipeline = build_pipeline(settings, database)
+    kb = _kb_services(settings, database)
+    pipeline = build_pipeline(settings, database, kb.retriever)
     if provider is not None:
         pipeline = dataclasses.replace(
             pipeline, gateway=dataclasses.replace(pipeline.gateway, provider=provider)
@@ -412,11 +504,14 @@ async def _run(
             emit=emit,
         )
     finally:
+        await kb.close()
         await database.dispose()
     return outcome, emitted
 
 
-async def test_a_ticket_claimed_during_the_run_keeps_its_operator(run_db: Urls) -> None:
+async def test_a_ticket_claimed_during_the_run_keeps_its_operator(
+    run_db: Urls, qdrant: str
+) -> None:
     """The run still finishes; its draft is `superseded` and the ticket is left alone."""
     ticket_id, message_id = _ticket_with_message(run_db, SEPA)
 
@@ -431,7 +526,7 @@ async def test_a_ticket_claimed_during_the_run_keeps_its_operator(run_db: Urls) 
                 ticket_id,
             )
 
-    outcome, emitted = await _run(run_db, ticket_id, message_id, claim)
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id, claim)
 
     assert not outcome.failed
     assert emitted[-1] == ("ticket.status", {"status": "handed_off"})
@@ -446,7 +541,7 @@ async def test_a_ticket_claimed_during_the_run_keeps_its_operator(run_db: Urls) 
 
 
 async def test_a_claim_through_the_console_during_the_run_needs_the_current_version(
-    app: FastAPI, run_db: Urls
+    app: FastAPI, run_db: Urls, qdrant: str
 ) -> None:
     """P3-05a known gap: the claim goes through `POST /console/tickets/{id}/claim`. The run's
     triage save moved the version, so a claim with the version from before the run is 409; with
@@ -467,7 +562,7 @@ async def test_a_claim_through_the_console_during_the_run_needs_the_current_vers
         assert current > before
         answers.append((operator.post(url, json={"ticket_version": current}).status_code, ""))
 
-    outcome, emitted = await _run(run_db, ticket_id, message_id, claim)
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id, claim)
 
     assert answers == [(409, "stale_draft"), (200, "")]
     assert not outcome.failed
@@ -481,10 +576,10 @@ async def test_a_claim_through_the_console_during_the_run_needs_the_current_vers
     )
 
 
-async def test_no_run_starts_for_a_ticket_a_human_already_has(run_db: Urls) -> None:
+async def test_no_run_starts_for_a_ticket_a_human_already_has(run_db: Urls, qdrant: str) -> None:
     ticket_id, message_id = _ticket_with_message(run_db, SEPA, status="handed_off")
 
-    outcome, emitted = await _run(run_db, ticket_id, message_id)
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id)
 
     assert outcome == RunOutcome(run_id=None, ticket_status=TicketStatus.HANDED_OFF, failed=False)
     # The stream still ends with the ticket's status (api.md §4, review round 1 N3).
@@ -495,10 +590,10 @@ async def test_no_run_starts_for_a_ticket_a_human_already_has(run_db: Urls) -> N
     assert run_sql(run_db, "SELECT 1 FROM runs") == []
 
 
-async def test_no_run_starts_for_a_message_of_another_ticket(run_db: Urls) -> None:
+async def test_no_run_starts_for_a_message_of_another_ticket(run_db: Urls, qdrant: str) -> None:
     ticket_id, _ = _ticket_with_message(run_db, SEPA)
 
-    outcome, emitted = await _run(run_db, ticket_id, uuid.uuid4())
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, uuid.uuid4())
 
     assert outcome.run_id is None
     assert emitted[-1] == ("ticket.status", {"status": "processing"})
@@ -506,7 +601,7 @@ async def test_no_run_starts_for_a_message_of_another_ticket(run_db: Urls) -> No
 
 
 async def test_a_failure_that_cannot_be_recorded_still_ends_the_stream(
-    run_db: Urls, monkeypatch: pytest.MonkeyPatch
+    run_db: Urls, monkeypatch: pytest.MonkeyPatch, qdrant: str
 ) -> None:
     """When even the handoff cannot be written (database down), the stream gets `error` and the
     ticket's real status, `processing` (it waits in the queue); the run stays `running` for
@@ -517,7 +612,7 @@ async def test_a_failure_that_cannot_be_recorded_still_ends_the_stream(
         raise ConnectionError
 
     monkeypatch.setattr(linear, "_fail", broken)
-    outcome, emitted = await _run(run_db, ticket_id, message_id)
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id)
 
     assert (outcome.failed, outcome.ticket_status) == (True, None)
     assert emitted[1:] == [
@@ -530,7 +625,7 @@ async def test_a_failure_that_cannot_be_recorded_still_ends_the_stream(
 TEST_CARD = "4111 1111 1111 1111"  # public test card number
 
 
-async def test_card_data_written_by_the_model_is_stored_masked(run_db: Urls) -> None:
+async def test_card_data_written_by_the_model_is_stored_masked(run_db: Urls, qdrant: str) -> None:
     """Review round 1, B1 (AGENTS.md never-do #1): the model only sees masked text, but its
     answers are masked again before anything is stored."""
     ticket_id, message_id = _ticket_with_message(run_db, SEPA)
@@ -549,7 +644,7 @@ async def test_card_data_written_by_the_model_is_stored_masked(run_db: Urls) -> 
         "can_answer": True,
         "missing_information": None,
         "answer": f"Your card {TEST_CARD} is not used for SEPA withdrawals [1].",
-        "citations": [{"marker": 1, "source_id": "withdrawal-times"}],
+        "citations": [{"marker": 1, "source_id": "withdrawal-times#0"}],
         "proposed_actions": [
             {
                 "type": "jira_create_issue",
@@ -561,7 +656,7 @@ async def test_card_data_written_by_the_model_is_stored_masked(run_db: Urls) -> 
     }
     provider = _Scripted([json.dumps(triage), json.dumps(draft)])
 
-    outcome, _ = await _run(run_db, ticket_id, message_id, provider=provider)
+    outcome, _ = await _run(run_db, qdrant, ticket_id, message_id, provider=provider)
 
     assert not outcome.failed
     [(summary,)] = run_sql(run_db, "SELECT summary FROM tickets WHERE id = %s", ticket_id)
@@ -628,8 +723,8 @@ def test_the_stream_pings_while_the_run_works(
 
 
 async def test_the_kb_text_from_postgres_equals_the_one_from_the_files(run_db: Urls) -> None:
-    """Recorded write requests are built from the files; a live run reads Postgres. Equal text
-    means equal fixture keys, so `make dev` finds the recordings."""
+    """B0 (`write/v1`) reads the whole KB text from Postgres; tools that build it from the
+    files (the evaluation estimate) must get the same text."""
     engine = create_async_engine(run_db[1])
     async with AsyncSession(engine) as session:
         from_db = await load_external_sources(session)

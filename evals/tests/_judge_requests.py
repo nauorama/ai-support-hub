@@ -8,7 +8,9 @@ test fails when a file is missing or out of date, e.g. after a prompt change; th
 `make llm-requests` and `make record-llm` (real calls, by hand, only when the owner agrees).
 
 Only the role's own model is recorded: fake mode never falls back. The evidence of a case names
-knowledge-base documents; their text comes from `data/kb/` as the runner renders it.
+knowledge-base documents; their text comes from `data/kb/` as the runner renders it. A
+faithfulness or citation case has the customer's `ticket` (and optionally `history`, a list of
+`[role, text]`), prepared by `ticket_text` as the runner prepares it.
 """
 
 import json
@@ -25,11 +27,13 @@ from hub.llm.prompts import Prompt
 from hub.llm.schemas import Message
 from hub_evals.judges import (
     Judges,
+    TicketText,
     attack_messages,
     citation_messages,
     faithfulness_messages,
     key_facts_messages,
     load_judges,
+    ticket_text,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +78,11 @@ def evidence(doc_ids: list[str]) -> str:
     return render_kb([sources[doc_id] for doc_id in doc_ids])
 
 
+def case_ticket(case: Case) -> TicketText:
+    history = [(role, text) for role, text in case.input.get("history", [])]
+    return ticket_text(case.input["ticket"], history)
+
+
 def prompt_of(judge_set: Judges, case: Case) -> Prompt:
     return {
         "key_facts": judge_set.key_facts,
@@ -92,11 +101,17 @@ def case_messages(judge_set: Judges, case: Case) -> list[Message]:
             return key_facts_messages(prompt, draft=data["draft"], key_facts=data["key_facts"])
         case "faithfulness":
             return faithfulness_messages(
-                prompt, draft=data["draft"], evidence=evidence(data["evidence_doc_ids"])
+                prompt,
+                draft=data["draft"],
+                evidence=evidence(data["evidence_doc_ids"]),
+                ticket=case_ticket(case),
             )
         case "citation":
             return citation_messages(
-                prompt, sentence=data["sentence"], source=evidence([data["source_doc_id"]])
+                prompt,
+                sentence=data["sentence"],
+                source=evidence([data["source_doc_id"]]),
+                ticket=case_ticket(case),
             )
         case "attack":
             return attack_messages(

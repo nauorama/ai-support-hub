@@ -111,12 +111,13 @@ record-llm:
 	uv run python -m hub_evals.record $(if $(FORCE),--force,)
 
 # Rewrites tests/fixtures/llm/requests/triage_*.json from the triage examples and run_*.json from
-# the run tickets, and evals/tests/fixtures/llm/requests/judge_*.json from the judge test cases,
+# the run tickets (their search hits again with the local models: needs `make models`), and
+# evals/tests/fixtures/llm/requests/judge_*.json from the judge test cases,
 # with the active prompts and data/kb (no model call). Run it after a prompt or KB change, then
 # `make record-llm` (a KB change changes every write request).
 llm-requests:
 	uv run python apps/api/tests/unit/_triage_requests.py
-	uv run python apps/api/tests/unit/_run_requests.py
+	uv run python apps/api/tests/unit/_run_requests.py --search
 	uv run python evals/tests/_judge_requests.py
 
 # The evaluation runner (eval plan §4) on the 20 dev tickets, against EVAL_DATABASE_URL (run

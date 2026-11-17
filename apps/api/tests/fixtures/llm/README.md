@@ -13,11 +13,13 @@
   prompt by `make llm-requests`; a unit test fails when they are out of date. Do not edit them.
 - `requests/run_NN_triage.json` and `requests/run_NN_write.json` are generated from
   `../run/tickets.jsonl` by `make llm-requests` with the same functions the run uses (intake,
-  the active prompts, the KB text from `data/kb/`), so these tickets work through the API in fake
-  mode (integration tests, `make dev`). The write request holds the whole external KB (~28k
-  tokens): **any change in `data/kb/` changes every write request**; run `make llm-requests` and
-  `make record-llm` (about $0.004 per write request without a cache hit). Only the role's own
-  model is recorded.
+  the active prompts, `rag_evidence`), so these tickets work through the API in fake mode
+  (integration tests, `make dev`). The write request (`write/v2`, P5-03) holds the six search
+  hits of the ticket, kept in `../run/evidence.json`; `make llm-requests` searches again with the
+  real local models (Qdrant in-memory mode, needs `make models`), and an integration test checks
+  that the real server finds the same hits. A KB or search change can change the hits; run
+  `make llm-requests` and `make record-llm` (about $0.0005 per write request). Only the role's
+  own model is recorded.
 - `requests/schema_probe.json` checks that the provider accepts every schema shape we use
   (`SchemaProbe`: `const`, a description next to a `$ref`, a nullable `$ref`). First real
   recording 2026-11-16: accepted by Haiku 5.5 and by Sonnet 5.5 with thinking `between_tools`.

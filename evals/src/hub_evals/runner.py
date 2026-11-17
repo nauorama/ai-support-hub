@@ -72,7 +72,7 @@ from hub.domain.enums import (
     TicketStatus,
 )
 from hub.domain.triage import TriageResult
-from hub.graph.linear import GRAPH_VERSION, VARIANT, VARIANTS, Pipeline, run_ticket
+from hub.graph.linear import B0_VARIANT, GRAPH_VERSION, Pipeline, run_ticket, write_prompt_for
 from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import triage_messages
 from hub.graph.nodes.write import write_messages
@@ -101,6 +101,11 @@ from hub_evals.schemas import Ticket
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
+# The variants an evaluation can run. The RAG variants (ai-pipeline §10) need the evaluation
+# knowledge base indexed in Qdrant and the judges reading chunk evidence; until that lands, the
+# runner runs B0 only (P5-03 pull request: open point).
+VARIANT = B0_VARIANT
+VARIANTS = (B0_VARIANT,)
 TICKETS_FILE = ROOT / "data" / "eval" / "tickets.dev.jsonl"
 SEED_DIR = ROOT / "data" / "seed"
 KB_DIR = ROOT / "data" / "kb"
@@ -231,17 +236,20 @@ def judge_requests(
     as the cited source, and `ESTIMATED_CITATIONS` citations."""
     draft = "x" * draft_chars
     longest = max((render_kb([source]) for source in sources), key=len, default="")
+    text = judge_ticket_text(ticket)
     calls: list[tuple[list[Message], type[BaseModel]]] = [
         (
             judging.faithfulness_messages(
-                judge_set.faithfulness, draft=draft, evidence=render_kb(sources)
+                judge_set.faithfulness, draft=draft, evidence=render_kb(sources), ticket=text
             ),
             judging.FaithfulnessVerdict,
         )
     ]
     calls += [
         (
-            judging.citation_messages(judge_set.citation, sentence=draft[:400], source=longest),
+            judging.citation_messages(
+                judge_set.citation, sentence=draft[:400], source=longest, ticket=text
+            ),
             judging.CitationVerdict,
         )
     ] * ESTIMATED_CITATIONS
@@ -588,6 +596,11 @@ class CallTally:
         self._add(call)
 
 
+def judge_ticket_text(ticket: Ticket) -> judging.TicketText:
+    """The ticket as the writer read it (masked, placeholders, history), for the judges."""
+    return judging.ticket_text(ticket.message, [(item.role, item.text) for item in ticket.history])
+
+
 def cited_sources(draft: files.DraftOut, sources: Mapping[str, KbSource]) -> dict[int, KbSource]:
     """marker -> the source its citation names (unknown ids were dropped by the run)."""
     cited: dict[int, KbSource] = {}
@@ -619,6 +632,7 @@ async def judge_ticket(
     errors: dict[str, str] = {}
     body = draft.body if draft.can_answer else ""
     cited = cited_sources(draft, sources)
+    text = judge_ticket_text(ticket)
 
     async def attempt[T](name: str, job: Callable[[], Awaitable[T]]) -> T | None:
         if limit is not None:
@@ -650,7 +664,7 @@ async def judge_ticket(
         faithfulness = await attempt(
             "faithfulness",
             lambda: judging.judge_faithfulness(
-                judge_gateway, judge_set.faithfulness, draft=body, evidence=evidence
+                judge_gateway, judge_set.faithfulness, draft=body, evidence=evidence, ticket=text
             ),
         )
         for marker, sentence in judging.marked_sentences(body):
@@ -667,6 +681,7 @@ async def judge_ticket(
                     source_id=source.id,
                     sentence=sentence,
                     source=render_kb([source]),
+                    ticket=text,
                 ),
             )
             if verdict is not None:
@@ -745,7 +760,7 @@ def build_pipeline(
         gateway=gateway,
         budget=limit,
         triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
-        write_prompt=active_prompt(settings.prompts_dir, gateway.models, "write"),
+        write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, variant),
         context=LlmCallContext.EVAL,
         variant=variant,
     )
