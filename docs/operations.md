@@ -22,11 +22,11 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make lint` | ruff, mypy, import-linter, eslint, tsc |
 | `make data-check` | validate `data/` (seed schemas and rules; KB front matter, `error_codes.csv`, internal-only phrases in external content; seed error codes must be in the CSV; evaluation tickets and attacks: schema per line, known customers and external gold documents, composition rules of the [eval plan](eval-plan.md) §3) |
 | `make kb-numbers` | report every number in `data/kb/` that is not in the world file (a report, not a gate) |
-| `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018). `LLM_MODE=fake make eval LIMIT=10` checks the runner for free (the eval tickets have no recordings, so each is handed off with `system_error`) |
+| `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018). `LLM_MODE=fake make eval LIMIT=10` checks the runner for free (the eval tickets have no recordings, so each is handed off with `system_error`, and judges have no recordings either; `NO_JUDGES=1` skips them) |
 | `make web-types` | generate TypeScript types from OpenAPI |
 | `make retention` | run the retention job once |
-| `make record-llm` | refresh recorded model responses for tests (real calls); skips models that already have a real recording, `FORCE=1` records them again |
-| `make llm-requests` | rewrite the recording requests (no model call): triage from the example tickets, the run tickets (`tests/fixtures/run/tickets.jsonl`) for triage and write with the KB from `data/kb`; run before `make record-llm` after a prompt or KB change (a KB change changes every write request) |
+| `make record-llm` | refresh recorded model responses for tests (real calls): the app's in `apps/api/tests/fixtures/llm/` (`hub.llm.record`), then the judges' in `evals/tests/fixtures/llm/` (`hub_evals.record`); skips models that already have a real recording, `FORCE=1` records them again |
+| `make llm-requests` | rewrite the recording requests (no model call): triage from the example tickets, the run tickets (`tests/fixtures/run/tickets.jsonl`) for triage and write with the KB from `data/kb`, and the judge test cases (`evals/tests/fixtures/judges/cases.jsonl`); run before `make record-llm` after a prompt or KB change (a KB change changes every write request) |
 | `make eval-report RUN=<id> BASE=<id>` | compare two evaluation runs; see [eval plan](eval-plan.md) |
 | `make leak-scan` | scan database, logs and recorded model requests for card patterns and canary strings |
 | `make export-review-candidates` | export rejected and heavily edited drafts as candidates for new eval tickets |
