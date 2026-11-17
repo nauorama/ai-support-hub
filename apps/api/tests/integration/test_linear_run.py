@@ -190,7 +190,11 @@ def test_an_operator_approves_the_sepa_draft_and_the_customer_sees_it(
     operator = operator_client(app, "marta@tallybridge.test")
     ticket_id, _ = _post(customer, SEPA)
     detail = operator.get(f"/api/v1/console/tickets/{ticket_id}").json()
-    assert detail["latest_run"]["prompt_versions"] == {"triage": "v1", "write": "v2"}
+    assert detail["latest_run"]["prompt_versions"] == {
+        "triage": "v1",
+        "write": "v2",
+        "verify": "v1",
+    }
     draft = detail["draft"]
     assert draft["status"] == "pending"
 
@@ -226,6 +230,7 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         "run.status",
         "run.status",
         "run.status",
+        "run.status",
         "message",
         "ticket.status",
         "done",
@@ -234,8 +239,9 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         "understanding",
         "searching",
         "writing",
+        "checking",
     ]
-    assert events[5][1] == {"status": "pending_approval"}
+    assert events[6][1] == {"status": "pending_approval"}
 
     status, intent, urgency, summary, route, reasons = _one(
         run_db,
@@ -259,10 +265,11 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         ticket_id,
     )
     assert (run_status, run_route, graph) == ("completed", "approval", GRAPH_VERSION)
-    assert versions == {"triage": "v1", "write": "v2"}
+    assert versions == {"triage": "v1", "write": "v2", "verify": "v1"}
     assert models == {
         "triage": "anthropic/claude-haiku-5-5",
         "write": "anthropic/claude-haiku-5-5",
+        "verify": "anthropic/claude-haiku-5-5",
     }
     assert finished is not None
 
@@ -275,18 +282,23 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     assert [(node, version, call) for node, version, call, _, _ in calls] == [
         ("triage", "triage/v1", "ok"),
         ("write", "write/v2", "ok"),
+        ("verify", "verify/v1", "ok"),
     ]
     assert cost == sum((row[3] for row in calls), Decimal(0))
     assert cost > 0
     assert tokens_in == sum(row[4] for row in calls)
 
-    can_answer, body, citations, evidence, draft_status, missing = _one(
+    can_answer, body, citations, evidence, draft_status, missing, groundedness, unsupported = _one(
         run_db,
-        "SELECT can_answer, body, citations, evidence, status, missing_information FROM drafts"
-        " WHERE run_id = %s",
+        "SELECT can_answer, body, citations, evidence, status, missing_information,"
+        " groundedness, unsupported_claims FROM drafts WHERE run_id = %s",
         run_id,
     )
     assert (can_answer, draft_status, missing) == (True, "pending", None)
+    # P5-04: the verify step stored its result on the draft.
+    assert groundedness is not None
+    assert 0 <= groundedness <= 1
+    assert isinstance(unsupported, list)
     assert all(f"[{citation['marker']}]" in body for citation in citations)
     # P5-03 done when: every citation resolves to an existing external chunk, and its link is
     # the title of the chunk's article and the URL of the chunk's section.
@@ -338,6 +350,7 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
         "intake.done",
         "triage.done",
         "draft.created",
+        "verify.done",
         "route.decided",
     ]
     rows = {
@@ -353,7 +366,15 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     assert rows["draft.created"]["variant"] == VARIANT
     assert [c["chunk_id"] for c in rows["draft.created"]["chunks"]] == EVIDENCE["run_01"]
     assert rows["route.decided"]["reasons"] == ["auto_reply_off"]
-    assert rows["route.decided"]["prompt_versions"] == {"triage": "v1", "write": "v2"}
+    assert rows["route.decided"]["prompt_versions"] == {
+        "triage": "v1",
+        "write": "v2",
+        "verify": "v1",
+    }
+    verified = rows["verify.done"]
+    assert (verified["prompt_version"], verified["llm_check"]) == ("verify/v1", True)
+    assert verified["policy_violations"] == []
+    assert "claim" not in json.dumps(verified).replace("claims", "")
     assert rows["draft.created"]["masked"] == {}
     assert rows["triage.done"]["summary_masked"] == {}
     # The audit log holds ids, codes and numbers, never message text (security §5).
@@ -387,6 +408,24 @@ def test_a_question_outside_the_kb_gets_a_draft_that_cannot_answer(
     )
     assert (can_answer, body, citations) == (False, "", [])
     assert missing
+    # P5-04: the first code check fails, so the LLM check is never called.
+    run_id, groundedness = _one(
+        run_db, "SELECT run_id, groundedness FROM drafts WHERE ticket_id = %s", ticket_id
+    )
+    assert groundedness is None
+    assert [
+        node
+        for (node,) in run_sql(
+            run_db, "SELECT node FROM llm_calls WHERE run_id = %s ORDER BY created_at", run_id
+        )
+    ] == ["triage", "write"]
+    (details,) = run_sql(
+        run_db,
+        "SELECT details FROM audit_log WHERE action = 'verify.done' AND details->>'run_id' = %s",
+        str(run_id),
+    )[0]
+    assert details["policy_violations"] == ["cannot_answer"]
+    assert (details["passed"], details["llm_check"]) == (False, False)
 
 
 # --- a run that fails ------------------------------------------------------------------------

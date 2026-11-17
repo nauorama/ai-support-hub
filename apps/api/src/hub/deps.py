@@ -69,6 +69,7 @@ def build_pipeline(
         budget=budget,
         triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
         write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, VARIANT),
+        verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify"),
         retriever=retriever,
     )
 

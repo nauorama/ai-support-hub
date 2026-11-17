@@ -151,8 +151,8 @@ One execution of the workflow for one customer message.
 | citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`: `source_id` is the chunk id the writer cited, `title` the article title and `url` the section link `/help/<doc_id>#<anchor>`, both from the search hit (built by the server, never by the model); in baseline B0 `source_id` is a document id and `url` the article link |
 | evidence | jsonb | object: retrieved chunks and account facts shown to the operator; from P5-03 `{"variant": "rag_hybrid", "chunks": [{"chunk_id", "doc_id", "title", "section", "url", "score", "rank", "text"}], "dropped_markers": [n, ...]}` (the hits of the first search in rank order, external only); in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because they had no kept citation: the citation pointed to no external document, or the model wrote the marker without any citation) |
 | proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
-| groundedness | numeric(4,3) null | |
-| unsupported_claims | jsonb | from the verify step |
+| groundedness | numeric(4,3) null | from the verify step (P5-04): supported claims / all claims; null when a code check failed (the LLM check did not run) and in B0 (no verify step) |
+| unsupported_claims | jsonb | from the verify step: `[{"claim", "source_id"}]`, the claims the verifier found unsupported, model-written so card masked (G1); empty when none or when the LLM check did not run |
 | status | text | `pending` \| `approved` \| `edited` \| `rejected` \| `superseded` (the operator answered with a free reply or closed the ticket without using the draft) |
 | reviewed_by | uuid FK null | |
 | reviewed_at | timestamptz null | |

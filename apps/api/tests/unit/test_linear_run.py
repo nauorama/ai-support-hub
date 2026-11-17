@@ -383,3 +383,109 @@ def test_markers_without_a_kept_citation_are_removed(
     body: str, keep: set[int], expected: str, dropped: list[int]
 ) -> None:
     assert drop_markers(body, keep) == (expected, dropped)
+
+
+# --- verify (P5-04) ---------------------------------------------------------------------------
+
+
+def _pipeline(variant: str, *, verify: bool) -> Pipeline:
+    from hub.llm.prompts import active_prompt
+
+    prompts, models = ROOT / "prompts", real_models()
+    return Pipeline(
+        database=cast(Any, None),
+        gateway=cast(Any, None),
+        budget=cast(Any, None),
+        triage_prompt=active_prompt(prompts, models, "triage"),
+        write_prompt=write_prompt_for(prompts, models, variant),
+        verify_prompt=active_prompt(prompts, models, "verify") if verify else None,
+        variant=variant,
+    )
+
+
+def test_a_rag_pipeline_needs_a_verify_prompt_and_b0_has_no_verify_step() -> None:
+    with pytest.raises(ValueError, match="needs a verify prompt"):
+        _pipeline(VARIANT, verify=False)
+    rag = _pipeline(VARIANT, verify=True)
+    assert rag.verifies
+    assert rag.prompt_versions == {"triage": "v1", "write": "v2", "verify": "v1"}
+    b0 = _pipeline(B0_VARIANT, verify=True)
+    assert not b0.verifies
+    assert b0.prompt_versions == {"triage": "v1", "write": "v1"}
+
+
+def test_the_code_checks_see_the_answer_as_the_model_wrote_it() -> None:
+    from hub.graph.linear import draft_to_check
+
+    evidence = rag_evidence(VARIANT, HITS)
+    answer = _answer(
+        answer="Write to <EMAIL_1> [1]. Card 4111 1111 1111 1111 [7].",
+        citations=[Citation(marker=1, source_id="withdrawal-times#0")],
+    )
+    checked = draft_to_check(answer, evidence, intake("ana@example.com"))
+    # Placeholders restored, card digits and the marker without a citation still there.
+    assert checked.answer == "Write to ana@example.com [1]. Card 4111 1111 1111 1111 [7]."
+    assert checked.citations == [(1, "withdrawal-times#0")]
+    assert checked.evidence_ids == {"withdrawal-times#0", "withdrawal-fees#1"}
+    assert checked.other_texts == []
+
+
+def test_the_code_checks_see_missing_information_and_proposed_actions() -> None:
+    from hub.graph.linear import draft_to_check
+
+    answer = _answer(
+        can_answer=False,
+        answer="",
+        citations=[],
+        missing_information="Ask <EMAIL_1> for the receipt.",
+        proposed_actions=[
+            ProposedAction(
+                type="jira_create_issue", issue_type="dispute", summary="S", description="D"
+            )
+        ],
+    )
+    checked = draft_to_check(answer, rag_evidence(VARIANT, HITS), intake("ana@example.com"))
+    assert checked.other_texts == [
+        ("missing_information", "Ask ana@example.com for the receipt."),
+        ("proposed_action", "S\nD"),
+    ]
+
+
+def test_the_draft_stores_groundedness_and_the_unsupported_claims_masked() -> None:
+    from decimal import Decimal
+
+    from hub.domain.verification import ClaimCheck, Verification
+    from hub.graph.linear import verification_columns
+
+    claims = [
+        ClaimCheck(claim="It takes 1 day", supported=True, source_id="withdrawal-times#0"),
+        ClaimCheck(claim="Card 4111 1111 1111 1111 is fine", supported=False, source_id=None),
+    ]
+    verification = Verification(claims=claims, groundedness=0.5, policy_violations=[], passed=False)
+    clean = OutputMask(intake("hi"))
+    assert verification_columns(verification, clean) == {
+        "groundedness": Decimal("0.5"),
+        "unsupported_claims": [{"claim": "Card [CARD ****1111] is fine", "source_id": None}],
+    }
+    assert verification_columns(None, clean) == {"groundedness": None, "unsupported_claims": []}
+    values, _ = draft_from_answer(_answer(), SOURCES, clean, verification)
+    assert values["groundedness"] == Decimal("0.5")
+
+
+def test_the_verify_audit_record_has_counts_and_codes_never_a_claim() -> None:
+    from hub.domain.verification import ClaimCheck, Verification
+    from hub.graph.linear import verify_audit_details
+
+    claim = ClaimCheck(claim="secret words", supported=False, source_id=None)
+    details = verify_audit_details(
+        Verification(claims=[claim], groundedness=0.0, policy_violations=[], passed=False)
+    )
+    assert details == {
+        "passed": False,
+        "groundedness": 0.0,
+        "claims": 1,
+        "unsupported_claims": 1,
+        "policy_violations": [],
+        "llm_check": True,
+    }
+    assert "secret" not in str(details)

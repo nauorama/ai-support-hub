@@ -263,14 +263,17 @@ async def test_the_recorded_answer_to_a_question_outside_the_kb_cannot_answer() 
 
 
 def test_the_write_requests_on_disk_are_recorded() -> None:
-    """Every write request has a real recording (not synthetic), so fake mode can answer it."""
+    """Every run request (triage, write, and verify for an answer that passes the code checks,
+    P5-04) has a real recording (not synthetic), so fake mode can answer it."""
     from hub.llm.record import has_real_recording, load_specs, spec_requests
 
     gateway = _fake_gateway(MemoryRecorder())
     specs = [
         (path, spec) for path, spec in load_specs(FIXTURES_DIR) if path.name.startswith("run_")
     ]
-    assert len(specs) == 2 * len(TICKETS)
+    verified = {path.name for path, _ in specs if path.name.endswith("_verify.json")}
+    assert verified == {"run_01_verify.json"}  # run_02 cannot answer: no verify call
+    assert len(specs) == 2 * len(TICKETS) + len(verified)
     for path, spec in specs:
         for request in spec_requests(gateway, spec):
             assert has_real_recording(FIXTURES_DIR, request), f"{path.name}: run make record-llm"

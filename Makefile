@@ -122,7 +122,9 @@ llm-requests:
 
 # The evaluation runner (eval plan §4) on the 20 dev tickets, against EVAL_DATABASE_URL (run
 # `make migrate` first). Real models cost money: by hand, only when the owner asks (ADR-0018);
-# `LLM_MODE=fake make eval LIMIT=10` checks the runner for free. Options: VARIANT=<name>,
+# `LLM_MODE=fake make eval LIMIT=10` checks the runner for free. The default variant rag_hybrid
+# (and rag_dense) also needs Qdrant (`make up`) and the local models (`make models`): the runner
+# indexes the evaluation KB under its own alias, never the app's. Options: VARIANT=<name>,
 # LIMIT=<n> (first n tickets), NO_CACHE=1 (milestone run), RESTART=1 (run every ticket again),
 # RUN_DIR=<dir> (resume that run), NO_JUDGES=1 (skip the LLM judges).
 eval:

@@ -84,6 +84,13 @@ def _fold_char(char: str) -> str:
     return kept.casefold().translate(_LOOKALIKES)
 
 
+def fold_text(text: str) -> str:
+    """The folded view of G4 (look-alikes mapped, format characters, combining marks and
+    invisible letters dropped, case-folded), for other guardrails that match words: the
+    forbidden-promise check of `output_checks.py` (P5-04)."""
+    return _fold(text)[0]
+
+
 def _fold(text: str) -> tuple[str, list[int]]:
     """The folded text, and for each of its characters the index of the original one."""
     parts: list[str] = []

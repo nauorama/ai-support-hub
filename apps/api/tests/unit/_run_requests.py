@@ -8,6 +8,15 @@ in fake mode (integration tests, `make dev`) finds its recordings. A unit test f
 is missing or out of date, e.g. after a prompt or KB change; then run `make llm-requests` and
 `make record-llm`.
 
+**Verify (P5-04).** The verify request holds the writer's answer, so it is built from the
+recorded write response: `run_NN_verify.json` exists for a ticket whose write recording is there
+and passes every code check (`guardrails/output_checks.py`); otherwise the run makes no verify
+call. After a new write recording, run `make llm-requests` again and record once more.
+
+**Verify test cases (P5-04).** Each case in `tests/fixtures/verify/cases.jsonl` becomes
+`verify_<case id>.json`: a hand-written draft checked against chunks of `data/kb/` (a pass and
+an invented fee), recorded like the rest; `test_verify_node.py` checks the recorded verdicts.
+
 **The search hits** of each ticket are kept in `tests/fixtures/run/evidence.json` (chunk ids in
 rank order), and the write request is built from those chunks' texts in `data/kb/`. So the unit
 test needs neither Qdrant nor the embedding model. `--search` (part of `make llm-requests`)
@@ -27,16 +36,28 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from hub.domain.enums import LlmCallContext, LlmNode
-from hub.graph.linear import SEARCH_MODES, SEARCH_TOP_K, VARIANT, rag_evidence
+from hub.domain.draft import DraftAnswer
+from hub.domain.enums import LlmCallContext, LlmCallMode, LlmNode
+from hub.graph.linear import (
+    SEARCH_MODES,
+    SEARCH_TOP_K,
+    VARIANT,
+    draft_to_check,
+    rag_evidence,
+)
 from hub.graph.nodes.intake import intake
 from hub.graph.nodes.triage import triage_messages
+from hub.graph.nodes.verify import verify_messages
 from hub.graph.nodes.write import write_messages
 from hub.guardrails.masking import mask
+from hub.guardrails.output_checks import InternalText, check_draft
 from hub.kb.loader import KbFile, read_kb
 from hub.kb.retriever import KbChunk
-from hub.llm.config import load_models
+from hub.llm.config import ModelsConfig, load_models
+from hub.llm.gateway import FIXTURES_DIR, Fixture, FixtureProvider, Gateway
+from hub.llm.pricing import load_pricing
 from hub.llm.prompts import active_prompt
+from hub.llm.record import RequestSpec, spec_requests
 
 ROOT = Path(__file__).resolve().parents[4]
 FIXTURES = ROOT / "apps" / "api" / "tests" / "fixtures"
@@ -44,7 +65,9 @@ TICKETS = FIXTURES / "run" / "tickets.jsonl"
 EVIDENCE = FIXTURES / "run" / "evidence.json"
 REQUESTS = FIXTURES / "llm" / "requests"
 KB_DIR = ROOT / "data" / "kb"
-GENERATED = re.compile(r"run_[0-9]{2}_(triage|write)\.json")
+GENERATED = re.compile(r"run_[0-9]{2}_(triage|write|verify)\.json")
+VERIFY_CASES = FIXTURES / "verify" / "cases.jsonl"
+GENERATED_VERIFY = re.compile(r"verify_[a-z_]+\.json")
 
 
 class RunTicket(BaseModel):
@@ -94,12 +117,40 @@ def hits_from_files(chunk_ids: list[str], files: list[KbFile]) -> list[KbChunk]:
     return hits
 
 
+def internal_text(files: list[KbFile]) -> InternalText:
+    """The internal-text check over `data/kb/`, as the run builds it from Postgres."""
+    return InternalText.build(
+        internal=[c.text for f in files if f.visibility == "internal" for c in f.chunks],
+        external=[c.text for f in files if f.visibility == "external" for c in f.chunks],
+    )
+
+
+def recorded_answer(models: ModelsConfig, spec: dict[str, Any]) -> DraftAnswer | None:
+    """The recorded write answer of a write request file, or None when it is not recorded."""
+    gateway = Gateway(
+        models=models,
+        pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
+        provider=FixtureProvider(FIXTURES_DIR),
+        recorder=_NoRecorder(),
+        mode=LlmCallMode.FAKE,
+        budget=None,
+    )
+    (request,) = spec_requests(gateway, RequestSpec.model_validate(spec))
+    path = FIXTURES_DIR / f"{request.fixture_key()}.json"
+    if not path.exists():
+        return None
+    content = Fixture.model_validate_json(path.read_bytes()).response.content
+    return DraftAnswer.model_validate_json(content) if content is not None else None
+
+
 def request_specs() -> dict[str, dict[str, Any]]:
     """File name -> request file content, for every run ticket."""
     models = load_models(ROOT / "config" / "models.yaml")
     triage_prompt = active_prompt(ROOT / "prompts", models, "triage")
     write_prompt = active_prompt(ROOT / "prompts", models, "write")
+    verify_prompt = active_prompt(ROOT / "prompts", models, "verify")
     files = read_kb(KB_DIR)
+    internal = internal_text(files)
     evidence = load_evidence()
     specs: dict[str, dict[str, Any]] = {}
     for ticket in load_tickets():
@@ -108,7 +159,8 @@ def request_specs() -> dict[str, dict[str, Any]]:
         if mask(ticket.ticket).text != ticket.ticket:
             raise ValueError(f"{ticket.id}: the ticket is not masked")
         result = intake(ticket.ticket)
-        kb = rag_evidence(VARIANT, hits_from_files(evidence[ticket.id], files)).kb
+        writer_evidence = rag_evidence(VARIANT, hits_from_files(evidence[ticket.id], files))
+        kb = writer_evidence.kb
         specs[f"{ticket.id}_triage.json"] = {
             "role": triage_prompt.front.role,
             "schema": "TriageResult",
@@ -124,6 +176,73 @@ def request_specs() -> dict[str, dict[str, Any]]:
             "messages": write_messages(
                 write_prompt,
                 kb=kb,
+                ticket=result.message_for_llm,
+                history=result.history_for_llm,
+            ),
+        }
+        answer = recorded_answer(models, specs[f"{ticket.id}_write.json"])
+        if answer is None or check_draft(
+            draft_to_check(answer, writer_evidence, result), internal=internal
+        ):
+            continue
+        specs[f"{ticket.id}_verify.json"] = {
+            "role": verify_prompt.front.role,
+            "schema": "ClaimsAnswer",
+            "prompt_version": verify_prompt.version,
+            "models": "primary",
+            "messages": verify_messages(
+                verify_prompt,
+                draft=answer.answer,
+                kb=kb,
+                ticket=result.message_for_llm,
+                history=result.history_for_llm,
+            ),
+        }
+    return specs
+
+
+class VerifyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ticket: str
+    draft: str
+    chunks: list[str]
+
+
+class VerifyCase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    case: str
+    input: VerifyInput
+    expected: dict[str, Any]
+
+
+def load_verify_cases() -> list[VerifyCase]:
+    lines = VERIFY_CASES.read_text(encoding="utf-8").splitlines()
+    return [VerifyCase.model_validate_json(line) for line in lines if line.strip()]
+
+
+def verify_case_kb(case: VerifyCase) -> str:
+    return rag_evidence(VARIANT, hits_from_files(case.input.chunks, read_kb(KB_DIR))).kb
+
+
+def verify_case_specs() -> dict[str, dict[str, Any]]:
+    """File name -> request file content, for every verify test case."""
+    models = load_models(ROOT / "config" / "models.yaml")
+    prompt = active_prompt(ROOT / "prompts", models, "verify")
+    specs: dict[str, dict[str, Any]] = {}
+    for case in load_verify_cases():
+        result = intake(case.input.ticket)
+        specs[f"verify_{case.id}.json"] = {
+            "role": prompt.front.role,
+            "schema": "ClaimsAnswer",
+            "prompt_version": prompt.version,
+            "models": "primary",
+            "messages": verify_messages(
+                prompt,
+                draft=case.input.draft,
+                kb=verify_case_kb(case),
                 ticket=result.message_for_llm,
                 history=result.history_for_llm,
             ),
@@ -214,6 +333,13 @@ def main(argv: list[str]) -> None:
     for name, spec in specs.items():
         (REQUESTS / name).write_text(render(spec), encoding="utf-8")
     print(f"llm-requests: {len(specs)} run requests written to {REQUESTS}")
+    cases = verify_case_specs()
+    for stale in REQUESTS.glob("verify_*.json"):
+        if GENERATED_VERIFY.fullmatch(stale.name) and stale.name not in cases:
+            stale.unlink()
+    for name, spec in cases.items():
+        (REQUESTS / name).write_text(render(spec), encoding="utf-8")
+    print(f"llm-requests: {len(cases)} verify requests written to {REQUESTS}")
 
 
 if __name__ == "__main__":

@@ -16,18 +16,26 @@ run's own cost limit in place of the daily budget, and the disk cache.
   in the gateway, under `evals/.cache/llm/<LLM_MODE>/`. A cache hit makes no provider call and
   is recorded with mode `fake` (nothing paid).
 - **Cost.** Before the first call the runner prints an estimate (input tokens ≈ characters / 4,
-  output tokens = the role's `max_tokens`, cached calls free) and stops when it is above
-  `EVAL_MAX_COST_USD` in real mode. While the run goes, each ticket checks the money already paid
-  in this run before its first model call, and every judge call checks it again; once the limit
-  is reached the remaining tickets are not run or judged (and not written, so a resume with a
-  higher limit runs them). The limit is soft by up to the answer calls of the tickets already in
-  flight and one judge call each. Money paid for a ticket that is not written counts in this
-  run only: a resume starts from the written results, and the disk cache serves the paid
-  answers again for free (with `--no-cache` they are paid again). In fake mode nothing is paid
-  and the limit does not apply.
+  output tokens = the role's `max_tokens`, cached calls free; for a RAG variant each ticket's
+  write, verify and judge requests hold the chunks its search finds, searched for the estimate)
+  and stops when it is above `EVAL_MAX_COST_USD` in real mode. While the run goes, each ticket
+  checks the money already paid in this run before its first model call, and every judge call
+  checks it again; once the limit is reached the remaining tickets are not run or judged (and
+  not written, so a resume with a higher limit runs them). The limit is soft by up to the
+  answer calls of the tickets already in flight and one judge call each. Money paid for a
+  ticket that is not written counts in this run only: a resume starts from the written results,
+  and the disk cache serves the paid answers again for free (with `--no-cache` they are paid
+  again). In fake mode nothing is paid and the limit does not apply.
+- **Variants** (ai-pipeline §10): `rag_hybrid` (the default) and `rag_dense` search the
+  evaluation knowledge base in Qdrant (P5-05); `b0_full_kb` puts the whole KB in the prompt. For
+  a RAG variant the runner first brings the evaluation index in line with the KB in the
+  evaluation database: its own alias `eval_kb_chunks` (collections `eval_kb_chunks_v<N>`), so
+  the app's index `kb_chunks` is never touched. Embeddings come from the local model, free.
 - **Judges** (P4-05, on by default; `--no-judges` turns them off): after a ticket's run, its
-  draft goes to the LLM judges (`hub_evals.judges`): key facts, faithfulness against the cited
-  documents, and one citation call per marked sentence. Judge calls use the same gateway, cache
+  draft goes to the LLM judges (`hub_evals.judges`): key facts, faithfulness, and one citation
+  call per marked sentence. The evidence is what the writer read (P5-05): for a RAG draft the
+  chunks of its search (`drafts.evidence.chunks`, rendered with `render_chunks`) and the cited
+  chunk for a citation; for B0 the cited documents. Judge calls use the same gateway, cache
   and cost limit; they are recorded with node `judge` and no `run_id`. A judge that fails for
   good is noted in the ticket's result; an outage is not written, so a resume judges again.
 - **Metrics and report** (P4-04): `metrics.json` and `report.md` from `hub_evals.report`.
@@ -67,23 +75,43 @@ from hub.domain.enums import (
     ActorType,
     LlmCallContext,
     LlmCallMode,
+    LlmNode,
     MessageRole,
     Route,
     TicketStatus,
 )
 from hub.domain.triage import TriageResult
-from hub.graph.linear import B0_VARIANT, GRAPH_VERSION, Pipeline, run_ticket, write_prompt_for
+from hub.domain.verification import ClaimsAnswer
+from hub.graph.linear import (
+    B0_VARIANT,
+    GRAPH_VERSION,
+    KbSearch,
+    Pipeline,
+    WriterEvidence,
+    run_ticket,
+    write_prompt_for,
+    writer_evidence,
+)
+from hub.graph.linear import VARIANT as RAG_DEFAULT
+from hub.graph.linear import VARIANTS as WORKFLOW_VARIANTS
 from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import triage_messages
+from hub.graph.nodes.verify import verify_messages
 from hub.graph.nodes.write import write_messages
 from hub.guardrails.masking import MaskResult, mask
+from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
+from hub.kb.index import KbIndex, connect_qdrant, read_chunks
 from hub.kb.loader import load_kb, read_kb
-from hub.llm.gateway import CachingProvider, Gateway, Provider, build_gateway
+from hub.kb.retriever import Retriever
+from hub.kb.sparse import Bm25Encoder
+from hub.llm.gateway import CachingProvider, Gateway, Provider, build_gateway, embedder
+from hub.llm.local_embedding import LocalEmbeddingProvider
 from hub.llm.prompts import active_prompt
 from hub.llm.recorder import CallRecorder, DbCallRecorder
 from hub.llm.schemas import (
     BudgetExceededError,
+    CallContext,
     LlmCallRecord,
     LlmError,
     LlmUnavailableError,
@@ -101,11 +129,13 @@ from hub_evals.schemas import Ticket
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
-# The variants an evaluation can run. The RAG variants (ai-pipeline §10) need the evaluation
-# knowledge base indexed in Qdrant and the judges reading chunk evidence; until that lands, the
-# runner runs B0 only (P5-03 pull request: open point).
-VARIANT = B0_VARIANT
-VARIANTS = (B0_VARIANT,)
+# The variants an evaluation can run (ai-pipeline §10): the workflow's, RAG by default.
+VARIANT = RAG_DEFAULT
+VARIANTS = WORKFLOW_VARIANTS
+# The evaluation index in Qdrant: its own alias and collections, never the app's `kb_chunks`.
+EVAL_KB_ALIAS = "eval_kb_chunks"
+EVAL_KB_PREFIX = "eval_kb_chunks_v"
+EMBEDDING_CALL = CallContext(context=LlmCallContext.EVAL, node=LlmNode.EMBEDDING)
 TICKETS_FILE = ROOT / "data" / "eval" / "tickets.dev.jsonl"
 SEED_DIR = ROOT / "data" / "seed"
 KB_DIR = ROOT / "data" / "kb"
@@ -224,23 +254,39 @@ class Estimate:
     cost_usd: Decimal
 
 
+@dataclass(frozen=True)
+class EstimateEvidence:
+    """What one ticket's requests hold, for the estimate: the writer's `{{kb}}` text and each
+    source it may cite, rendered as the judges get it (a chunk with `render_chunks`, a document
+    with `render_kb`)."""
+
+    kb: str
+    sources: tuple[str, ...]
+
+    @classmethod
+    def of(cls, evidence: WriterEvidence, documents: Sequence[KbSource] = ()) -> "EstimateEvidence":
+        if evidence.chunks is None:
+            return cls(evidence.kb, tuple(render_kb([document]) for document in documents))
+        return cls(evidence.kb, tuple(render_chunks([chunk]) for chunk in evidence.chunks))
+
+
 def judge_requests(
     gateway: Gateway,
     judge_set: judging.Judges,
     ticket: Ticket,
-    sources: Sequence[KbSource],
+    evidence: EstimateEvidence,
     draft_chars: int,
 ) -> list[ProviderRequest]:
     """The judge requests of one ticket at their largest, for the estimate: a draft of the
-    write role's full `max_tokens`, all external documents as evidence, the longest document
-    as the cited source, and `ESTIMATED_CITATIONS` citations."""
+    write role's full `max_tokens`, everything the writer read as the faithfulness evidence, the
+    longest source as the cited one, and `ESTIMATED_CITATIONS` citations."""
     draft = "x" * draft_chars
-    longest = max((render_kb([source]) for source in sources), key=len, default="")
+    longest = max(evidence.sources, key=len, default="")
     text = judge_ticket_text(ticket)
     calls: list[tuple[list[Message], type[BaseModel]]] = [
         (
             judging.faithfulness_messages(
-                judge_set.faithfulness, draft=draft, evidence=render_kb(sources), ticket=text
+                judge_set.faithfulness, draft=draft, evidence=evidence.kb, ticket=text
             ),
             judging.FaithfulnessVerdict,
         )
@@ -266,20 +312,43 @@ def judge_requests(
     return [gateway.chat_requests(role, messages, schema)[0] for messages, schema in calls]
 
 
+def ticket_query(ticket: Ticket) -> str:
+    """The masked message after intake: the writer's ticket text and the search query."""
+    return intake(mask(ticket.message).text, history_turns(ticket)).message_for_llm
+
+
+async def estimate_evidence(
+    pipeline: Pipeline, tickets: Sequence[Ticket]
+) -> dict[str, EstimateEvidence]:
+    """Ticket id -> what its requests will hold. B0: the whole KB for every ticket. RAG: the
+    ticket's own search, run now with the same function as the run (local models, free)."""
+    found: dict[str, EstimateEvidence] = {}
+    documents: list[KbSource] = []
+    if pipeline.variant == B0_VARIANT:
+        async with pipeline.database.sessions() as session:
+            documents = await load_external_sources(session)
+    for ticket in tickets:
+        evidence = await writer_evidence(pipeline, ticket_query(ticket))
+        found[ticket.id] = EstimateEvidence.of(evidence, documents)
+    return found
+
+
 def estimate_cost(
     pipeline: Pipeline,
     tickets: Sequence[Ticket],
-    kb: str,
+    evidence: Mapping[str, EstimateEvidence],
     cache: CachingProvider | None,
     judge_set: judging.Judges | None = None,
-    sources: Sequence[KbSource] = (),
 ) -> Estimate:
     """An upper bound of what the pending tickets cost with real models: the triage and the write
     request of each ticket (the requests `run_ticket` sends, built by the same functions), each
     priced with its role's model at the estimated input tokens and the full `max_tokens`. A call
     whose answer is in the cache costs nothing. Repair calls and the fallback are not counted.
-    With judges, each ticket adds its judge requests at their largest (`judge_requests`); they
-    depend on the answer, so they are never counted as cached."""
+    A RAG variant adds the verify request (a draft of the write role's full `max_tokens` against
+    the ticket's chunks), counted for every ticket although the code checks skip it for a draft
+    that fails them. With judges, each ticket adds its judge requests at their largest
+    (`judge_requests`). Verify and judge requests depend on the answer, so they are never
+    counted as cached."""
     gateway: Gateway = pipeline.gateway
     calls = cached = 0
     total = Decimal(0)
@@ -288,6 +357,7 @@ def estimate_cost(
     ) * CHARS_PER_TOKEN
     for ticket in tickets:
         result = intake(mask(ticket.message).text, history_turns(ticket))
+        found = evidence[ticket.id]
         requests = [
             gateway.chat_requests(
                 pipeline.triage_prompt.front.role,
@@ -298,25 +368,37 @@ def estimate_cost(
                 pipeline.write_prompt.front.role,
                 write_messages(
                     pipeline.write_prompt,
-                    kb=kb,
+                    kb=found.kb,
                     ticket=result.message_for_llm,
                     history=result.history_for_llm,
                 ),
                 DraftAnswer,
             )[0],
         ]
-        judged = (
-            judge_requests(gateway, judge_set, ticket, sources, draft_chars)
-            if judge_set is not None
-            else []
-        )
+        uncached: list[ProviderRequest] = []
+        if pipeline.verifies and pipeline.verify_prompt is not None:
+            uncached.append(
+                gateway.chat_requests(
+                    pipeline.verify_prompt.front.role,
+                    verify_messages(
+                        pipeline.verify_prompt,
+                        draft="x" * draft_chars,
+                        kb=found.kb,
+                        ticket=result.message_for_llm,
+                        history=result.history_for_llm,
+                    ),
+                    ClaimsAnswer,
+                )[0]
+            )
+        if judge_set is not None:
+            uncached += judge_requests(gateway, judge_set, ticket, found, draft_chars)
         for request in requests:
             calls += 1
             if cache is not None and cache.contains(request):
                 cached += 1
                 continue
             total += _price(gateway, request)
-        for request in judged:
+        for request in uncached:
             calls += 1
             total += _price(gateway, request)
     return Estimate(calls=calls, cached_calls=cached, cost_usd=total)
@@ -518,6 +600,8 @@ async def collect_result(
             citations=list(draft.citations),
             evidence=dict(draft.evidence),
             proposed_actions=list(draft.proposed_actions),
+            groundedness=draft.groundedness,
+            unsupported_claims=list(draft.unsupported_claims),
         )
         if draft is not None
         else None,
@@ -602,13 +686,62 @@ def judge_ticket_text(ticket: Ticket) -> judging.TicketText:
 
 
 def cited_sources(draft: files.DraftOut, sources: Mapping[str, KbSource]) -> dict[int, KbSource]:
-    """marker -> the source its citation names (unknown ids were dropped by the run)."""
+    """B0: marker -> the document its citation names (unknown ids were dropped by the run)."""
     cited: dict[int, KbSource] = {}
     for citation in draft.citations:
         source = sources.get(str(citation.get("source_id")))
         if source is not None and isinstance(citation.get("marker"), int):
             cited.setdefault(citation["marker"], source)
     return cited
+
+
+@dataclass(frozen=True, slots=True)
+class ReadChunk:
+    """A chunk the writer read, as stored in `drafts.evidence.chunks`."""
+
+    chunk_id: str
+    text: str
+
+
+def read_chunks_of(draft: files.DraftOut) -> list[ReadChunk] | None:
+    """The chunks of a RAG draft's search in rank order; None for B0 (no search)."""
+    chunks = draft.evidence.get("chunks")
+    if not isinstance(chunks, list):
+        return None
+    return [ReadChunk(str(chunk["chunk_id"]), str(chunk["text"])) for chunk in chunks]
+
+
+@dataclass(frozen=True)
+class JudgeEvidence:
+    """What the judges check a draft against: `text` for faithfulness, and per marker the
+    cited source (id, text) for its citation."""
+
+    text: str
+    cited: dict[int, tuple[str, str]]
+
+
+def judge_evidence(draft: files.DraftOut, sources: Mapping[str, KbSource]) -> JudgeEvidence:
+    """RAG (P5-05): every chunk the writer read, and the cited chunk per marker. B0: the cited
+    documents, as the writer cited them."""
+    chunks = read_chunks_of(draft)
+    if chunks is None:
+        documents = cited_sources(draft, sources)
+        unique = sorted({source.id: source for source in documents.values()}.values(), key=_id)
+        return JudgeEvidence(
+            text=render_kb(unique),
+            cited={marker: (s.id, render_kb([s])) for marker, s in documents.items()},
+        )
+    by_id = {chunk.chunk_id: chunk for chunk in chunks}
+    cited: dict[int, tuple[str, str]] = {}
+    for citation in draft.citations:
+        chunk = by_id.get(str(citation.get("source_id")))
+        if chunk is not None and isinstance(citation.get("marker"), int):
+            cited.setdefault(citation["marker"], (chunk.chunk_id, render_chunks([chunk])))
+    return JudgeEvidence(text=render_chunks(chunks), cited=cited)
+
+
+def _id(source: KbSource) -> str:
+    return source.id
 
 
 async def judge_ticket(
@@ -620,8 +753,8 @@ async def judge_ticket(
     limit: CostLimit | None = None,
 ) -> files.Judgements:
     """The judges of one draft (eval plan §5). Key facts are judged on every draft (an empty
-    one states none, without a call); faithfulness and citations only on an answer. The
-    evidence of faithfulness is the cited documents, as the writer cited them. An outage
+    one states none, without a call); faithfulness and citations only on an answer, against
+    what the writer read (`judge_evidence`). An outage
     (`LlmUnavailableError`) is raised: the result is not written and a resume judges again.
     Any other judge error is noted and leaves the ticket out of that metric.
 
@@ -631,7 +764,7 @@ async def judge_ticket(
     judge_gateway = dataclasses.replace(gateway, recorder=tally)
     errors: dict[str, str] = {}
     body = draft.body if draft.can_answer else ""
-    cited = cited_sources(draft, sources)
+    evidence = judge_evidence(draft, sources)
     text = judge_ticket_text(ticket)
 
     async def attempt[T](name: str, job: Callable[[], Awaitable[T]]) -> T | None:
@@ -658,19 +791,21 @@ async def judge_ticket(
     faithfulness = None
     citations: list[judging.CitationResult] = []
     if body.strip():
-        evidence = render_kb(
-            sorted({source.id: source for source in cited.values()}.values(), key=lambda s: s.id)
-        )
         faithfulness = await attempt(
             "faithfulness",
             lambda: judging.judge_faithfulness(
-                judge_gateway, judge_set.faithfulness, draft=body, evidence=evidence, ticket=text
+                judge_gateway,
+                judge_set.faithfulness,
+                draft=body,
+                evidence=evidence.text,
+                ticket=text,
             ),
         )
         for marker, sentence in judging.marked_sentences(body):
-            source = cited.get(marker)
+            source = evidence.cited.get(marker)
             if source is None:
                 continue  # a marker without a citation: found by the code check
+            source_id, source_text = source
             verdict = await attempt(
                 "citation",
                 functools.partial(
@@ -678,9 +813,9 @@ async def judge_ticket(
                     judge_gateway,
                     judge_set.citation,
                     marker=marker,
-                    source_id=source.id,
+                    source_id=source_id,
                     sentence=sentence,
-                    source=render_kb([source]),
+                    source=source_text,
                     ticket=text,
                 ),
             )
@@ -745,9 +880,12 @@ def build_pipeline(
     provider: Provider | None = None,
 ) -> tuple[Pipeline, CostLimit, CachingProvider | None]:
     """The evaluation pipeline, its cost limit and its cache (None with `--no-cache`).
-    `provider`: tests pass a scripted provider in place of the one of `LLM_MODE`."""
+    `provider`: tests pass a scripted provider in place of the chat provider of `LLM_MODE`;
+    embeddings still come from the local model. The pipeline has no retriever yet: a RAG
+    variant gets it from `eval_index` once the index is in line with the evaluation KB."""
     gateway = build_gateway(settings, DbCallRecorder(database), None, cache_dir=cache_dir)
     if provider is not None:
+        provider = LocalEmbeddingProvider(provider, settings.embedding_cache_dir)
         if cache_dir is not None:
             provider = CachingProvider(provider, cache_dir / settings.llm_mode)
         gateway = dataclasses.replace(gateway, provider=provider)
@@ -761,10 +899,43 @@ def build_pipeline(
         budget=limit,
         triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
         write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, variant),
+        verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify")
+        if variant != B0_VARIANT
+        else None,
         context=LlmCallContext.EVAL,
         variant=variant,
     )
     return pipeline, limit, cache
+
+
+@dataclass
+class EvalIndex:
+    """The evaluation index in Qdrant and its search; `close` releases the client."""
+
+    retriever: KbSearch
+    close: Callable[[], Awaitable[None]]
+
+
+async def eval_index(settings: Settings, pipeline: Pipeline) -> EvalIndex:
+    """Bring the evaluation index (`EVAL_KB_ALIAS`) in line with the KB chunks in the
+    evaluation database and return its search. Only what changed is embedded (`KbIndex.sync`),
+    through the pipeline's gateway with context `eval` (local model, cost 0)."""
+    client = connect_qdrant(settings.qdrant_url, settings.qdrant_api_key.get_secret_value())
+    dense = embedder(pipeline.gateway, EMBEDDING_CALL)
+    sparse = Bm25Encoder(settings.embedding_cache_dir)
+    try:
+        async with pipeline.database.sessions() as session:
+            chunks = await read_chunks(session)
+        await KbIndex(client, dense, sparse, alias=EVAL_KB_ALIAS, prefix=EVAL_KB_PREFIX).sync(
+            chunks
+        )
+    except Exception as exc:
+        await client.close()
+        raise EvalSetupError(
+            f"the evaluation index could not be built ({type(exc).__name__}); "
+            "is Qdrant up (`make up`) and the embedding model there (`make models`)?"
+        ) from None
+    return EvalIndex(Retriever(client, dense, sparse, alias=EVAL_KB_ALIAS), client.close)
 
 
 def run_config(
@@ -776,12 +947,16 @@ def run_config(
     sha, diff = git_state()
     models = pipeline.gateway.models
     prompts = [pipeline.triage_prompt, pipeline.write_prompt]
+    if pipeline.verifies and pipeline.verify_prompt is not None:
+        prompts.append(pipeline.verify_prompt)
     if judge_set is not None:
         prompts += judge_set.prompts
     prompt_files = [
         settings.prompts_dir / prompt.node / f"{prompt.front.version}.md" for prompt in prompts
     ]
     nodes = [("triage", pipeline.triage_prompt), ("write", pipeline.write_prompt)]
+    if pipeline.verifies and pipeline.verify_prompt is not None:
+        nodes.append(("verify", pipeline.verify_prompt))
     if judge_set is not None:
         nodes.append(("judge", judge_set.key_facts))
     return files.RunConfig(
@@ -887,7 +1062,45 @@ async def _run(
         sources = await load_external_sources(session)
     if not sources:
         raise EvalSetupError("no external KB document in the evaluation database")
-    report.estimate = estimate_cost(pipeline, todo, render_kb(sources), cache, judge_set, sources)
+    index = None
+    if pipeline.variant != B0_VARIANT:
+        index = await eval_index(settings, pipeline)
+        pipeline = dataclasses.replace(pipeline, retriever=index.retriever)
+    try:
+        return await _run_tickets(
+            pipeline,
+            limit,
+            cache,
+            judge_set,
+            config,
+            run_dir,
+            tickets,
+            todo,
+            sources,
+            report,
+            options.concurrency,
+        )
+    finally:
+        if index is not None:
+            await index.close()
+
+
+async def _run_tickets(
+    pipeline: Pipeline,
+    limit: CostLimit,
+    cache: CachingProvider | None,
+    judge_set: judging.Judges | None,
+    config: files.RunConfig,
+    run_dir: Path,
+    tickets: list[Ticket],
+    todo: list[Ticket],
+    sources: list[KbSource],
+    report: Report,
+    concurrency: int,
+) -> Report:
+    results_path = run_dir / files.RESULTS_FILE
+    evidence = await estimate_evidence(pipeline, todo)
+    report.estimate = estimate_cost(pipeline, todo, evidence, cache, judge_set)
     by_id = {source.id: source for source in sources}
     if limit.enforced and limit.spent + report.estimate.cost_usd > limit.limit:
         report.stopped_by_estimate = True
@@ -895,7 +1108,7 @@ async def _run(
         _finish(run_dir, config, tickets, results_path, report, cache)
         return report
 
-    semaphore = asyncio.Semaphore(options.concurrency)
+    semaphore = asyncio.Semaphore(concurrency)
 
     async def one(ticket: Ticket) -> None:
         async with semaphore:

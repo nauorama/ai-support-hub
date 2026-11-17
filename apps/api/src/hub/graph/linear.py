@@ -1,5 +1,5 @@
-"""The phase-3 workflow: a plain linear function `intake → triage → search → write` (P3-05,
-retrieval P5-03).
+"""The phase-3 workflow: a plain linear function `intake → triage → search → write → verify`
+(P3-05, retrieval P5-03, verification P5-04).
 
 Called by `POST /tickets` for a new ticket. There is no policy gate, no verification and no
 auto-reply yet, so **every** run ends with the ticket in `pending_approval` (route `approval`,
@@ -16,8 +16,15 @@ Order and transactions:
 4. search (code, P5-03): one hybrid search of the external knowledge base with the masked
    ticket text, top 6 (ai-pipeline §4, step 0 of `research`; the model never chooses the
    query). Its hits are the writer's evidence and are stored in the draft (`evidence.chunks`);
-5. write (model): the draft is saved, the ticket moves to `pending_approval`; `draft.created`,
-   `route.decided`.
+5. write (model): the draft;
+6. verify (code, then model; P5-04, RAG variants only): the code checks of
+   `guardrails/output_checks.py` on the answer as the model wrote it (placeholders restored, not
+   yet card masked, every marker still in), then, only when they all pass, the LLM claim check
+   (`graph/nodes/verify.py`). The draft is saved with `groundedness` and `unsupported_claims`,
+   the ticket moves to `pending_approval`; `draft.created`, `verify.done`, `route.decided`.
+   The route stays `approval` with reason `auto_reply_off` whatever the verification says:
+   routing on it (`unsupported_claims`, `policy_violation`) and the retry come with the graph
+   (P6-02, P6-04). B0 has no verify step: it is the phase-3 baseline, kept as it was.
 
 Citations name chunk ids. The server, not the model, turns each one into a link: the title of
 the chunk's article and the URL of its section (`/help/<doc_id>#<anchor>`, from the index
@@ -68,7 +75,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hub.audit import record
-from hub.db.models import Draft, LlmCall, Message, Run, Ticket
+from hub.db.models import Draft, KbDocument, LlmCall, Message, Run, Ticket
+from hub.db.models import KbChunk as KbChunkRow
 from hub.db.repositories import MessageRepository, TicketRepository
 from hub.db.session import Database
 from hub.domain.draft import DraftAnswer
@@ -83,11 +91,15 @@ from hub.domain.enums import (
     TicketStatus,
     Urgency,
 )
+from hub.domain.kb import Visibility
 from hub.domain.triage import TriageResult
+from hub.domain.verification import Verification
 from hub.graph.nodes import triage as triage_node
+from hub.graph.nodes import verify as verify_node
 from hub.graph.nodes import write as write_node
 from hub.graph.nodes.intake import ChatTurn, IntakeResult, intake
 from hub.guardrails.masking import mask
+from hub.guardrails.output_checks import DraftToCheck, InternalText, check_draft
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
 from hub.kb.retriever import DEFAULT_TOP_K, KbChunk, SearchMode, SearchVisibility
@@ -99,7 +111,7 @@ from hub.llm.schemas import BudgetExceededError
 
 logger = logging.getLogger(__name__)
 
-GRAPH_VERSION = "linear-v2"
+GRAPH_VERSION = "linear-v3"
 VARIANT = "rag_hybrid"
 B0_VARIANT = "b0_full_kb"
 # The variants this workflow can run (ai-pipeline §10), with the search mode of the RAG ones.
@@ -116,6 +128,7 @@ BUDGET_REASONS = ["budget_exceeded"]
 STEP_UNDERSTANDING = "understanding"
 STEP_SEARCHING = "searching"
 STEP_WRITING = "writing"
+STEP_CHECKING = "checking"
 
 RUN_FAILED_DETAIL = "The assistant could not prepare an answer. A support agent will reply here."
 
@@ -156,6 +169,8 @@ class Pipeline:
     variant: str = VARIANT
     # The knowledge-base search of the RAG variants. None: a RAG run fails into a handoff.
     retriever: KbSearch | None = None
+    # The verify step of the RAG variants (P5-04); B0 has none.
+    verify_prompt: Prompt | None = None
 
     def __post_init__(self) -> None:
         if self.variant not in VARIANTS:
@@ -167,13 +182,21 @@ class Pipeline:
                 f"variant {self.variant} cannot run {self.write_prompt.version} "
                 f"(B0 runs write/{B0_WRITE_VERSION}, the RAG variants a later version)"
             )
+        if self.verifies and self.verify_prompt is None:
+            raise ValueError(f"variant {self.variant} needs a verify prompt")
+
+    @property
+    def verifies(self) -> bool:
+        """Whether runs of this variant have a verify step (the RAG variants)."""
+        return self.variant != B0_VARIANT
 
     @property
     def prompt_versions(self) -> dict[str, str]:
         """node -> version without the node prefix (data model §1, `runs.prompt_versions`)."""
-        return {
-            prompt.node: prompt.front.version for prompt in (self.triage_prompt, self.write_prompt)
-        }
+        prompts = [self.triage_prompt, self.write_prompt]
+        if self.verifies and self.verify_prompt is not None:
+            prompts.append(self.verify_prompt)
+        return {prompt.node: prompt.front.version for prompt in prompts}
 
 
 @dataclass(frozen=True)
@@ -315,13 +338,17 @@ def rag_evidence(variant: str, hits: Sequence[KbChunk]) -> WriterEvidence:
 
 
 def draft_from_answer(
-    answer: DraftAnswer, evidence: WriterEvidence, clean: OutputMask
+    answer: DraftAnswer,
+    evidence: WriterEvidence,
+    clean: OutputMask,
+    verification: Verification | None = None,
 ) -> tuple[dict[str, Any], int]:
     """The column values of the draft, and the number of citations dropped because their id is
     not one the writer was given. Every model-written string goes through `clean` (placeholders
     restored, then G1). Markers without a kept citation are removed from the body and listed in
     `evidence.dropped_markers`. The link of a citation (title, section URL) comes from the
-    evidence, never from the model."""
+    evidence, never from the model. With a `verification`, the draft gets its groundedness and
+    the unsupported claims (model-written, so cleaned too)."""
     citations: list[dict[str, Any]] = []
     unknown = 0
     for citation in answer.citations:
@@ -365,9 +392,59 @@ def draft_from_answer(
             "citations": citations,
             "evidence": evidence.stored(cited, dropped),
             "proposed_actions": actions,
+            **verification_columns(verification, clean),
         },
         unknown,
     )
+
+
+def verification_columns(
+    verification: Verification | None, clean: Callable[[str], str]
+) -> dict[str, Any]:
+    """`drafts.groundedness` and `drafts.unsupported_claims` (data model §1)."""
+    if verification is None:
+        return {"groundedness": None, "unsupported_claims": []}
+    groundedness = verification.groundedness
+    return {
+        "groundedness": Decimal(str(groundedness)) if groundedness is not None else None,
+        "unsupported_claims": [
+            {"claim": clean(claim.claim), "source_id": claim.source_id}
+            for claim in verification.unsupported
+        ],
+    }
+
+
+def draft_to_check(
+    answer: DraftAnswer, evidence: WriterEvidence, intake_result: IntakeResult
+) -> DraftToCheck:
+    """The answer as the model wrote it, for the code checks: the run's placeholders restored
+    (one left over is the model's own), not card masked, every marker still in."""
+    others: list[tuple[str, str]] = []
+    if answer.missing_information:
+        others.append(("missing_information", intake_result.restore(answer.missing_information)))
+    others += [
+        ("proposed_action", intake_result.restore(f"{action.summary}\n{action.description}"))
+        for action in answer.proposed_actions
+    ]
+    return DraftToCheck(
+        can_answer=answer.can_answer,
+        answer=intake_result.restore(answer.answer),
+        citations=[(citation.marker, citation.source_id) for citation in answer.citations],
+        evidence_ids=frozenset(evidence.citable),
+        other_texts=others,
+    )
+
+
+def verify_audit_details(verification: Verification) -> dict[str, Any]:
+    """`verify.done`: counts and codes, never a claim's text (it can quote the customer)."""
+    return {
+        "passed": verification.passed,
+        "groundedness": verification.groundedness,
+        "claims": len(verification.claims),
+        "unsupported_claims": len(verification.unsupported),
+        "policy_violations": verification.policy_violations,
+        "llm_check": verification.groundedness is not None,
+    }
 
 
 def run_failed_problem() -> dict[str, Any]:
@@ -461,7 +538,7 @@ async def _save_triage(
         )
 
 
-async def _evidence(pipeline: Pipeline, query: str) -> WriterEvidence:
+async def writer_evidence(pipeline: Pipeline, query: str) -> WriterEvidence:
     """B0: every external document from Postgres. RAG: the first search (ai-pipeline §4, step
     0) with the masked ticket text, external chunks only. An empty result is not an error: the
     writer then has nothing to cite and answers `can_answer = false`."""
@@ -477,6 +554,53 @@ async def _evidence(pipeline: Pipeline, query: str) -> WriterEvidence:
         query, "external", top_k=SEARCH_TOP_K, mode=SEARCH_MODES[pipeline.variant]
     )
     return rag_evidence(pipeline.variant, hits)
+
+
+async def _internal_text(pipeline: Pipeline) -> InternalText:
+    """The internal-text check of the code checks: the chunks of the KB in Postgres, internal
+    against external. Read per run, so a KB reload counts at once."""
+    async with pipeline.database.sessions() as session:
+        rows = (
+            await session.execute(
+                select(KbChunkRow.text, KbDocument.visibility).join(
+                    KbDocument, KbDocument.id == KbChunkRow.doc_id
+                )
+            )
+        ).all()
+    return InternalText.build(
+        internal=[text for text, visibility in rows if visibility == Visibility.INTERNAL],
+        external=[text for text, visibility in rows if visibility == Visibility.EXTERNAL],
+    )
+
+
+async def _verify(
+    pipeline: Pipeline,
+    run_id: uuid.UUID,
+    answer: DraftAnswer,
+    evidence: WriterEvidence,
+    intake_result: IntakeResult,
+    models: dict[str, str],
+) -> Verification:
+    """The code checks, then (only when they all pass) the LLM claim check."""
+    if pipeline.verify_prompt is None:  # pragma: no cover - refused by `Pipeline`
+        raise ValueError("no verify prompt")
+    violations = check_draft(
+        draft_to_check(answer, evidence, intake_result), internal=await _internal_text(pipeline)
+    )
+    if violations:
+        return verify_node.failed_checks(violations)
+    checked = await verify_node.check_claims(
+        pipeline.gateway,
+        pipeline.verify_prompt,
+        draft=answer.answer,
+        kb=evidence.kb,
+        ticket=intake_result.message_for_llm,
+        history=intake_result.history_for_llm,
+        run_id=run_id,
+        context=pipeline.context,
+    )
+    models["verify"] = checked.model
+    return verify_node.verification(checked.value, evidence.citable.keys())
 
 
 async def _totals(session: AsyncSession, run_id: uuid.UUID) -> tuple[Decimal, int, int]:
@@ -529,9 +653,10 @@ async def _save_draft(
     evidence: WriterEvidence,
     intake_result: IntakeResult,
     models: dict[str, str],
+    verification: Verification | None = None,
 ) -> TicketStatus:
     clean = OutputMask(intake_result)
-    values, unknown = draft_from_answer(answer, evidence, clean)
+    values, unknown = draft_from_answer(answer, evidence, clean, verification)
     async with pipeline.database.sessions.begin() as session:
         repository = TicketRepository(session)
         ticket = await repository.lock(await _ticket(session, ticket_id))
@@ -579,6 +704,22 @@ async def _save_draft(
                 "model": models["write"],
             },
         )
+        if verification is not None and pipeline.verify_prompt is not None:
+            await record(
+                session,
+                actor_type=ActorType.AI,
+                actor_id=None,
+                action="verify.done",
+                entity_type="draft",
+                entity_id=draft.id,
+                details={
+                    "run_id": run_id,
+                    "ticket_id": ticket_id,
+                    **verify_audit_details(verification),
+                    "prompt_version": pipeline.verify_prompt.version,
+                    "model": models.get("verify"),
+                },
+            )
         if waits:
             ticket.last_route = Route.APPROVAL
             ticket.route_reasons = APPROVAL_REASONS
@@ -681,7 +822,7 @@ async def run_ticket(
 
         if pipeline.variant != B0_VARIANT:
             await emit("run.status", {"step": STEP_SEARCHING})
-        evidence = await _evidence(pipeline, intake_result.message_for_llm)
+        evidence = await writer_evidence(pipeline, intake_result.message_for_llm)
         await emit("run.status", {"step": STEP_WRITING})
         written = await write_node.write(
             pipeline.gateway,
@@ -693,8 +834,21 @@ async def run_ticket(
             context=pipeline.context,
         )
         models["write"] = written.model
+        verification = None
+        if pipeline.verifies:
+            await emit("run.status", {"step": STEP_CHECKING})
+            verification = await _verify(
+                pipeline, run_id, written.value, evidence, intake_result, models
+            )
         status = await _save_draft(
-            pipeline, ticket_id, run_id, written.value, evidence, intake_result, models
+            pipeline,
+            ticket_id,
+            run_id,
+            written.value,
+            evidence,
+            intake_result,
+            models,
+            verification,
         )
     except Exception as exc:
         error = type(exc).__name__
