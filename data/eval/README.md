@@ -13,6 +13,8 @@ All data is **synthetic and about a fictional company** (Tallybridge). The custo
 2. Every ticket belongs to a seed customer. The ticket must agree with that customer's seed data: transactions, withdrawals, cards, balances, error codes. Dates are relative to the anchor date ("yesterday" means an offset of one day in the seed).
 3. Labels (intent, flags, gold documents, key facts, escalation, expected reason) are proposals. Each key fact must be stated in the world file, in an external article or in the seed data. Key facts never contain internal content or a restriction reason. A gold document is always an external article or `error-codes#<code>`.
 4. The `reviewer` subagent checks every label against the world file and the knowledge base in the pull request. There is no human gate for tickets (H4 was removed by ADR-0018), so a wrong label is possible. The owner reviews the attacks (H6), not the tickets.
+5. Tag `account_data` only when a key fact comes from the customer's own account data (seed records: transactions, cards, balances, verification status). Tickets with empty `key_facts` do not get it.
+6. Tickets that go to a human by a row-1 rule skip the KB search. They may still carry `gold_doc_ids` and `key_facts`, but retrieval and key-fact scores are computed only on tickets that ran a KB search (task P4-04).
 
 ## How `make data-check` validates
 

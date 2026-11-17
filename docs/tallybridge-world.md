@@ -34,6 +34,7 @@ Tallybridge is a **fictional** company. It does not exist and has no relation to
 
 - An account without a finished identity check cannot receive, hold or send money (EU anti-money-laundering rules). The customer can only log in and upload documents. Verification decisions are made by the Compliance team, never by the AI.
 - Limits are in EUR equivalent. They reset at 00:00 CET (daily) and on the 1st day of the month (monthly).
+- Pending card payments count toward the daily card spend limit.
 - A limit increase is possible only for Verified and Business. The customer sends a request with proof of income. Review time: 3 business days. A human in the Compliance team decides. The AI must not promise an increase.
 
 ## 4. Fees
