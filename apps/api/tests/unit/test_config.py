@@ -72,7 +72,9 @@ def test_app_starts_with_a_valid_env_file(tmp_path: Path, monkeypatch: pytest.Mo
     app = create_app()
     assert app.state.container.settings.core_anchor_date == date(2026, 11, 12)
     assert app.state.container.pipeline is not None
-    assert app.state.container.pipeline.write_prompt.version == "write/v1"
+    assert app.state.container.pipeline.write_prompt.version == "write/v2"
+    # The run searches the knowledge base through the container's retriever (P5-03).
+    assert app.state.container.pipeline.retriever is app.state.container.kb.retriever
 
 
 @pytest.mark.parametrize(

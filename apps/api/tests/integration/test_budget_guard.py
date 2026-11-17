@@ -45,6 +45,7 @@ from ._api import (
 )
 from ._compose import ROOT
 from ._db import alembic_config, as_user, migrate
+from ._kb import RecordedSearch
 
 DATABASE = "hub_budget_guard_test"
 TICKETS = {
@@ -120,7 +121,7 @@ def _spied(pipeline: Pipeline) -> tuple[Pipeline, SpyProvider]:
 def app_and_spy(budget_db: Urls) -> Iterator[tuple[FastAPI, SpyProvider]]:
     settings = _settings(budget_db)
     database = connect(settings.database_url.get_secret_value())
-    pipeline, spy = _spied(build_pipeline(settings, database))
+    pipeline, spy = _spied(build_pipeline(settings, database, RecordedSearch()))
     application = create_app(Container(settings=settings, database=database, pipeline=pipeline))
     with TestClient(application):  # runs the lifespan: waits for runs at the end
         yield application, spy
@@ -289,7 +290,7 @@ async def test_the_run_checks_the_budget_at_its_start(budget_db: Urls) -> None:
     settings = _settings(budget_db)
     database = connect(settings.database_url.get_secret_value())
     try:
-        pipeline, spy = _spied(build_pipeline(settings, database))
+        pipeline, spy = _spied(build_pipeline(settings, database, RecordedSearch()))
         pipeline = dataclasses.replace(
             pipeline, gateway=dataclasses.replace(pipeline.gateway, budget=None)
         )
@@ -313,7 +314,7 @@ async def test_the_apps_gateway_checks_the_budget_itself(budget_db: Urls) -> Non
     settings = _settings(budget_db)
     database = connect(settings.database_url.get_secret_value())
     try:
-        built = build_pipeline(settings, database)
+        built = build_pipeline(settings, database, RecordedSearch())
         assert isinstance(built.budget, BudgetGuard)
         assert built.gateway.budget is built.budget
         pipeline, spy = _spied(dataclasses.replace(built, budget=NoCheck()))
@@ -342,7 +343,7 @@ async def test_a_run_that_reaches_the_budget_half_way_is_handed_off(budget_db: U
     database = connect(settings.database_url.get_secret_value())
     budget = RefuseAfter(allowed=2)
     try:
-        pipeline, spy = _spied(build_pipeline(settings, database))
+        pipeline, spy = _spied(build_pipeline(settings, database, RecordedSearch()))
         pipeline = dataclasses.replace(
             pipeline,
             budget=budget,

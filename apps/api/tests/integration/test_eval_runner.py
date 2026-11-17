@@ -407,8 +407,8 @@ async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
         " WHERE node = 'judge' ORDER BY prompt_version",
     )
     assert [row[3] for row in rows] == [
-        "judge_citation/v1",
-        "judge_faithfulness/v1",
+        "judge_citation/v2",
+        "judge_faithfulness/v2",
         "judge_key_facts/v1",
     ]
     assert {row[:3] for row in rows} == {("eval", "judge", True)}

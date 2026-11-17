@@ -4,13 +4,21 @@ embedders (P5-01, P5-02). The real server and the real models: integration tests
 import dataclasses
 import uuid
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from qdrant_client import AsyncQdrantClient
 
 from hub.kb import retriever as retriever_module
 from hub.kb.index import ALIAS, DENSE_SIZE, KbIndex, KbIndexError, point_id
-from hub.kb.retriever import MAX_TOP_K, Retriever, error_code_chunk_ids, visibility_filter
+from hub.kb.retriever import (
+    MAX_TOP_K,
+    TIE_MARGIN,
+    Retriever,
+    error_code_chunk_ids,
+    visibility_filter,
+)
 from hub.kb.sparse import SparseVector
 
 from ._kb_index import FakeDense, FakeSparse, chunk
@@ -332,3 +340,48 @@ async def test_top_k_is_bounded(retriever: Retriever) -> None:
         await retriever.search("x", "external", top_k=0)
     with pytest.raises(ValueError, match="top_k"):
         await retriever.search("x", "external", top_k=MAX_TOP_K + 1)
+
+
+class _TiedClient:
+    """Answers every query with fixed points whose scores tie, in an order the server might
+    pick; records the limit it was asked for."""
+
+    def __init__(self, ids: list[str], scores: list[float]) -> None:
+        self.points = [
+            SimpleNamespace(
+                payload={
+                    "chunk_id": chunk_id,
+                    "doc_id": chunk_id.partition("#")[0],
+                    "title": "T",
+                    "section": "S",
+                    "url": "/help/x#s",
+                    "text": "x",
+                    "visibility": "external",
+                },
+                score=score,
+            )
+            for chunk_id, score in zip(ids, scores, strict=True)
+        ]
+        self.limits: list[int] = []
+
+    async def query_points(self, *_args: object, limit: int, **_kwargs: object) -> object:
+        self.limits.append(limit)
+        return SimpleNamespace(points=self.points[:limit])
+
+    async def retrieve(self, *_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+
+@pytest.mark.parametrize("mode", ["hybrid", "dense"])
+async def test_equal_scores_are_ordered_by_chunk_id_also_across_the_cut(mode: str) -> None:
+    """P5-03: RRF ties are common and the server orders them differently from run to run; the
+    same query must always give the same hits (recordings, evaluation cache)."""
+    client = _TiedClient(["d#0", "c#0", "b#0", "a#0", "e#0"], [0.5, 0.33, 0.33, 0.25, 0.25])
+    retriever = Retriever(cast(AsyncQdrantClient, client), FakeDense(), FakeSparse())
+
+    hits = await retriever.search("query", "external", top_k=4, mode=mode)  # type: ignore[arg-type]
+
+    # `a#0` and `e#0` tie at the cut (rank 4): the id decides, not the server's order.
+    assert [hit.chunk_id for hit in hits] == ["d#0", "b#0", "c#0", "a#0"]
+    assert [hit.rank for hit in hits] == [1, 2, 3, 4]
+    assert client.limits == [4 + TIE_MARGIN]

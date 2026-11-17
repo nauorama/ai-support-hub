@@ -17,6 +17,15 @@ same model family". A wrong verdict found later becomes a unit test with a recor
 
 Judge calls are recorded in `llm_calls` with context `eval`, node `judge`, no `run_id` (data
 model §1) and the prompt version. Any gateway error is raised to the caller.
+
+**The customer's text** (P5-03, `judge_faithfulness/v2`, `judge_citation/v2`): the judges see
+the ticket the draft answers, so a sentence that reports what the customer said, framed as
+theirs ("you say ..."), is not counted as an unsupported claim. A customer statement the draft
+writes as fact still needs evidence. The judges get the ticket exactly as the writer did
+(`TicketText`): card data masked (G1), e-mail, phone and IBAN as placeholders (G3), and
+`Prompt.render` neutralises data tags in it, so a ticket cannot close `<ticket>` or open
+`<evidence>`. Quotes are still checked against the evidence only: the customer's words never
+support a claim.
 """
 
 import re
@@ -28,6 +37,8 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from hub.domain.enums import LlmCallContext, LlmNode
+from hub.graph.nodes.intake import ChatTurn, intake
+from hub.guardrails.masking import mask
 from hub.llm.config import ModelsConfig
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt, PromptError, active_prompt
@@ -291,6 +302,22 @@ def _call(prompt: Prompt) -> CallContext:
     )
 
 
+@dataclass(frozen=True)
+class TicketText:
+    """The customer's message and the earlier messages, as the writer read them."""
+
+    message: str
+    history: str
+
+
+def ticket_text(message: str, history: Sequence[tuple[str, str]] = ()) -> TicketText:
+    """`(role, text)` history, oldest first. Masked here as well, so a caller that passes raw
+    text cannot send card data to the judge (AGENTS.md never-do 1)."""
+    turns = [ChatTurn(role=role, text=mask(text).text) for role, text in history]
+    result = intake(mask(message).text, turns)
+    return TicketText(message=result.message_for_llm, history=result.history_for_llm)
+
+
 def numbered(items: Sequence[str]) -> str:
     return "\n".join(f"{number}. {item}" for number, item in enumerate(items, start=1))
 
@@ -299,12 +326,30 @@ def key_facts_messages(prompt: Prompt, *, draft: str, key_facts: Sequence[str]) 
     return _checked(prompt, KEY_FACTS).render({"draft": draft, "key_facts": numbered(key_facts)})
 
 
-def faithfulness_messages(prompt: Prompt, *, draft: str, evidence: str) -> list[Message]:
-    return _checked(prompt, FAITHFULNESS).render({"draft": draft, "evidence": evidence})
+def faithfulness_messages(
+    prompt: Prompt, *, draft: str, evidence: str, ticket: TicketText
+) -> list[Message]:
+    return _checked(prompt, FAITHFULNESS).render(
+        {
+            "draft": draft,
+            "evidence": evidence,
+            "ticket": ticket.message,
+            "history": ticket.history,
+        }
+    )
 
 
-def citation_messages(prompt: Prompt, *, sentence: str, source: str) -> list[Message]:
-    return _checked(prompt, CITATION).render({"sentence": sentence, "source": source})
+def citation_messages(
+    prompt: Prompt, *, sentence: str, source: str, ticket: TicketText
+) -> list[Message]:
+    return _checked(prompt, CITATION).render(
+        {
+            "sentence": sentence,
+            "source": source,
+            "ticket": ticket.message,
+            "history": ticket.history,
+        }
+    )
 
 
 def attack_messages(
@@ -362,12 +407,12 @@ async def judge_key_facts(
 
 
 async def judge_faithfulness(
-    gateway: Gateway, prompt: Prompt, *, draft: str, evidence: str
+    gateway: Gateway, prompt: Prompt, *, draft: str, evidence: str, ticket: TicketText
 ) -> FaithfulnessResult:
     """The claims of the draft, each supported by the evidence or not."""
     answer = await gateway.complete_structured(
         prompt.front.role,
-        faithfulness_messages(prompt, draft=draft, evidence=evidence),
+        faithfulness_messages(prompt, draft=draft, evidence=evidence, ticket=ticket),
         FaithfulnessVerdict,
         call=_call(prompt),
     )
@@ -393,11 +438,12 @@ async def judge_citation(
     source_id: str,
     sentence: str,
     source: str,
+    ticket: TicketText,
 ) -> CitationResult:
     """Whether the cited source supports the sentence that carries the marker."""
     answer = await gateway.complete_structured(
         prompt.front.role,
-        citation_messages(prompt, sentence=sentence, source=source),
+        citation_messages(prompt, sentence=sentence, source=source, ticket=ticket),
         CitationVerdict,
         call=_call(prompt),
     )

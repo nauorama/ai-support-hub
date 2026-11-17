@@ -12,6 +12,13 @@
   scores never rise above what the fusion gave and stay in rank order.
 - `dense`: the dense vector alone (variant `rag_dense`, ai-pipeline §10), without the lookup.
 
+**Ties** (P5-03): reciprocal rank fusion often gives two chunks the same score (rank 3 in one
+list and 4 in the other, or the other way round), and the Qdrant server orders equal scores
+differently from run to run. The same ticket would then get a different writer prompt, so
+recordings and the evaluation cache would not match. Equal scores are therefore ordered by chunk
+id, and the query asks for `TIE_MARGIN` more hits than `top_k`, so a tie across the cut is also
+decided by the id, not by the server.
+
 There is no reranker mode (ADR-0018). `visibility="external"` filters every prefetch and the
 final query on `visibility = external`, so an internal chunk can never reach a customer
 (AGENTS.md never-do 5); `"all"` is for operators (the console search).
@@ -32,6 +39,7 @@ SearchMode = Literal["dense", "hybrid"]
 SearchVisibility = Literal["external", "all"]
 DEFAULT_TOP_K = 6
 PREFETCH_LIMIT = 20
+TIE_MARGIN = 4
 MAX_TOP_K = 20
 _ERROR_CODE = re.compile(r"(?<![A-Za-z0-9])ERR-\d{4}(?!\d)", re.IGNORECASE)
 
@@ -92,11 +100,13 @@ class Retriever:
             return []
         where = visibility_filter(visibility)
         (dense,) = await self._dense([query])
+        limit = top_k + TIE_MARGIN
         if mode == "dense":
             response = await self._client.query_points(
-                self._alias, query=dense, using=DENSE, query_filter=where, limit=top_k
+                self._alias, query=dense, using=DENSE, query_filter=where, limit=limit
             )
-            return _hits([(p.payload or {}, p.score) for p in response.points], visibility)
+            ranked = _by_score([(p.payload or {}, p.score) for p in response.points])
+            return _hits(ranked, visibility)[:top_k]
         prefetch = [models.Prefetch(query=dense, using=DENSE, filter=where, limit=PREFETCH_LIMIT)]
         sparse = await self._sparse.query(query)
         # A query of stop words only has no BM25 terms; an empty sparse query is not sent.
@@ -114,14 +124,12 @@ class Retriever:
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             query_filter=where,
-            limit=top_k,
+            limit=limit,
         )
-        fused: list[tuple[Mapping[str, Any], float]] = [
-            (point.payload or {}, point.score) for point in response.points
-        ]
+        fused = _by_score([(point.payload or {}, point.score) for point in response.points])
         pinned = await self._error_code_payloads(query)
         if not pinned:
-            return _hits(fused, visibility)
+            return _hits(fused, visibility)[:top_k]
         top_score = max((score for _, score in fused), default=0.0)
         ids = {payload.get("chunk_id") for payload in pinned}
         first: list[tuple[Mapping[str, Any], float]] = [(payload, top_score) for payload in pinned]
@@ -138,6 +146,14 @@ class Retriever:
         )
         found = {str((r.payload or {}).get("chunk_id")): r.payload or {} for r in records}
         return [found[chunk_id] for chunk_id in chunk_ids if chunk_id in found]
+
+
+def _by_score(
+    points: Sequence[tuple[Mapping[str, Any], float]],
+) -> list[tuple[Mapping[str, Any], float]]:
+    """Highest score first; equal scores by chunk id, so the order never depends on the
+    server."""
+    return sorted(points, key=lambda point: (-point[1], str(point[0].get("chunk_id"))))
 
 
 def _hits(

@@ -1,0 +1,18 @@
+{
+  "run_01": [
+    "withdrawal-times#0",
+    "error-codes#ERR-2012",
+    "withdrawal-bank-details#0",
+    "withdrawal-fees#0",
+    "withdrawal-times#3",
+    "withdrawal-times#1"
+  ],
+  "run_02": [
+    "multi-currency-account#3",
+    "account-limits#1",
+    "currency-conversion#1",
+    "inactivity-fee#2",
+    "multi-currency-account#4",
+    "withdrawal-own-name#0"
+  ]
+}

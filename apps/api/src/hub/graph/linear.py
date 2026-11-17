@@ -1,4 +1,5 @@
-"""The phase-3 workflow: a plain linear function `intake → triage → write` (P3-05).
+"""The phase-3 workflow: a plain linear function `intake → triage → search → write` (P3-05,
+retrieval P5-03).
 
 Called by `POST /tickets` for a new ticket. There is no policy gate, no verification and no
 auto-reply yet, so **every** run ends with the ticket in `pending_approval` (route `approval`,
@@ -12,8 +13,16 @@ Order and transactions:
    `llm_calls` rows in transactions of their own, and `llm_calls.run_id` refers to `runs.id`;
 2. intake (code): `intake.done`;
 3. triage (model): the ticket gets intent, urgency and summary; `triage.done`;
-4. write (model): the draft is saved, the ticket moves to `pending_approval`; `draft.created`,
+4. search (code, P5-03): one hybrid search of the external knowledge base with the masked
+   ticket text, top 6 (ai-pipeline §4, step 0 of `research`; the model never chooses the
+   query). Its hits are the writer's evidence and are stored in the draft (`evidence.chunks`);
+5. write (model): the draft is saved, the ticket moves to `pending_approval`; `draft.created`,
    `route.decided`.
+
+Citations name chunk ids. The server, not the model, turns each one into a link: the title of
+the chunk's article and the URL of its section (`/help/<doc_id>#<anchor>`, from the index
+payload). A citation whose id is not one of the hits is dropped with its marker, so a customer
+never sees a link the writer was not given.
 
 Model output is untrusted (security T2-T5): every model-written string (draft body,
 missing information, proposed actions, triage summary) gets the run's placeholders restored and
@@ -34,8 +43,9 @@ limit half way). A refusal ends the run the same way as an error, but with reaso
 **Evaluation (P4-03).** `hub_evals.runner` calls the same `run_ticket` against the evaluation
 database, with a pipeline whose `context` is `eval` (the `llm_calls` rows say so) and whose
 `budget` is the run's own cost limit (`EVAL_MAX_COST_USD`) instead of the daily budget. The
-`variant` names the baseline the run uses (ai-pipeline §10); the linear run knows only
-`b0_full_kb`.
+`variant` names the baseline the run uses (ai-pipeline §10): `rag_hybrid` (the default),
+`rag_dense` (the same search with the dense vector only), or `b0_full_kb` (no search, the whole
+external KB in the system part of `write/v1`; that prompt is kept for B0 alone).
 
 An operator may claim the ticket while the run is going (`processing → handed_off`, reason
 `operator_takeover`). Then the run still finishes, but its draft is stored as `superseded` and
@@ -47,11 +57,12 @@ import logging
 import re
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,25 +88,33 @@ from hub.graph.nodes import triage as triage_node
 from hub.graph.nodes import write as write_node
 from hub.graph.nodes.intake import ChatTurn, IntakeResult, intake
 from hub.guardrails.masking import mask
+from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
+from hub.kb.retriever import DEFAULT_TOP_K, KbChunk, SearchMode, SearchVisibility
 from hub.llm.budget import BudgetCheck
+from hub.llm.config import ModelsConfig
 from hub.llm.gateway import Gateway
-from hub.llm.prompts import Prompt
+from hub.llm.prompts import Prompt, active_prompt, load_prompt
 from hub.llm.schemas import BudgetExceededError
 
 logger = logging.getLogger(__name__)
 
-GRAPH_VERSION = "linear-v1"
-VARIANT = "b0_full_kb"
-# The variants this workflow can run (ai-pipeline §10). `rag_dense` and `rag_hybrid` come with
-# retrieval in phase 5.
-VARIANTS = (VARIANT,)
+GRAPH_VERSION = "linear-v2"
+VARIANT = "rag_hybrid"
+B0_VARIANT = "b0_full_kb"
+# The variants this workflow can run (ai-pipeline §10), with the search mode of the RAG ones.
+SEARCH_MODES: dict[str, SearchMode] = {"rag_hybrid": "hybrid", "rag_dense": "dense"}
+VARIANTS = (VARIANT, "rag_dense", B0_VARIANT)
+# B0 reads the whole KB from the system part of the prompt; only `write/v1` is built that way.
+B0_WRITE_VERSION = "v1"
+SEARCH_TOP_K = DEFAULT_TOP_K
 APPROVAL_REASONS = ["auto_reply_off"]
 ERROR_REASONS = ["system_error"]
 BUDGET_REASONS = ["budget_exceeded"]
 
 # Friendly step names of the `run.status` event (api.md §4): no internals.
 STEP_UNDERSTANDING = "understanding"
+STEP_SEARCHING = "searching"
 STEP_WRITING = "writing"
 
 RUN_FAILED_DETAIL = "The assistant could not prepare an answer. A support agent will reply here."
@@ -104,7 +123,23 @@ type Emit = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class KbUnavailableError(Exception):
-    """No external KB document in Postgres (`make kb-load` not run): no draft can be written."""
+    """No external KB document in Postgres (`make kb-load` not run), or a RAG run without a
+    search: no draft can be written."""
+
+
+class KbSearch(Protocol):
+    """`hub.kb.retriever.Retriever.search`; tests pass a fake."""
+
+    async def search(
+        self, query: str, visibility: SearchVisibility, top_k: int = ..., mode: SearchMode = ...
+    ) -> list[KbChunk]: ...
+
+
+def write_prompt_for(directory: Path, models: ModelsConfig, variant: str) -> Prompt:
+    """The write prompt of a variant: `write/v1` for B0, the active version otherwise."""
+    if variant == B0_VARIANT:
+        return load_prompt(directory, "write", B0_WRITE_VERSION)
+    return active_prompt(directory, models, "write")
 
 
 @dataclass(frozen=True)
@@ -119,10 +154,19 @@ class Pipeline:
     write_prompt: Prompt
     context: LlmCallContext = LlmCallContext.ONLINE
     variant: str = VARIANT
+    # The knowledge-base search of the RAG variants. None: a RAG run fails into a handoff.
+    retriever: KbSearch | None = None
 
     def __post_init__(self) -> None:
         if self.variant not in VARIANTS:
             raise ValueError(f"unknown variant {self.variant!r}; known: {', '.join(VARIANTS)}")
+        # The two prompt shapes are not interchangeable: v1 expects whole documents in the
+        # system part, later versions expect search hits in the user part.
+        if (self.variant == B0_VARIANT) != (self.write_prompt.front.version == B0_WRITE_VERSION):
+            raise ValueError(
+                f"variant {self.variant} cannot run {self.write_prompt.version} "
+                f"(B0 runs write/{B0_WRITE_VERSION}, the RAG variants a later version)"
+            )
 
     @property
     def prompt_versions(self) -> dict[str, str]:
@@ -208,40 +252,92 @@ def drop_markers(body: str, keep: set[int]) -> tuple[str, list[int]]:
     return _MARKER.sub(replace, body), dropped
 
 
+@dataclass(frozen=True, slots=True)
+class Citable:
+    """What a citation can point to: a chunk (RAG) or a whole document (B0)."""
+
+    source_id: str
+    doc_id: str
+    title: str
+    url: str
+
+
+@dataclass(frozen=True)
+class WriterEvidence:
+    """What the writer read: the `{{kb}}` text, the ids it may cite, and the hits to store.
+    `chunks` is None in B0, which runs no search."""
+
+    variant: str
+    kb: str
+    citable: Mapping[str, Citable]
+    chunks: tuple[KbChunk, ...] | None = None
+
+    def stored(self, cited: set[str], dropped: list[int]) -> dict[str, Any]:
+        """`drafts.evidence` (data model): the hits of the search for the operator, or in B0
+        the cited documents."""
+        if self.chunks is None:
+            documents = [
+                {"doc_id": item.doc_id, "title": item.title, "url": item.url}
+                for item in self.citable.values()
+                if item.source_id in cited
+            ]
+            return {"variant": self.variant, "documents": documents, "dropped_markers": dropped}
+        return {
+            "variant": self.variant,
+            "chunks": [
+                chunk.model_dump(include=STORED_CHUNK_FIELDS, mode="json") for chunk in self.chunks
+            ],
+            "dropped_markers": dropped,
+        }
+
+
+STORED_CHUNK_FIELDS = {"chunk_id", "doc_id", "title", "section", "url", "score", "rank", "text"}
+
+
+def b0_evidence(sources: Sequence[KbSource]) -> WriterEvidence:
+    return WriterEvidence(
+        variant=B0_VARIANT,
+        kb=render_kb(sources),
+        citable={s.id: Citable(s.id, s.id, s.title, s.url) for s in sources},
+    )
+
+
+def rag_evidence(variant: str, hits: Sequence[KbChunk]) -> WriterEvidence:
+    """The hits as the writer reads them. Only `external` chunks can be cited: the search
+    filters on it, and this is the second check (AGENTS.md never-do 5)."""
+    kept = tuple(hit for hit in hits if hit.visibility == "external")
+    return WriterEvidence(
+        variant=variant,
+        kb=render_chunks(kept),
+        citable={h.chunk_id: Citable(h.chunk_id, h.doc_id, h.title, h.url) for h in kept},
+        chunks=kept,
+    )
+
+
 def draft_from_answer(
-    answer: DraftAnswer,
-    sources: Sequence[KbSource],
-    clean: OutputMask,
-    *,
-    variant: str = VARIANT,
+    answer: DraftAnswer, evidence: WriterEvidence, clean: OutputMask
 ) -> tuple[dict[str, Any], int]:
     """The column values of the draft, and the number of citations dropped because their id is
-    not an external document. Every model-written string goes through `clean` (placeholders
+    not one the writer was given. Every model-written string goes through `clean` (placeholders
     restored, then G1). Markers without a kept citation are removed from the body and listed in
-    `evidence.dropped_markers`."""
-    by_id = {source.id: source for source in sources}
+    `evidence.dropped_markers`. The link of a citation (title, section URL) comes from the
+    evidence, never from the model."""
     citations: list[dict[str, Any]] = []
     unknown = 0
     for citation in answer.citations:
-        source = by_id.get(citation.source_id)
+        source = evidence.citable.get(citation.source_id)
         if source is None:
             unknown += 1
             continue
         citations.append(
             {
                 "marker": citation.marker,
-                "source_id": source.id,
-                "doc_id": source.id,
+                "source_id": source.source_id,
+                "doc_id": source.doc_id,
                 "title": source.title,
                 "url": source.url,
             }
         )
-    cited = {citation["doc_id"] for citation in citations}
-    documents = [
-        {"doc_id": source.id, "title": source.title, "url": source.url}
-        for source in sources
-        if source.id in cited
-    ]
     actions = [
         {
             "id": f"a{index}",
@@ -260,13 +356,14 @@ def draft_from_answer(
         if answer.can_answer
         else ("", [])
     )
+    cited = {citation["source_id"] for citation in citations}
     return (
         {
             "can_answer": answer.can_answer,
             "missing_information": clean(missing) if missing else None,
             "body": body,
             "citations": citations,
-            "evidence": {"variant": variant, "documents": documents, "dropped_markers": dropped},
+            "evidence": evidence.stored(cited, dropped),
             "proposed_actions": actions,
         },
         unknown,
@@ -364,12 +461,22 @@ async def _save_triage(
         )
 
 
-async def _load_kb(pipeline: Pipeline) -> list[KbSource]:
-    async with pipeline.database.sessions() as session:
-        sources = await load_external_sources(session)
-    if not sources:
+async def _evidence(pipeline: Pipeline, query: str) -> WriterEvidence:
+    """B0: every external document from Postgres. RAG: the first search (ai-pipeline §4, step
+    0) with the masked ticket text, external chunks only. An empty result is not an error: the
+    writer then has nothing to cite and answers `can_answer = false`."""
+    if pipeline.variant == B0_VARIANT:
+        async with pipeline.database.sessions() as session:
+            sources = await load_external_sources(session)
+        if not sources:
+            raise KbUnavailableError
+        return b0_evidence(sources)
+    if pipeline.retriever is None:
         raise KbUnavailableError
-    return sources
+    hits = await pipeline.retriever.search(
+        query, "external", top_k=SEARCH_TOP_K, mode=SEARCH_MODES[pipeline.variant]
+    )
+    return rag_evidence(pipeline.variant, hits)
 
 
 async def _totals(session: AsyncSession, run_id: uuid.UUID) -> tuple[Decimal, int, int]:
@@ -419,12 +526,12 @@ async def _save_draft(
     ticket_id: uuid.UUID,
     run_id: uuid.UUID,
     answer: DraftAnswer,
-    sources: Sequence[KbSource],
+    evidence: WriterEvidence,
     intake_result: IntakeResult,
     models: dict[str, str],
 ) -> TicketStatus:
     clean = OutputMask(intake_result)
-    values, unknown = draft_from_answer(answer, sources, clean, variant=pipeline.variant)
+    values, unknown = draft_from_answer(answer, evidence, clean)
     async with pipeline.database.sessions.begin() as session:
         repository = TicketRepository(session)
         ticket = await repository.lock(await _ticket(session, ticket_id))
@@ -457,6 +564,12 @@ async def _save_draft(
                 "ticket_id": ticket_id,
                 "status": draft.status.value,
                 "can_answer": answer.can_answer,
+                "variant": evidence.variant,
+                # Ids and scores only: the chunk texts are in the draft.
+                "chunks": [
+                    {"chunk_id": chunk.chunk_id, "score": round(chunk.score, 4)}
+                    for chunk in evidence.chunks or ()
+                ],
                 "citations": len(values["citations"]),
                 "unknown_citations": unknown,
                 "dropped_markers": len(values["evidence"]["dropped_markers"]),
@@ -566,12 +679,14 @@ async def run_ticket(
         models["triage"] = triaged.model
         await _save_triage(pipeline, ticket_id, run_id, triaged.value, triaged.model, intake_result)
 
+        if pipeline.variant != B0_VARIANT:
+            await emit("run.status", {"step": STEP_SEARCHING})
+        evidence = await _evidence(pipeline, intake_result.message_for_llm)
         await emit("run.status", {"step": STEP_WRITING})
-        sources = await _load_kb(pipeline)
         written = await write_node.write(
             pipeline.gateway,
             pipeline.write_prompt,
-            kb=render_kb(sources),
+            kb=evidence.kb,
             ticket=intake_result.message_for_llm,
             history=intake_result.history_for_llm,
             run_id=run_id,
@@ -579,7 +694,7 @@ async def run_ticket(
         )
         models["write"] = written.model
         status = await _save_draft(
-            pipeline, ticket_id, run_id, written.value, sources, intake_result, models
+            pipeline, ticket_id, run_id, written.value, evidence, intake_result, models
         )
     except Exception as exc:
         error = type(exc).__name__

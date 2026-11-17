@@ -3,6 +3,7 @@
 Built once in `create_app` and kept on `app.state.container`. Tests build their own.
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -11,7 +12,7 @@ from hub.auth.customer_session import CustomerSessionSigner
 from hub.auth.operator_session import OperatorSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
-from hub.graph.linear import Pipeline, RunTasks
+from hub.graph.linear import VARIANT, KbSearch, Pipeline, RunTasks, write_prompt_for
 from hub.kb.service import EMBEDDING_CALL, KbServices, build_kb_services, index_counts
 from hub.llm.budget import BudgetGuard
 from hub.llm.gateway import build_gateway, embedder
@@ -33,8 +34,8 @@ class Container:
     # None in tests that need no database.
     database: Database | None = None
     rate_limits: RateLimits = field(default_factory=RateLimits)
-    # The phase-3 workflow (intake → triage → write). None in tests that start no run: then a
-    # new ticket gets the phase-2 placeholder answer and waits in the queue.
+    # The phase-3 workflow (intake → triage → search → write). None in tests that start no
+    # run: then a new ticket gets the phase-2 placeholder answer and waits in the queue.
     pipeline: Pipeline | None = None
     runs: RunTasks = field(default_factory=RunTasks)
     # Knowledge-base index and search (P5-01, P5-02). None in tests that need no search: the
@@ -54,9 +55,12 @@ class Container:
         return OperatorSessionSigner(secret) if secret else None
 
 
-def build_pipeline(settings: Settings, database: Database) -> Pipeline:
+def build_pipeline(
+    settings: Settings, database: Database, retriever: KbSearch | None = None
+) -> Pipeline:
     """Gateway, budget guard and active prompts, loaded once: a broken config or prompt file
-    stops the start. One guard serves the gateway (every online call) and the run (its start)."""
+    stops the start. One guard serves the gateway (every online call) and the run (its start).
+    `retriever`: the knowledge-base search; without it every run is handed to a human."""
     budget = BudgetGuard(database, default_limit=Decimal(str(settings.daily_budget_usd)))
     gateway = build_gateway(settings, DbCallRecorder(database), budget)
     return Pipeline(
@@ -64,7 +68,8 @@ def build_pipeline(settings: Settings, database: Database) -> Pipeline:
         gateway=gateway,
         budget=budget,
         triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
-        write_prompt=active_prompt(settings.prompts_dir, gateway.models, "write"),
+        write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, VARIANT),
+        retriever=retriever,
     )
 
 
@@ -72,6 +77,8 @@ def build_container(settings: Settings) -> Container:
     database = connect(settings.database_url.get_secret_value())
     pipeline = build_pipeline(settings, database)
     kb = build_kb_services(settings, embedder(pipeline.gateway, EMBEDDING_CALL))
+    # The search embeds its query through the same gateway the pipeline uses.
+    pipeline = dataclasses.replace(pipeline, retriever=kb.retriever)
 
     async def counts() -> tuple[int, int]:
         return await index_counts(database, kb.index)

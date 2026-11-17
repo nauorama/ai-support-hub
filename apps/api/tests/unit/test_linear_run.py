@@ -14,25 +14,58 @@ from hub.domain.enums import MessageRole
 from hub.domain.triage import TriageResult
 from hub.graph import linear
 from hub.graph.linear import (
+    B0_VARIANT,
     VARIANT,
     OutputMask,
+    Pipeline,
     RunTasks,
+    b0_evidence,
     draft_from_answer,
     drop_markers,
     history_turns,
+    rag_evidence,
     run_failed_problem,
+    write_prompt_for,
 )
 from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import audit_details
 from hub.guardrails.masking import MaskResult
 from hub.kb.full_text import KbSource
+from hub.kb.retriever import KbChunk
 from hub.llm.gateway import FIXTURES_DIR
 
+from ._llm import ROOT, real_models
 from ._run_requests import GENERATED, load_tickets, render, request_specs
 
-SOURCES = [
-    KbSource("withdrawal-times", "How long does a withdrawal take?", "/help/withdrawal-times", ()),
-    KbSource("withdrawal-fees", "Withdrawal fees", "/help/withdrawal-fees", ()),
+SOURCES = b0_evidence(
+    [
+        KbSource(
+            "withdrawal-times", "How long does a withdrawal take?", "/help/withdrawal-times", ()
+        ),
+        KbSource("withdrawal-fees", "Withdrawal fees", "/help/withdrawal-fees", ()),
+    ]
+)
+
+
+def _hit(chunk_id: str, rank: int, *, visibility: str = "external") -> KbChunk:
+    doc_id = chunk_id.partition("#")[0]
+    return KbChunk(
+        chunk_id=chunk_id,
+        doc_id=doc_id,
+        title=f"Title of {doc_id}",
+        section=f"Section {rank}",
+        url=f"/help/{doc_id}#section-{rank}",
+        text=f"Text of {chunk_id}",
+        visibility=visibility,
+        score=1.0 / rank,
+        rank=rank,
+    )
+
+
+HITS = [
+    _hit("withdrawal-times#0", 1),
+    _hit("internal-escalation-procedures#0", 2, visibility="internal"),
+    _hit("withdrawal-fees#1", 3),
 ]
 
 
@@ -81,7 +114,7 @@ def test_a_draft_keeps_known_citations_and_counts_unknown_ones() -> None:
         }
     ]
     assert values["evidence"] == {
-        "variant": VARIANT,
+        "variant": B0_VARIANT,
         "dropped_markers": [2],
         "documents": [
             {
@@ -91,6 +124,97 @@ def test_a_draft_keeps_known_citations_and_counts_unknown_ones() -> None:
             }
         ],
     }
+
+
+def test_a_rag_citation_becomes_a_link_to_the_section_of_its_chunk() -> None:
+    """P5-03: the model names a chunk id; title and section URL come from the search hit."""
+    answer = _answer(
+        answer="It takes 1 business day [1]. Fees apply [2]. Ask us [3].",
+        citations=[
+            Citation(marker=1, source_id="withdrawal-times#0"),
+            Citation(marker=2, source_id="withdrawal-fees#1"),
+            Citation(marker=3, source_id="withdrawal-times"),  # a document id is not a source
+        ],
+    )
+    values, unknown = draft_from_answer(
+        answer, rag_evidence(VARIANT, HITS), OutputMask(intake("hi"))
+    )
+    assert unknown == 1
+    assert values["citations"] == [
+        {
+            "marker": 1,
+            "source_id": "withdrawal-times#0",
+            "doc_id": "withdrawal-times",
+            "title": "Title of withdrawal-times",
+            "url": "/help/withdrawal-times#section-1",
+        },
+        {
+            "marker": 2,
+            "source_id": "withdrawal-fees#1",
+            "doc_id": "withdrawal-fees",
+            "title": "Title of withdrawal-fees",
+            "url": "/help/withdrawal-fees#section-3",
+        },
+    ]
+    assert values["body"] == "It takes 1 business day [1]. Fees apply [2]. Ask us."
+    evidence = values["evidence"]
+    assert (evidence["variant"], evidence["dropped_markers"]) == (VARIANT, [3])
+    assert [chunk["chunk_id"] for chunk in evidence["chunks"]] == [
+        "withdrawal-times#0",
+        "withdrawal-fees#1",
+    ]
+    assert evidence["chunks"][0] == {
+        "chunk_id": "withdrawal-times#0",
+        "doc_id": "withdrawal-times",
+        "title": "Title of withdrawal-times",
+        "section": "Section 1",
+        "url": "/help/withdrawal-times#section-1",
+        "score": 1.0,
+        "rank": 1,
+        "text": "Text of withdrawal-times#0",
+    }
+
+
+def test_an_internal_hit_never_reaches_the_writer_or_a_citation() -> None:
+    """AGENTS.md never-do 5: the search filters on `external`; this is the second check."""
+    evidence = rag_evidence(VARIANT, HITS)
+    assert "internal-escalation-procedures" not in evidence.kb
+    assert "internal-escalation-procedures#0" not in evidence.citable
+    answer = _answer(
+        answer="See the procedure [1].",
+        citations=[Citation(marker=1, source_id="internal-escalation-procedures#0")],
+    )
+    values, unknown = draft_from_answer(answer, evidence, OutputMask(intake("hi")))
+    assert (unknown, values["citations"], values["body"]) == (1, [], "See the procedure.")
+
+
+def test_the_writer_reads_the_hits_in_rank_order_with_their_ids() -> None:
+    kb = rag_evidence(VARIANT, HITS).kb
+    assert kb.index("Source id: withdrawal-times#0") < kb.index("Source id: withdrawal-fees#1")
+    assert "Text of withdrawal-fees#1" in kb
+
+
+def test_each_variant_runs_its_own_write_prompt() -> None:
+    prompts, models = ROOT / "prompts", real_models()
+    assert write_prompt_for(prompts, models, B0_VARIANT).version == "write/v1"
+    assert write_prompt_for(prompts, models, VARIANT).version == "write/v2"
+    assert write_prompt_for(prompts, models, "rag_dense").version == "write/v2"
+
+
+@pytest.mark.parametrize(("variant", "version"), [(B0_VARIANT, "v2"), (VARIANT, "v1")])
+def test_a_pipeline_refuses_a_write_prompt_of_the_other_shape(variant: str, version: str) -> None:
+    from hub.llm.prompts import load_prompt
+
+    prompt = load_prompt(ROOT / "prompts", "write", version)
+    with pytest.raises(ValueError, match="cannot run"):
+        Pipeline(
+            database=cast(Any, None),
+            gateway=cast(Any, None),
+            budget=cast(Any, None),
+            triage_prompt=prompt,
+            write_prompt=prompt,
+            variant=variant,
+        )
 
 
 def test_a_draft_gets_the_runs_placeholders_restored() -> None:

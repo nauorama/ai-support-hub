@@ -148,8 +148,8 @@ One execution of the workflow for one customer message.
 | can_answer | bool | from `DraftAnswer` (P3-05); an unchanged draft with `false` cannot be approved |
 | missing_information | text null | from `DraftAnswer`, shown to the operator; placeholders restored, then card data masked (G1) |
 | body | text | AI draft: placeholders restored, then card data masked (G1); markers without a kept citation removed; empty when `can_answer` is false |
-| citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`; in baseline B0 `source_id` is a document id |
-| evidence | jsonb | object: retrieved chunks (id, title, section, score, text) and account facts shown to the operator; in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because they had no kept citation: the citation pointed to no external document, or the model wrote the marker without any citation) |
+| citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`: `source_id` is the chunk id the writer cited, `title` the article title and `url` the section link `/help/<doc_id>#<anchor>`, both from the search hit (built by the server, never by the model); in baseline B0 `source_id` is a document id and `url` the article link |
+| evidence | jsonb | object: retrieved chunks and account facts shown to the operator; from P5-03 `{"variant": "rag_hybrid", "chunks": [{"chunk_id", "doc_id", "title", "section", "url", "score", "rank", "text"}], "dropped_markers": [n, ...]}` (the hits of the first search in rank order, external only); in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because they had no kept citation: the citation pointed to no external document, or the model wrote the marker without any citation) |
 | proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
 | groundedness | numeric(4,3) null | |
 | unsupported_claims | jsonb | from the verify step |
