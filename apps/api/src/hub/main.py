@@ -11,6 +11,9 @@ from hub.api.console_drafts import router as console_drafts_router
 from hub.api.demo import router as demo_router
 from hub.api.errors import install_error_handlers
 from hub.api.health import router as health_router
+from hub.api.kb import admin_router as kb_admin_router
+from hub.api.kb import console_router as kb_console_router
+from hub.api.kb import help_router
 from hub.api.limits import BodySizeLimitMiddleware
 from hub.api.middleware import RequestContextMiddleware
 from hub.api.tickets import router as tickets_router
@@ -34,6 +37,8 @@ def create_app(container: Container | None = None) -> FastAPI:
         # Runs are tasks of their own (`hub.graph.linear.RunTasks`): let the ones in flight finish
         # before the database goes away. A run cut off here stays `running` for `recover-runs`.
         await container.runs.wait(timeout_s=RUN_SHUTDOWN_WAIT_S)
+        if container.kb is not None:
+            await container.kb.close()
         if container.database is not None:
             await container.database.dispose()
 
@@ -52,4 +57,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(console_router)
     app.include_router(console_drafts_router)
+    app.include_router(help_router)
+    app.include_router(kb_console_router)
+    app.include_router(kb_admin_router)
     return app

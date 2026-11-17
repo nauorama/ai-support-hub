@@ -103,9 +103,10 @@ Rules, enforced in `tools/permissions.py`:
 Output:
 
 ```python
-class KbChunk(BaseModel):
-    chunk_id: str; doc_id: str; title: str; section: str; url: str
-    text: str; score: float; rank: int
+class KbChunk(BaseModel):          # hub/kb/retriever.py (P5-02)
+    chunk_id: str; doc_id: str; title: str; section: str
+    url: str                        # section link /help/<doc_id>#<anchor>
+    text: str; visibility: str; score: float; rank: int   # rank from 1
 
 class AccountFact(BaseModel):
     fact_id: str            # "A1", "A2", ...
@@ -233,7 +234,7 @@ Decision table:
 | 8 | `confidence < confidence_threshold` | approval | `low_confidence` |
 | 9 | Otherwise | auto_reply | — |
 
-**Budget stop (row 2, G8).** The run checks the daily budget once at its start, before the first model call, and the gateway checks it again before every online call, so a run that crosses the limit half way stops at its next call. A refusal makes no model call and writes no `llm_calls` row; the run is `failed` (error `BudgetExceededError`) with route handoff and reason `budget_exceeded`, and the stream is the same as for any failed run. What counts: [security](security.md) G8.
+**Budget stop (row 2, G8).** The run checks the daily budget once at its start, before the first model call, and the gateway checks it again before every online chat call (not before calls to the local, free `fastembed/` embedding model, P5-01), so a run that crosses the limit half way stops at its next call. A refusal makes no model call and writes no `llm_calls` row; the run is `failed` (error `BudgetExceededError`) with route handoff and reason `budget_exceeded`, and the stream is the same as for any failed run. What counts: [security](security.md) G8.
 
 Outside the graph, one more reason code: **`operator_takeover`** (route handoff). An operator claims a ticket that is still in `processing` (`POST /console/tickets/{id}/claim`); the claim hands it off first (`processing → handed_off`), so the operator owns it like any other handoff. In phase 2 this is how a new ticket reaches a human, because no run exists yet. There is no direct operator reply on a `processing` ticket: from phase 6 it would let an operator and the AI answer the same ticket. (Phase 6 decides what a takeover does to a run that is still going.)
 
@@ -297,7 +298,7 @@ Contract of each prompt:
 | `write` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 900 | as triage |
 | `verify` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 700 | as triage |
 | `judge` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 800 | the same model family as the writer: self-preference is likely, so judge numbers are unvalidated ([eval plan](eval-plan.md) §5) |
-| `embedding` | `fastembed/BAAI/bge-small-en-v1.5` | none | — | local model, 384 dimensions, cost 0; no fallback: vectors of another model cannot be mixed with the index. The local backend lands in P5-01 |
+| `embedding` | `fastembed/BAAI/bge-small-en-v1.5` | none | — | local model, 384 dimensions, cost 0; no fallback: vectors of another model cannot be mixed with the index. Backend `hub/llm/local_embedding.py` (P5-01), used in every `LLM_MODE` (no recorded vectors in fake mode). FastEmbed 0.9.1 cannot pin a Hugging Face revision, so the model file is pinned by SHA-256 (checked by `make models` and at every load); the revision seen on 2026-11-17 is recorded next to it. Only the weights file is hashed: the tokenizer and config files of that snapshot and the BM25 stop-word files (`Qdrant/bm25`) are not checked. The model reads at most 512 tokens; an integration test checks that every chunk fits |
 
 Budget mode ([ADR-0018](adr/0018-budget-mode.md)): one provider, Anthropic, and one small model for every role. The fallback helps when Haiku fails or is overloaded, not when Anthropic itself is down; then the ticket goes to a human (`system_error`).
 

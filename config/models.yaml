@@ -21,8 +21,8 @@
 models:
   anthropic/claude-haiku-5-5: {tools: true}
   anthropic/claude-sonnet-5-5: {tools: true}
-  # Local ONNX model run by FastEmbed (ADR-0018). The real embedding backend lands in P5-01;
-  # until then a real-mode embedding call fails with `LocalEmbeddingNotAvailable`.
+  # Local ONNX model run by FastEmbed (ADR-0018), backend hub/llm/local_embedding.py (P5-01), in
+  # every LLM_MODE. The model file is pinned by SHA-256 there; `make models` downloads it.
   fastembed/BAAI/bge-small-en-v1.5: {tools: false}
 
 roles:

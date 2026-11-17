@@ -1,4 +1,5 @@
-"""Checks behind `/ready`: does each dependency answer? A check raises when it does not.
+"""Checks behind `/ready`: does each dependency answer? A check raises when it does not, and
+may return details (numbers only) that `/ready` shows next to its status.
 
 Each check opens and closes its own connection: readiness is probed rarely, and this keeps the
 checks free of app lifecycle. The caller applies the timeout.
@@ -10,7 +11,8 @@ from typing import Any
 import httpx2
 import psycopg
 
-ReadinessCheck = Callable[[], Awaitable[None]]
+# Details: numbers only (they are shown on a public endpoint).
+ReadinessCheck = Callable[[], Awaitable[dict[str, int] | None]]
 Connect = Callable[..., Awaitable[Any]]
 
 
@@ -27,6 +29,7 @@ def postgres_check(
         connection = await connect(libpq_url(database_url), connect_timeout=2)
         async with connection:
             await connection.execute("SELECT 1")
+        return None
 
     return check
 
@@ -49,6 +52,7 @@ def http_check(
             response = await client.get(url)
         if not accept(response.status_code):
             raise UnexpectedStatusError(f"HTTP {response.status_code}")
+        return None
 
     return check
 
@@ -83,3 +87,16 @@ def mcp_check(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return http_check(mcp_server_url, accept=_mcp_answered, headers=headers, transport=transport)
+
+
+def kb_index_check(counts: Callable[[], Awaitable[tuple[int, int]]]) -> ReadinessCheck:
+    """The index holds one point per chunk in Postgres (P5-01). `counts` returns
+    (Postgres chunks, Qdrant points); a difference means `make kb-load` or a re-index is due."""
+
+    async def check() -> dict[str, int]:
+        postgres, qdrant = await counts()
+        if postgres != qdrant:
+            raise UnexpectedStatusError(f"chunks: postgres {postgres}, qdrant {qdrant}")
+        return {"postgres_chunks": postgres, "qdrant_points": qdrant}
+
+    return check

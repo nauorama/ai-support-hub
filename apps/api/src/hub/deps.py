@@ -12,12 +12,14 @@ from hub.auth.operator_session import OperatorSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
 from hub.graph.linear import Pipeline, RunTasks
+from hub.kb.service import EMBEDDING_CALL, KbServices, build_kb_services, index_counts
 from hub.llm.budget import BudgetGuard
-from hub.llm.gateway import build_gateway
+from hub.llm.gateway import build_gateway, embedder
 from hub.llm.prompts import active_prompt
 from hub.llm.recorder import DbCallRecorder
 from hub.observability.readiness import (
     ReadinessCheck,
+    kb_index_check,
     mcp_check,
     postgres_check,
     qdrant_check,
@@ -35,6 +37,9 @@ class Container:
     # new ticket gets the phase-2 placeholder answer and waits in the queue.
     pipeline: Pipeline | None = None
     runs: RunTasks = field(default_factory=RunTasks)
+    # Knowledge-base index and search (P5-01, P5-02). None in tests that need no search: the
+    # KB endpoints then answer 503.
+    kb: KbServices | None = None
 
     @property
     def session_signer(self) -> CustomerSessionSigner | None:
@@ -65,13 +70,21 @@ def build_pipeline(settings: Settings, database: Database) -> Pipeline:
 
 def build_container(settings: Settings) -> Container:
     database = connect(settings.database_url.get_secret_value())
+    pipeline = build_pipeline(settings, database)
+    kb = build_kb_services(settings, embedder(pipeline.gateway, EMBEDDING_CALL))
+
+    async def counts() -> tuple[int, int]:
+        return await index_counts(database, kb.index)
+
     return Container(
         settings=settings,
         database=database,
-        pipeline=build_pipeline(settings, database),
+        pipeline=pipeline,
+        kb=kb,
         readiness_checks={
             "postgres": postgres_check(settings.database_url.get_secret_value()),
             "qdrant": qdrant_check(settings.qdrant_url),
+            "kb_index": kb_index_check(counts),
             "mcp": mcp_check(settings.mcp_server_url, settings.mcp_server_token.get_secret_value()),
         },
     )

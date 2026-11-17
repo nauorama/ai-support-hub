@@ -1,4 +1,5 @@
-"""`make kb-load`: load `data/kb/` into `kb_documents` and `kb_chunks` (Postgres part, P2-09).
+"""Load `data/kb/` into `kb_documents` and `kb_chunks` (the Postgres part of `make kb-load`,
+P2-09; the command and the Qdrant part are in `hub.kb.service`, P5-01).
 
 One document per article (`<id>.md`) and one for `error_codes.csv` (`error-codes`). In one
 transaction, under an advisory lock so two loads cannot interleave:
@@ -12,12 +13,10 @@ The files are checked first with the rules of `make data-check` (`hub.domain.kb`
 that masking would change): any problem stops the load before anything is written. A folder
 with no articles is refused, so a wrong path cannot empty the knowledge base.
 Every document added, changed or removed gets an audit record; a load that changes nothing
-writes none. The Qdrant index is built from these rows in phase 5.
+writes none. The Qdrant index is built from these rows (`hub.kb.index`).
 """
 
-import asyncio
 import hashlib
-import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
@@ -28,9 +27,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hub.audit import record
-from hub.config import Settings, SettingsError, load_settings
 from hub.db.models import KbChunk, KbDocument
-from hub.db.session import connect
 from hub.domain.enums import ActorType
 from hub.domain.kb import (
     ERROR_CODES_DOC_ID,
@@ -48,7 +45,6 @@ from hub.guardrails.masking import mask_text
 from hub.kb.chunker import ERROR_CODES_TITLE, Chunk, chunk_article, chunk_error_codes
 
 ACTOR = "make-kb-load"
-KB_DIR = Path("data/kb")
 # Any constant different from the audit lock (`hub.audit.log.AUDIT_LOCK_KEY`); "kbload" in hex.
 KB_LOAD_LOCK_KEY = 0x6B626C6F6164
 
@@ -224,14 +220,25 @@ def plan_load(stored: Mapping[str, str], files: Sequence[KbFile]) -> LoadPlan:
 
 
 async def load_kb(
-    session: AsyncSession, files: Sequence[KbFile], *, now: datetime | None = None
+    session: AsyncSession,
+    files: Sequence[KbFile],
+    *,
+    now: datetime | None = None,
+    rechunk: bool = False,
 ) -> KbLoadReport:
-    """Write the KB inside the caller's transaction (the caller commits)."""
+    """Write the KB inside the caller's transaction (the caller commits).
+
+    `rechunk` (a full re-index, P5-01): the chunks of files whose hash is unchanged are compared
+    with what the chunker gives now, so a change to the chunker or to `MAX_CHUNK_TOKENS` reaches
+    every file. Only a document whose chunks really differ is written, gets `version + 1` and a
+    `kb.document_updated` record; the others stay as they are."""
     now = now or datetime.now(UTC)
     await session.execute(select(func.pg_advisory_xact_lock(KB_LOAD_LOCK_KEY)))
     rows = await session.execute(select(KbDocument.id, KbDocument.content_hash))
     stored = {doc_id: content_hash for doc_id, content_hash in rows}
     plan = plan_load(stored, files)
+    if rechunk:
+        plan = await _with_rechunked(session, plan, files)
     report = KbLoadReport(documents_unchanged=len(plan.unchanged))
     for file in plan.added:
         session.add(_document(file, version=1, now=now))
@@ -268,6 +275,34 @@ async def load_kb(
         report.documents_removed += 1
         report.chunks_removed += removed or 0
     return report
+
+
+async def _with_rechunked(
+    session: AsyncSession, plan: LoadPlan, files: Sequence[KbFile]
+) -> LoadPlan:
+    """Move unchanged files whose stored chunks differ from the chunker's output to `changed`."""
+    unchanged = set(plan.unchanged)
+    stored: dict[str, set[tuple[str, int, str, str, int, str]]] = {}
+    for row in await session.scalars(select(KbChunk).where(KbChunk.doc_id.in_(unchanged))):
+        stored.setdefault(row.doc_id, set()).add(
+            (row.id, row.ordinal, row.section, row.text, row.token_count, row.content_hash)
+        )
+    rechunked = tuple(
+        file
+        for file in files
+        if file.id in unchanged
+        and stored.get(file.id, set())
+        != {
+            (c.id, c.ordinal, c.section, c.text, c.token_count, c.content_hash) for c in file.chunks
+        }
+    )
+    moved = {file.id for file in rechunked}
+    return LoadPlan(
+        added=plan.added,
+        changed=plan.changed + rechunked,
+        unchanged=tuple(doc_id for doc_id in plan.unchanged if doc_id not in moved),
+        removed=plan.removed,
+    )
 
 
 def _document(file: KbFile, *, version: int, now: datetime) -> KbDocument:
@@ -336,36 +371,3 @@ async def _audit(session: AsyncSession, action: str, doc_id: str, details: dict[
         entity_id=doc_id,
         details=details,
     )
-
-
-# --- command line ----------------------------------------------------------------------------
-
-
-async def run(settings: Settings, kb_dir: Path) -> KbLoadReport:
-    files = read_kb(kb_dir)
-    database = connect(settings.database_url.get_secret_value())
-    try:
-        async with database.sessions() as session, session.begin():
-            return await load_kb(session, files)
-    finally:
-        await database.dispose()
-
-
-def main(argv: list[str]) -> int:
-    kb_dir = Path(argv[0]) if argv else KB_DIR
-    try:
-        report = asyncio.run(run(load_settings(), kb_dir))
-    except (KbLoadError, SettingsError) as error:
-        print(f"kb-load: {error}", file=sys.stderr)
-        return 1
-    print(
-        f"kb-load: documents +{report.documents_added} ~{report.documents_updated} "
-        f"={report.documents_unchanged} -{report.documents_removed}; "
-        f"chunks written {report.chunks_written}, removed {report.chunks_removed}"
-        + ("" if report.changed else " (nothing to do)")
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))

@@ -73,6 +73,10 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
       - run: uv sync --all-packages --locked
+      # The local embedding model and BM25 files (ADR-0018); downloaded from Hugging Face and
+      # checked against the pinned SHA-256. Unit tests do not need them.
+      - name: Local embedding model
+        run: make models
       - name: Integration tests (no provider API key)
         run: |
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then

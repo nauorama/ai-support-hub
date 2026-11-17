@@ -21,10 +21,10 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def _run_check(name: str, check: ReadinessCheck) -> tuple[str, dict[str, str]]:
+async def _run_check(name: str, check: ReadinessCheck) -> tuple[str, dict[str, str | int]]:
     try:
         async with asyncio.timeout(CHECK_TIMEOUT_SECONDS):
-            await check()
+            details = await check()
     except TimeoutError:
         return name, {"status": "error", "error": "timeout"}
     except UnexpectedStatusError as exc:
@@ -32,7 +32,7 @@ async def _run_check(name: str, check: ReadinessCheck) -> tuple[str, dict[str, s
     except Exception as exc:
         # Only the class name: messages of connection errors can contain the connection string.
         return name, {"status": "error", "error": type(exc).__name__}
-    return name, {"status": "ok"}
+    return name, {"status": "ok", **(details or {})}
 
 
 @router.get("/ready")

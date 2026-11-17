@@ -34,7 +34,7 @@ Base path `/api/v1`. JSON, `snake_case`. FastAPI generates the OpenAPI file; thi
 | GET | `/tickets/{id}/messages?after={message_id}` | New messages. The chat polls this every 3 s while the ticket is not closed and no stream is open. |
 | POST | `/tickets/{id}/request-human` | Immediate handoff with reason `customer_request`. Returns the ticket. A ticket that already waits for a human (`handed_off`, `pending_approval`) is returned unchanged; a closed ticket returns `409 ticket_closed`. |
 | POST | `/tickets/{id}/feedback` | Body `{"message_id": "...", "rating": "up" | "down", "comment": "..."}` (comment optional, max 1,000 characters, masked). 201 with `{"id"}`. Only AI messages of this ticket: another message → `422 not_ai_message`. One rating per message: only the first rating is kept. Any later request for the same message (a double click, another rating, a new comment) stores nothing and returns the first rating's `{"id"}` with 200. |
-| GET | `/help/{doc_id}` | Public. One `external` knowledge-base article (title, sections with anchors). `internal` documents return 404. Target of citation links. |
+| GET | `/help/{doc_id}` | Public. One `external` knowledge-base article: `{"id", "title", "url", "updated_at", "sections": [{"anchor", "heading", "text"}]}`, sections in file order (anchors: [data model](data-model.md) §2). `internal` and unknown documents return the same `404 not_found`. Target of citation links (`/help/<doc_id>#<anchor>`). |
 | GET | `/privacy` | Public. Short privacy text: what the AI sees, which providers process the data, how to reach a human. |
 
 A customer can read only their own tickets (404 for others, not 403).
@@ -75,7 +75,7 @@ All need `hub_operator`. Minimum role in brackets.
 | POST | `/console/tickets/{id}/reply` [operator] | Body `{"ticket_version", "body"}`, `Idempotency-Key` required. Free reply on a handed-off or answered ticket (`handed_off → answered`); the text is masked (G1) and limited to 4,000 characters like a customer message. Returns the stored message. Another status → 409 (`processing`: claim first; `pending_approval`: use the draft endpoints); another operator's claim → `409 conflict`. The first reply on a handed-off ticket resumes the paused run ([ai-pipeline](ai-pipeline.md) §1, phase 6); body may include `approved_actions` (phase 7). |
 | POST | `/console/tickets/{id}/actions` [operator] | Run a tool action by hand: `{"type": "jira_create_issue", "params": {...}}`. |
 | POST | `/console/tickets/{id}/close` [operator] | Body `{"ticket_version"}`. Only `answered` or `handed_off` tickets (state diagram); another status → `409 conflict`. |
-| GET | `/console/kb/search?q=` [operator] | Hybrid search, includes `internal` articles. |
+| GET | `/console/kb/search?q=&mode=&limit=` [operator] | Search over every chunk, `internal` included (compliance cannot use it). `q` 1–500 characters, masked (G1) before it is embedded; `mode` `hybrid` (default) or `dense`; `limit` 1–20, default 6. Returns `{"items": [{"chunk_id", "doc_id", "title", "section", "url", "visibility", "text", "score", "rank"}]}`. Qdrant or the local model not available → `503 kb_unavailable`. |
 | GET | `/console/kb/documents/{id}` [operator] | Article text. |
 | GET | `/console/metrics/summary?from=&to=` [lead] | Numbers for the dashboard (section 5). |
 | GET | `/console/metrics/timeseries?metric=&bucket=day` [lead] | |
@@ -83,7 +83,7 @@ All need `hub_operator`. Minimum role in brackets.
 | GET | `/console/audit` [compliance, lead] | Filters: `entity_type`, `entity_id`, `actor_id`, `action`, `from`, `to`. |
 | GET | `/console/audit/verify` [compliance, lead] | Checks the hash chain; returns the first broken id or `ok`. |
 | GET / PUT | `/admin/settings` [lead] | `auto_reply_enabled`, `confidence_threshold`, `daily_budget_usd`, `intent_allowlist` (may only remove intents from the list in `config/policy.yaml`; adding another intent returns 422). |
-| POST | `/admin/kb/reindex` [admin] | Reload `data/kb` and rebuild changed chunks. |
+| POST | `/admin/kb/reindex?full=false` [admin] | Reload `data/kb` into Postgres and sync the index (only changed chunks are embedded); `full=true` builds a new collection and moves the alias. Returns `{"full", "collection", "documents_added", "documents_updated", "documents_removed", "chunks_embedded", "chunks_payload_updated", "chunks_deleted"}`; audited as `kb.reindexed`. Invalid files → `422 kb_invalid` (nothing written); Qdrant or the model not available → `503 kb_unavailable`. |
 | POST | `/admin/runs/recover` [admin] | Resume runs stuck in `running`. |
 | POST | `/admin/jobs/{name}` [job token] | `name` = `retention` \| `recover-runs` \| `close-stale` (close `answered` tickets after 72 h, write memory summaries) \| `ping` (touches Postgres and Qdrant so the free services stay awake). Returns a short report. |
 | DELETE | `/admin/customers/{id}/data` [admin] | Erasure (see [security](security.md) §6). |
@@ -131,7 +131,7 @@ The server sends a comment line (`: ping`) every 10 s to keep the connection ope
 | Path | Purpose |
 |---|---|
 | `GET /health` | Process is up. No dependencies. |
-| `GET /ready` | Postgres, Qdrant and the MCP server answer. Returns the state of each; 503 when one does not. |
+| `GET /ready` | Postgres, Qdrant and the MCP server answer, and the knowledge-base index holds one point per chunk in Postgres (`kb_index`, P5-01: `{"status": "ok", "postgres_chunks": n, "qdrant_points": n}`, or an error naming both counts). Returns the state of each; 503 when one fails. |
 
 Both paths are at the root, outside `/api/v1`. They are not `/healthz` and `/readyz`: Cloud Run reserves some paths that end in `z` and recommends avoiding them (https://cloud.google.com/run/docs/issues).
 

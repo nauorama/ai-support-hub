@@ -1,7 +1,7 @@
 """`/health` needs nothing; `/ready` reports each dependency and is 503 when one fails."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 
 import httpx2
 import pytest
@@ -12,6 +12,7 @@ from hub.config import Settings
 from hub.deps import build_container
 from hub.observability.readiness import (
     UnexpectedStatusError,
+    kb_index_check,
     libpq_url,
     mcp_check,
     postgres_check,
@@ -72,9 +73,10 @@ def test_hanging_check_times_out(make_client: MakeClient, monkeypatch: pytest.Mo
     assert response.json()["checks"]["qdrant"] == {"status": "error", "error": "timeout"}
 
 
-def test_container_checks_postgres_qdrant_and_mcp() -> None:
+def test_container_checks_postgres_qdrant_the_kb_index_and_mcp() -> None:
     container = build_container(Settings(_env_file=None))
-    assert set(container.readiness_checks) == {"postgres", "qdrant", "mcp"}
+    assert set(container.readiness_checks) == {"postgres", "qdrant", "kb_index", "mcp"}
+    assert container.kb is not None
 
 
 @pytest.mark.parametrize(
@@ -172,3 +174,32 @@ def test_ready_shows_the_status_of_a_wrong_answer(make_client: MakeClient) -> No
     response = make_client({"mcp": unauthorised}).get("/ready")
     assert response.status_code == 503
     assert response.json()["checks"]["mcp"] == {"status": "error", "error": "HTTP 401"}
+
+
+# --- the KB index check (P5-01) ----------------------------------------------------------------
+
+
+def _counts(postgres: int, qdrant: int) -> Callable[[], Coroutine[None, None, tuple[int, int]]]:
+    async def counts() -> tuple[int, int]:
+        return postgres, qdrant
+
+    return counts
+
+
+def test_ready_shows_the_index_counts_when_they_match(make_client: MakeClient) -> None:
+    response = make_client({"kb_index": kb_index_check(_counts(120, 120))}).get("/ready")
+    assert response.status_code == 200
+    assert response.json()["checks"]["kb_index"] == {
+        "status": "ok",
+        "postgres_chunks": 120,
+        "qdrant_points": 120,
+    }
+
+
+def test_ready_fails_when_postgres_and_qdrant_differ(make_client: MakeClient) -> None:
+    response = make_client({"kb_index": kb_index_check(_counts(120, 118))}).get("/ready")
+    assert response.status_code == 503
+    assert response.json()["checks"]["kb_index"] == {
+        "status": "error",
+        "error": "chunks: postgres 120, qdrant 118",
+    }

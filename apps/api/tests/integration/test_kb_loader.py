@@ -247,3 +247,37 @@ async def test_a_changed_error_code_bumps_the_document_and_rewrites_one_chunk(
     assert (documents["error-codes"][6], documents["error-codes"][7]) == (2, second)
     after = await _chunks(engine)
     assert {k for k in after if after[k] != chunks[k]} == {"error-codes#ERR-1001"}
+
+
+async def test_a_rechunk_reaches_files_whose_hash_did_not_change(
+    engine: AsyncEngine, kb_dir: Path, kb_db: tuple[str, str]
+) -> None:
+    # Stands for a chunker change: the stored chunks of one unchanged file differ from what the
+    # chunker gives now (P2-09 review question, answered in P5-01 by the full re-index).
+    await _load(engine, kb_dir)
+    with psycopg.connect(libpq_url(kb_db[0]), autocommit=True) as connection:
+        connection.execute(
+            "UPDATE kb_chunks SET text = 'old chunker', content_hash = 'old' WHERE id = %s",
+            (f"{EDITED}#0",),
+        )
+    plain = await _load(engine, kb_dir)
+    assert not plain.changed  # the hash skip alone never sees it
+    before = await _chunks(engine)
+    actions = len(await _actions(engine))
+
+    files = read_kb(kb_dir)
+    async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
+        report = await load_kb(session, files, rechunk=True)
+
+    assert (report.documents_updated, report.chunks_written) == (1, 1)
+    assert report.documents_unchanged == len(files) - 1
+    documents = await _documents(engine)
+    assert documents[EDITED][6] == 2  # version
+    after = await _chunks(engine)
+    changed = {chunk_id for chunk_id in after if after[chunk_id] != before[chunk_id]}
+    assert changed == {f"{EDITED}#0"}
+    assert (await _actions(engine))[actions:] == [("kb.document_updated", EDITED)]
+    # A second re-chunk finds nothing to do.
+    async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
+        again = await load_kb(session, files, rechunk=True)
+    assert not again.changed

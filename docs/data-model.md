@@ -244,7 +244,7 @@ Postgres keeps the knowledge base as the source of truth for the index and for t
 | token_count | int | estimate: `ceil(characters / 4)`, not a tokenizer; it decides only where a section over 400 is split |
 | content_hash | text | SHA-256 of `text` |
 
-`make kb-load` (`hub/kb/loader.py`) writes both tables. A file with an unchanged hash is skipped; a changed file gets `version + 1` and only its chunks whose place or text changed are rewritten; a document whose file is gone is deleted. Chunk ids of articles are ordinals, so a section added in the middle shifts the ids after it within that document.
+`make kb-load` (`hub/kb/loader.py`, then the Qdrant index, §2) writes both tables. A file with an unchanged hash is skipped (a full re-index, `FULL=1`, re-chunks it too and writes it only when its chunks differ, P5-01); a changed file gets `version + 1` and only its chunks whose place or text changed are rewritten; a document whose file is gone is deleted. Chunk ids of articles are ordinals, so a section added in the middle shifts the ids after it within that document.
 
 **The `error-codes` document.** `error_codes.csv` is one document: id `error-codes`, title `Error codes`, product `general`, visibility `external`, intents `[]`, url `/help/error-codes`, `updated_at` = the time of the load that added or changed it. Its chunk ids use the code, not the ordinal, so a code keeps its id when rows are reordered. Visibility belongs to a document, so every CSV row must be `external`; `make data-check` and the loader refuse an `internal` row.
 
@@ -283,17 +283,17 @@ Created by `langgraph-checkpoint-postgres` (`setup()` in a migration step). Do n
 
 ## 2. Qdrant
 
-Collection `kb_chunks_v1` (alias `kb_chunks`; a re-index builds `v2` and moves the alias).
+Collection `kb_chunks_v1` (alias `kb_chunks`; a full re-index builds `v2`, moves the alias in one atomic request and deletes `v1`). Built from Postgres by `hub/kb/index.py` (P5-01): `make kb-load` and `POST /admin/kb/reindex` load Postgres first, then sync the index with it. The sync embeds only chunks whose `content_hash` changed, replaces only the payload of chunks whose document data changed (title, version, …), and deletes points whose chunk is gone; it compares state, so a run after a failed one repairs the index.
 
 | Item | Value |
 |---|---|
 | Point id | UUID v5 of the chunk id |
 | Vector `dense` | size from the embedding model in `config/models.yaml` (384 for the local `BAAI/bge-small-en-v1.5`, ADR-0018), cosine distance |
 | Vector `sparse` | BM25 from FastEmbed, IDF modifier on |
-| Payload | `chunk_id`, `doc_id`, `title`, `section`, `text`, `visibility`, `product`, `intents`, `url`, `doc_version` |
+| Payload | `chunk_id`, `doc_id`, `title`, `section`, `text`, `visibility`, `product`, `intents`, `url`, `doc_version`, `content_hash` (what the sync compares). `url` is the section link `/help/<doc_id>#<anchor>`: the anchor is the `##` heading in lower case with words joined by `-` (a repeated heading gets `-1`, `-2`, …; the pieces of a split section share one anchor), for an error code the code in lower case (`/help/error-codes#err-2003`); `hub/kb/sections.py` gives the same anchors to `GET /help/{doc_id}` |
 | Payload indexes | `visibility` (keyword), `product` (keyword), `doc_id` (keyword) |
 
-Queries use the Query API: two prefetches (dense top 20, sparse top 20), RRF fusion, filter on `visibility`, final top 6.
+Queries use the Query API: two prefetches (dense top 20, sparse top 20), RRF fusion, filter on `visibility`, final top 6 (`hub/kb/retriever.py`, P5-02). **Exact error-code lookup** ([ADR-0020](adr/0020-exact-error-code-lookup.md), P5-02): in hybrid mode an error code in the query (`ERR-2003`, any case) puts its chunk `error-codes#ERR-2003` first (same visibility rule), then the fused hits without it; the pinned hit gets the top fused score. FastEmbed's BM25 splits `ERR-2003` into `err` and `2003`, three articles mention the same code, and the small dense model barely tells codes apart: without the lookup the code chunk ranked 4th to 6th. Dense mode (`rag_dense`) has no lookup.
 
 ## 3. Files in `data/`
 
