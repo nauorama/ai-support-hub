@@ -13,6 +13,7 @@ from hub.config import Settings
 from hub.domain.enums import LlmCallMode
 from hub.llm.config import ALLOWED_PARAMS, ConfigError, load_models, parse_models
 from hub.llm.gateway import FixtureProvider, LiteLLMProvider, build_gateway
+from hub.llm.local_embedding import LocalEmbeddingProvider
 from hub.llm.pricing import load_pricing, parse_pricing
 from hub.llm.schemas import Usage
 
@@ -68,12 +69,15 @@ def test_build_gateway_uses_fixtures_in_fake_mode_and_litellm_in_real_mode() -> 
     fake = build_gateway(
         Settings(_env_file=None, models_config=MODELS_YAML), MemoryRecorder(), None
     )
-    assert isinstance(fake.provider, FixtureProvider)
+    # Embeddings come from the local model in both modes (ADR-0018); chat calls do not.
+    assert isinstance(fake.provider, LocalEmbeddingProvider)
+    assert isinstance(fake.provider.inner, FixtureProvider)
     assert fake.mode == LlmCallMode.FAKE
     real = build_gateway(
         Settings(_env_file=None, models_config=MODELS_YAML, llm_mode="real"), MemoryRecorder(), None
     )
-    assert isinstance(real.provider, LiteLLMProvider)
+    assert isinstance(real.provider, LocalEmbeddingProvider)
+    assert isinstance(real.provider.inner, LiteLLMProvider)
     assert real.mode == LlmCallMode.REAL
 
 

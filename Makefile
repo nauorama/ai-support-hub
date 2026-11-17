@@ -8,7 +8,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm llm-requests eval
+	record-llm llm-requests eval models
 NOT_IMPLEMENTED := test-e2e \
 	eval-smoke eval-attacks eval-report web-types retention \
 	leak-scan export-review-candidates rollback
@@ -24,6 +24,13 @@ setup:
 	@if [ -f apps/web/package.json ]; then pnpm install; else echo "web: apps/web has no package.json yet, skipping pnpm install"; fi
 	@if [ ! -f .env ]; then cp .env.example .env && echo "created .env from .env.example"; fi
 	uv run pre-commit install
+	$(MAKE) --no-print-directory models
+
+# The local embedding model and the BM25 files (ADR-0018), into EMBEDDING_CACHE_DIR. Needs the
+# network once; the app loads them with local_files_only and never downloads. The model file is
+# checked against its pinned SHA-256 (hub/llm/local_embedding.py).
+models:
+	uv run python -m hub.llm.local_embedding
 
 lint:
 	uv run ruff check .
@@ -76,17 +83,19 @@ seed:
 	uv run python -m hub.seed data/seed
 
 # Knowledge base into Postgres (kb_documents, kb_chunks) as the app role: only changed files are
-# written, deleted files are removed. The Qdrant part joins in phase 5.
+# written, deleted files are removed. Then the Qdrant index is synced with Postgres (P5-01): only
+# chunks whose text changed are embedded again. FULL=1 builds a new collection and moves the alias.
 kb-load:
-	uv run python -m hub.kb.loader data/kb
+	uv run python -m hub.kb.service $(if $(FULL),--full,) data/kb
 
-# operations §1: dev = up + migrate + seed + kb-load.
+# operations §1: dev = models + up + migrate + seed + kb-load (models first: the api container
+# mounts the model folder, and a cached model makes no network call).
 # The check runs first and alone: with required settings empty (SEED_OPERATOR_PASSWORD,
 # SESSION_SECRET, DEMO_ACCESS_CODE) it lists them all and stops before anything starts. The
 # steps run through a sub-make, in this order, so the check always comes before them.
 dev:
 	uv run python -m hub.dev_check
-	$(MAKE) --no-print-directory up migrate seed kb-load
+	$(MAKE) --no-print-directory models up migrate seed kb-load
 	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
 
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).

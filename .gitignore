@@ -24,6 +24,9 @@ apps/web/dist/
 playwright-report/
 test-results/
 
+# Local embedding model files (`make models`, ADR-0018)
+.cache/
+
 # Evaluation: only small reports are committed, never raw results
 results.jsonl
 **/results.jsonl

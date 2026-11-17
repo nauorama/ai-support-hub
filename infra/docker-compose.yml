@@ -66,6 +66,7 @@ services:
       EVAL_DATABASE_URL: postgresql+psycopg://hub_api:hub_api@postgres:5432/hub_eval
       QDRANT_URL: http://qdrant:6333
       MCP_SERVER_URL: http://mcp:8001/mcp
+      EMBEDDING_CACHE_DIR: /app/.cache/models
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -77,6 +78,11 @@ services:
       # (hub/llm/gateway.py) looks for them, or every model call fails (deferred from P3-01).
       # Dev image only; the production image (phase 10) runs real mode without them.
       - ../apps/api/tests/fixtures/llm:/app/apps/api/tests/fixtures/llm:ro
+      # Local embedding model from `make models` (ADR-0018): the app never downloads it. The
+      # production image (P10-06) downloads it at build time instead.
+      - ../.cache/models:/app/.cache/models:ro
+      # POST /admin/kb/reindex reloads the articles from here (P5-01).
+      - ../data/kb:/app/data/kb:ro
     depends_on:
       postgres:
         condition: service_healthy

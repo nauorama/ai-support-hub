@@ -19,8 +19,10 @@ Evaluation runs wrap the provider in `CachingProvider`, a disk cache keyed by th
 plan §4): a hit makes no provider call and is recorded with mode `fake`, because it repeats a
 stored answer and nothing was paid.
 
-The budget guard (G8, `hub/llm/budget.py`) runs before every `online` call, before the G2 scan
-and before any provider call: a refused call is no attempt and writes no row.
+The budget guard (G8, `hub/llm/budget.py`) runs before every `online` chat call, before the G2
+scan and before any provider call: a refused call is no attempt and writes no row. Embedding
+calls skip it: the embedding model runs locally (`LocalEmbeddingProvider`, ADR-0018) and costs
+nothing, so a spent budget must not stop knowledge-base search or indexing.
 """
 
 import asyncio
@@ -44,6 +46,7 @@ from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus
 from hub.guardrails.masking import mask
 from hub.llm.budget import BudgetCheck
 from hub.llm.config import ConfigError, ModelsConfig, RoleConfig, load_models
+from hub.llm.local_embedding import LocalEmbeddingProvider
 from hub.llm.pricing import Pricing, load_pricing
 from hub.llm.recorder import CallRecorder
 from hub.llm.schemas import (
@@ -229,9 +232,10 @@ class LiteLLMProvider:
             raise ProviderError("InvalidResponse", transient=False) from None
 
     async def embed(self, request: ProviderRequest) -> ProviderResponse:
-        """Embeddings come from a local model, never from a provider API (ADR-0018). The local
-        backend lands in P5-01; until then a real-mode embedding call fails without a retry, and
-        the gateway records it and raises `LlmUnavailableError`."""
+        """Embeddings come from a local model, never from a provider API (ADR-0018):
+        `build_gateway` puts `LocalEmbeddingProvider` in front of this provider, so this is
+        reached only when that wiring is missing. It fails without a retry; the gateway records
+        it and raises `LlmUnavailableError`."""
         raise ProviderError("LocalEmbeddingNotAvailable", transient=False)
 
 
@@ -505,7 +509,7 @@ class Gateway:
         self, texts: Sequence[str], *, call: CallContext, role: str = "embedding"
     ) -> Embeddings:
         request = self.embedding_request(texts, role)
-        outcome = await self._run([request], call, self.provider.embed)
+        outcome = await self._run([request], call, self.provider.embed, budget_check=False)
         if len(outcome.response.vectors) != len(texts):
             raise LlmUnavailableError(f"role {role}: wrong number of vectors")
         return Embeddings(
@@ -591,10 +595,12 @@ class Gateway:
         check: Check | None = None,
         *,
         first_index: int = 0,
+        budget_check: bool = True,
     ) -> _Outcome:
         """`first_index`: position of `requests[0]` in the role's model list (1 when the call
-        starts at the fallback), so `_Outcome.index` always names the model's role."""
-        if call.context == LlmCallContext.ONLINE and self.budget is not None:
+        starts at the fallback), so `_Outcome.index` always names the model's role.
+        `budget_check`: false only for the free local embedding model (module docstring)."""
+        if budget_check and call.context == LlmCallContext.ONLINE and self.budget is not None:
             await self.budget.check()
         # The model and fallback requests differ only in model and parameters: one scan covers
         # what every model would see.
@@ -767,14 +773,17 @@ def build_gateway(
     cache_dir: Path | None = None,
 ) -> Gateway:
     """The gateway of the app: config files next to each other, provider and row mode from
-    LLM_MODE. `budget`: the app always passes its guard. `cache_dir`: evaluation runs only, the
-    disk cache (`CachingProvider`) in `<cache_dir>/<LLM_MODE>/`."""
+    LLM_MODE. Embeddings always come from the local model (`LocalEmbeddingProvider`, in every
+    mode: it is free and needs no network). `budget`: the app always passes its guard.
+    `cache_dir`: evaluation runs only, the disk cache (`CachingProvider`) in
+    `<cache_dir>/<LLM_MODE>/`."""
     models = load_models(settings.models_config)
     pricing = load_pricing(settings.models_config.parent / "pricing.yaml")
     pricing.check_covers(models)
-    provider: Provider = (
+    chat: Provider = (
         LiteLLMProvider(settings) if settings.llm_mode == "real" else FixtureProvider(FIXTURES_DIR)
     )
+    provider: Provider = LocalEmbeddingProvider(chat, settings.embedding_cache_dir)
     if cache_dir is not None:
         provider = CachingProvider(provider, cache_dir / settings.llm_mode)
     return Gateway(
@@ -785,3 +794,15 @@ def build_gateway(
         mode=LlmCallMode(settings.llm_mode),
         budget=budget,
     )
+
+
+def embedder(
+    gateway: Gateway, call: CallContext
+) -> Callable[[Sequence[str]], Awaitable[list[list[float]]]]:
+    """Dense vectors through the gateway for one call context, in the shape `hub.kb` asks for
+    (`hub.kb.index.DenseEmbedder`), so the knowledge base needs no gateway types."""
+
+    async def embed(texts: Sequence[str]) -> list[list[float]]:
+        return (await gateway.embed(texts, call=call)).vectors
+
+    return embed

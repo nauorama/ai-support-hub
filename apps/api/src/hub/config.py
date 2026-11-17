@@ -50,6 +50,9 @@ class Settings(BaseSettings):
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: SecretStr = SecretStr("")
+    # Folder of the local embedding model files (`make models` downloads them; ADR-0018). The
+    # app only reads it: a missing model is an error, never a download.
+    embedding_cache_dir: Path = Path(".cache/models")
 
     anthropic_api_key: SecretStr = SecretStr("")
     llm_mode: Literal["real", "fake"] = "fake"

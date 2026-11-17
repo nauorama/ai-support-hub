@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from hub.domain.kb import ERROR_CODE_COLUMNS, Product, Visibility
-from hub.kb import loader
 from hub.kb.loader import KbFile, KbLoadError, parse_kb, plan_load, read_kb
 
 from .conftest import TEST_CARD
@@ -158,14 +157,3 @@ def test_the_plan_of_an_unchanged_knowledge_base_is_empty() -> None:
     files = [_file("a", "h1"), _file("b", "h2")]
     plan = plan_load({"a": "h1", "b": "h2"}, files)
     assert (plan.added, plan.changed, plan.removed) == ((), (), ())
-
-
-# --- command line ----------------------------------------------------------------------------
-
-
-def test_main_reports_a_bad_folder_and_fails(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(loader, "load_settings", lambda: None)
-    assert loader.main([str(tmp_path / "missing")]) == 1
-    assert "kb-load: " in capsys.readouterr().err

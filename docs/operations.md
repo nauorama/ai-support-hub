@@ -10,12 +10,13 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 
 | Command | Does |
 |---|---|
-| `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks |
+| `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks, `make models` |
+| `make models` | download the local embedding model and the BM25 files into `EMBEDDING_CACHE_DIR` (needs the network once) and check the model file against its pinned SHA-256 (`hub/llm/local_embedding.py`) |
 | `make up` / `make down` | start / stop the compose stack |
 | `make migrate` | Alembic upgrade of the app database, then of the evaluation database (`-x db=eval`, migrator `EVAL_DATABASE_URL_DIRECT`; skipped when `EVAL_DATABASE_URL` is empty, refused when it names the app database; P4-03) + LangGraph checkpointer setup |
 | `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
-| `make kb-load` | load `data/kb` into Postgres and Qdrant (only changed documents); the Qdrant part arrives in phase 5 |
-| `make dev` | `up` + `migrate` + `seed` + `kb-load` |
+| `make kb-load` | load `data/kb` into Postgres (only changed documents), then sync the Qdrant index with Postgres: only chunks whose text changed are embedded again (`hub/kb/service.py`, P5-01). `FULL=1` also re-chunks unchanged files (writes only those whose chunks differ), builds a new collection and moves the alias `kb_chunks` to it |
+| `make dev` | `models` + `up` + `migrate` + `seed` + `kb-load` |
 | `make test` | unit tests (no network, no containers) |
 | `make test-int` | integration tests with testcontainers (Postgres, Qdrant) and recorded model responses |
 | `make test-e2e` | Playwright against the compose stack with the fake model provider |
@@ -32,7 +33,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make export-review-candidates` | export rejected and heavily edited drafts as candidates for new eval tickets |
 | `make rollback` | send traffic back to the previous deployed revision |
 
-**Fake model provider.** `LLM_MODE=fake` makes the gateway return deterministic recorded or scripted responses. Unit, integration and e2e tests run with it, so tests need no API key and cost nothing. Recordings live in `apps/api/tests/fixtures/llm/` and are refreshed with `make record-llm` (real calls). The compose `api` service mounts them read-only where the gateway looks (`FIXTURES_DIR`), with `config/` and `prompts/` (the app loads both at start), so `make dev` runs in fake mode; a ticket whose text has no recording is handed to a human (`system_error`). Only the run tickets have recordings; use `LLM_MODE=real` for other texts.
+**Fake model provider.** `LLM_MODE=fake` makes the gateway return deterministic recorded or scripted responses for chat calls. Embeddings always come from the local model, in both modes (free, offline, deterministic; P5-01). Unit, integration and e2e tests run with it, so tests need no API key and cost nothing. Recordings live in `apps/api/tests/fixtures/llm/` and are refreshed with `make record-llm` (real calls). The compose `api` service mounts them read-only where the gateway looks (`FIXTURES_DIR`), with `config/` and `prompts/` (the app loads both at start), so `make dev` runs in fake mode; a ticket whose text has no recording is handed to a human (`system_error`). Only the run tickets have recordings; use `LLM_MODE=real` for other texts.
 
 ## 2. Configuration
 
@@ -48,6 +49,7 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `CORE_ANCHOR_DATE` | empty \| `2026-11-12` | "today" for the core mock and the workflow; empty = real date; fixed in tests and evaluation |
 | `JOBS_TOKEN` | random | bearer token for `POST /admin/jobs/*` |
 | `QDRANT_URL`, `QDRANT_API_KEY` | | key empty locally |
+| `EMBEDDING_CACHE_DIR` | `.cache/models` | folder of the local embedding model (`BAAI/bge-small-en-v1.5`) and the BM25 files; `make models` downloads them, the app only reads them (`local_files_only`, ADR-0018). The compose `api` service mounts it read-only |
 | `ANTHROPIC_API_KEY` | | read by LiteLLM; the only provider key (ADR-0018) |
 | `LLM_MODE` | `real` \| `fake` | |
 | `MODELS_CONFIG` | `config/models.yaml` | |

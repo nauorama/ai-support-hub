@@ -103,9 +103,10 @@ Rules, enforced in `tools/permissions.py`:
 Output:
 
 ```python
-class KbChunk(BaseModel):
-    chunk_id: str; doc_id: str; title: str; section: str; url: str
-    text: str; score: float; rank: int
+class KbChunk(BaseModel):          # hub/kb/retriever.py (P5-02)
+    chunk_id: str; doc_id: str; title: str; section: str
+    url: str                        # section link /help/<doc_id>#<anchor>
+    text: str; visibility: str; score: float; rank: int   # rank from 1
 
 class AccountFact(BaseModel):
     fact_id: str            # "A1", "A2", ...
@@ -297,7 +298,7 @@ Contract of each prompt:
 | `write` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 900 | as triage |
 | `verify` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 700 | as triage |
 | `judge` | `anthropic/claude-haiku-5-5` | `anthropic/claude-sonnet-5-5` | 800 | the same model family as the writer: self-preference is likely, so judge numbers are unvalidated ([eval plan](eval-plan.md) §5) |
-| `embedding` | `fastembed/BAAI/bge-small-en-v1.5` | none | — | local model, 384 dimensions, cost 0; no fallback: vectors of another model cannot be mixed with the index. The local backend lands in P5-01 |
+| `embedding` | `fastembed/BAAI/bge-small-en-v1.5` | none | — | local model, 384 dimensions, cost 0; no fallback: vectors of another model cannot be mixed with the index. Backend `hub/llm/local_embedding.py` (P5-01), used in every `LLM_MODE` (no recorded vectors in fake mode). FastEmbed 0.9.1 cannot pin a Hugging Face revision, so the model file is pinned by SHA-256 (checked by `make models` and at every load); the revision seen on 2026-11-17 is recorded next to it. The model reads at most 512 tokens; an integration test checks that every chunk fits |
 
 Budget mode ([ADR-0018](adr/0018-budget-mode.md)): one provider, Anthropic, and one small model for every role. The fallback helps when Haiku fails or is overloaded, not when Anthropic itself is down; then the ticket goes to a human (`system_error`).
 

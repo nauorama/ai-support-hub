@@ -10,7 +10,8 @@ from pydantic import BaseModel
 
 from hub.config import Settings
 from hub.domain.enums import LlmCallMode, LlmCallStatus
-from hub.llm.gateway import CachingProvider, FixtureProvider, LiteLLMProvider, build_gateway
+from hub.llm.gateway import CachingProvider, FixtureProvider, build_gateway
+from hub.llm.local_embedding import LocalEmbeddingProvider
 from hub.llm.schemas import (
     LlmUnavailableError,
     ProviderError,
@@ -182,12 +183,12 @@ def test_build_gateway_wraps_the_provider_in_one_folder_per_mode(tmp_path: Path)
     )
     assert isinstance(real.provider, CachingProvider)
     assert real.provider.path(_request()).parent == tmp_path / "real"
-    # Without a cache folder (the app) nothing is wrapped.
+    # Without a cache folder (the app) there is no cache: only the local embeddings in front.
     plain = build_gateway(
         Settings(_env_file=None, models_config=MODELS_YAML), MemoryRecorder(), None
     )
-    assert isinstance(plain.provider, FixtureProvider)
-    assert not isinstance(plain.provider, LiteLLMProvider | CachingProvider)
+    assert isinstance(plain.provider, LocalEmbeddingProvider)
+    assert isinstance(plain.provider.inner, FixtureProvider)
 
 
 def test_usage_survives_the_round_trip(tmp_path: Path) -> None:

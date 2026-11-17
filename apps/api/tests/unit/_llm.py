@@ -12,7 +12,7 @@ from pathlib import Path
 from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.llm.budget import BudgetCheck
 from hub.llm.config import ModelsConfig, load_models
-from hub.llm.gateway import Gateway
+from hub.llm.gateway import Gateway, Provider
 from hub.llm.pricing import Pricing, load_pricing
 from hub.llm.schemas import (
     CallContext,
@@ -94,7 +94,7 @@ def real_pricing() -> Pricing:
 
 
 def make_gateway(
-    provider: ScriptedProvider,
+    provider: Provider,
     recorder: MemoryRecorder | None = None,
     sleeps: Sleeps | None = None,
     models: ModelsConfig | None = None,
