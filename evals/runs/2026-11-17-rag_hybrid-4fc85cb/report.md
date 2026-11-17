@@ -45,7 +45,7 @@ Rates show the count, the total and the 95% Wilson interval.
 
 Cost is in USD, compared with the euro targets of eval plan §2 one to one. Latency targets apply to auto-replied runs; all runs: p50 2.2 s, p95 4.2 s.
 
-**Coverage of the scores.** Key-fact coverage: 14 tickets judged, 0 left out (no KB search), 0 not judged, 6 without key facts. Faithfulness: 9 answered tickets, 0 not judged, 0 claims counted unsupported because the judge's quote was not in the evidence, 0 cited answers counted unfaithful because the judge listed no claim. Citations: 0 marker problems found by code, 5 of 32 judged citations not supported. Retrieval: 18 tickets, 2 left out (no KB search).
+**Coverage of the scores.** Key-fact coverage: 14 tickets judged, 0 left out (no KB search), 0 not judged, 6 without key facts. Faithfulness: 9 answered tickets, 0 not judged, 0 claims counted unsupported because the judge's quote was not in the evidence, 0 cited answers counted unfaithful because the judge listed no claim. Citations: 0 marker problems found by code, 5 of 32 judged citations not supported. Retrieval: 18 tickets, 2 left out (no KB search, or no gold documents).
 
 ## Triage
 

@@ -52,7 +52,7 @@ Each of the 19 tickets with a problem is in exactly one category of eval plan §
 
 ## Retrieval: the 4 hit@5 misses
 
-hit@5 is computed over 18 tickets. T-0012 and T-0019 are left out because they have no gold documents (both ran a search; the report wording was corrected in the same pull request to "no KB search, or no gold documents").
+hit@5 is computed over 18 tickets. T-0012 and T-0019 are left out because they have no gold documents (both ran a search). `report.md` was re-rendered from the same `results.jsonl` with the corrected wording "no KB search, or no gold documents" (PR #34, no model call; `metrics.json` unchanged); `config.json` still names the commit that ran the tickets, 4fc85cb.
 
 | Ticket | Gold | Ranked chunk ids (1–6) | Reading |
 |---|---|---|---|

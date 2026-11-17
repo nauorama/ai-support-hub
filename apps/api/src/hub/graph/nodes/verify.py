@@ -5,8 +5,9 @@
    no groundedness, and `passed = false`.
 2. Otherwise one structured call on the `verify` role (`prompts/verify/v1.md`) splits the
    answer into claims and names the source of each. The model's answer is checked in code: a
-   claim marked supported whose source id is not one the writer was given counts as
-   unsupported, so the model cannot ground a claim on a source it invented.
+   source id that is not one the writer was given is dropped (stored as null), and a claim
+   marked supported on such an id counts as unsupported, so the model cannot ground a claim on
+   a source it invented (nor on none), and only known chunk ids are stored.
 3. `groundedness` = supported claims / all claims, and `passed` = every claim supported. A draft
    with an answer but no claim at all gets groundedness 0 and fails: an answer the verifier
    cannot split into claims gives no basis for trust (the rule version of confidence uses
@@ -62,12 +63,16 @@ def failed_checks(violations: list[str]) -> Verification:
 
 def verification(answer: ClaimsAnswer, known_sources: Collection[str]) -> Verification:
     """The result of the LLM check, after every code check passed."""
-    claims = [
-        claim
-        if not claim.supported or claim.source_id in known_sources
-        else ClaimCheck(claim=claim.claim, supported=False, source_id=claim.source_id)
-        for claim in answer.claims
-    ]
+    claims = []
+    for claim in answer.claims:
+        source = claim.source_id if claim.source_id in known_sources else None
+        claims.append(
+            ClaimCheck(
+                claim=claim.claim,
+                supported=claim.supported and source is not None,
+                source_id=source,
+            )
+        )
     supported = sum(claim.supported for claim in claims)
     return Verification(
         claims=claims,

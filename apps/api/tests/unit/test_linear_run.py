@@ -427,6 +427,28 @@ def test_the_code_checks_see_the_answer_as_the_model_wrote_it() -> None:
     assert checked.answer == "Write to ana@example.com [1]. Card 4111 1111 1111 1111 [7]."
     assert checked.citations == [(1, "withdrawal-times#0")]
     assert checked.evidence_ids == {"withdrawal-times#0", "withdrawal-fees#1"}
+    assert checked.other_texts == []
+
+
+def test_the_code_checks_see_missing_information_and_proposed_actions() -> None:
+    from hub.graph.linear import draft_to_check
+
+    answer = _answer(
+        can_answer=False,
+        answer="",
+        citations=[],
+        missing_information="Ask <EMAIL_1> for the receipt.",
+        proposed_actions=[
+            ProposedAction(
+                type="jira_create_issue", issue_type="dispute", summary="S", description="D"
+            )
+        ],
+    )
+    checked = draft_to_check(answer, rag_evidence(VARIANT, HITS), intake("ana@example.com"))
+    assert checked.other_texts == [
+        ("missing_information", "Ask ana@example.com for the receipt."),
+        ("proposed_action", "S\nD"),
+    ]
 
 
 def test_the_draft_stores_groundedness_and_the_unsupported_claims_masked() -> None:

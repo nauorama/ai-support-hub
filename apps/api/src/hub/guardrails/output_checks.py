@@ -17,11 +17,17 @@ text of the draft, so they can go to the audit log.
    second check. It compares hashes of 8-word windows of the draft with those of the internal
    chunks, leaving out windows that an external chunk has too (shared wording is not a leak).
 5. No forbidden promise (`forbidden_promise:<name>`): refund, limit increase, unfreeze, the
-   reason of a restriction, legal or tax advice. Conservative patterns for a first-person
-   promise or a done deed ("we will refund", "your limit has been raised"); the LLM verifier
-   checks the rest, because a promise no source makes is an unsupported claim. The patterns
+   reason of a restriction, legal or tax advice. Patterns for a first-person promise or a done
+   deed ("we will refund", "your refund will be issued", "your limit has been raised"), matched
+   on the folded view of G4 (`injection.fold_text`), so invisible characters and look-alike
+   letters cannot hide one. A first filter: the LLM verifier checks the rest, because a promise
+   no source makes is an unsupported claim. The patterns
    are here until `config/policy.yaml` exists (P6-02 moves them there, `forbidden_promises`).
 6. Length at most 1,200 characters (`too_long`); language English (`not_english`).
+
+The other model-written strings of a draft (`missing_information`, each proposed action) get
+the checks of groups 4 and 5, with codes `<field>:<code>` (e.g.
+`proposed_action:forbidden_promise:refund`), also when the draft cannot answer.
 
 The checks run on the model's answer as it wrote it, with the run's placeholders restored and
 **before** the card mask and before markers without a citation are removed
@@ -38,6 +44,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from hub.guardrails.injection import fold_text
 from hub.guardrails.masking import mask
 
 MAX_LENGTH = 1200
@@ -108,22 +115,30 @@ _OTHER = _word_set(
 )
 
 _FIRST_PERSON = r"\b(?:we|i)(?:'ll|'ve|'re| will| have| are| am| can| shall)?(?: now| already)?"
+# "we're happy to refund ...": a willing first person, never "not able to".
+_WILLING = r"(?: (?:happy|glad|pleased|going) to)?"
 _DONE = r"(?:has|have) been|is now|are now"
-# name -> patterns, matched on folded text (case-folded, one space, straight apostrophes).
+_WILL_BE = r"(?:will be|is being|has been|have been|was|is now)"
+# name -> patterns, matched on the G4-folded text (`promise_text`: look-alikes mapped, invisible
+# characters and accents dropped, case-folded, straight apostrophes, one space).
 FORBIDDEN_PROMISES: Mapping[str, tuple[str, ...]] = {
     "refund": (
         rf"{_FIRST_PERSON} (?:issue|process|send|give|approve|grant|make|arrange)d?"
         r" (?:you )?(?:a |the |your )?(?:full |partial )?refund",
-        rf"{_FIRST_PERSON} refund(?:ed)? (?:you|your|the)",
+        rf"{_FIRST_PERSON}{_WILLING} refund(?:ed)? (?:you|your|the|this|it)",
         rf"\byour refund (?:{_DONE}|is) (?:approved|confirmed|processed|issued|on its way)",
+        rf"\b(?:your|the|a|this) (?:full |partial )?refund {_WILL_BE} (?:approved|confirmed"
+        r"|processed|issued|sent|paid|credited|made|on its way)",
     ),
     "limit_increase": (
         rf"{_FIRST_PERSON} (?:increase|raise|lift|extend)d? your (?:\w+ ){{0,2}}limits?",
         rf"\byour (?:\w+ ){{0,2}}limits? (?:{_DONE}) (?:increased|raised|lifted|extended)",
     ),
     "unfreeze": (
-        rf"{_FIRST_PERSON} (?:unfreeze|unfroze|unblock|unlock|reactivate|restore)d?"
+        rf"{_FIRST_PERSON} (?:unfreeze|unfroze|unfrozen|unblock|unlock|reactivate|restore)d?"
         r" your (?:account|card|balance)",
+        rf"{_FIRST_PERSON} (?:lift|lifted|remove|removed) (?:the |this |your |any )?"
+        r"(?:restriction|block|freeze|hold)",
         rf"\byour (?:account|card|balance) (?:{_DONE}) (?:unfrozen|unblocked|unlocked"
         r"|reactivated|restored)",
         rf"\b(?:the |this )?restriction (?:{_DONE}) (?:lifted|removed)",
@@ -131,6 +146,9 @@ FORBIDDEN_PROMISES: Mapping[str, tuple[str, ...]] = {
     "restriction_reason": (
         r"\byour account (?:is|was|has been) (?:restricted|frozen|blocked|suspended|limited"
         r"|under review) (?:because|due to|as a result of|since)\b",
+        r"\byour account (?:is|was|has been) (?:restricted|frozen|blocked|suspended|limited"
+        r"|under review) for (?:\w+ ){0,2}(?:reasons?|activity|concerns?|purposes|compliance"
+        r"|fraud|security|verification|checks?)\b",
         r"\b(?:the )?reason (?:for|of) (?:the |your |this )?(?:restriction|review|block|freeze"
         r"|suspension) (?:is|was)\b",
     ),
@@ -148,12 +166,16 @@ FORBIDDEN_PROMISES: Mapping[str, tuple[str, ...]] = {
 class DraftToCheck:
     """A draft as the model wrote it. `answer`: the run's placeholders restored, not yet card
     masked, markers still in. `citations`: (marker, source id) pairs. `evidence_ids`: the ids
-    the writer was given (chunk ids, account fact ids)."""
+    the writer was given (chunk ids, account fact ids). `other_texts`: the other model-written
+    strings as (field, text), `missing_information` and each proposed action; they get the
+    checks that do not depend on the answer's shape (card data, placeholders, internal text,
+    forbidden promises), with codes `<field>:<code>`, also when the draft cannot answer."""
 
     can_answer: bool
     answer: str
     citations: Sequence[tuple[int, str]]
     evidence_ids: frozenset[str]
+    other_texts: Sequence[tuple[str, str]] = ()
 
 
 @dataclass(frozen=True)
@@ -226,11 +248,19 @@ def has_card_data(text: str) -> bool:
     return found or bool(_MASKED_CARD.search(text))
 
 
+def promise_text(text: str) -> str:
+    """NFKC, then the G4 folded view (`injection.fold_text`), straight apostrophes and one
+    space: a zero-width space or a Cyrillic look-alike cannot hide a promise."""
+    folded = fold_text(unicodedata.normalize("NFKC", text))
+    folded = folded.replace("\u2019", "'").replace("\u2018", "'").replace("\u02bc", "'")
+    return " ".join(folded.split())
+
+
 def forbidden_promises(
     text: str, patterns: Mapping[str, Sequence[str]] = FORBIDDEN_PROMISES
 ) -> list[str]:
     """Names of the forbidden promises the text makes, in the order of `patterns`."""
-    folded = fold(text)
+    folded = promise_text(text)
     return [name for name, group in patterns.items() if any(re.search(p, folded) for p in group)]
 
 
@@ -243,7 +273,36 @@ def check_draft(
     internal: InternalText | None = None,
     promises: Mapping[str, Sequence[str]] = FORBIDDEN_PROMISES,
 ) -> list[str]:
-    """Violation codes in check order; an empty list when every code check passes."""
+    """Violation codes in check order; an empty list when every code check passes. The checks
+    of the answer come first, then those of the other model-written strings."""
+    found = _answer_violations(draft, internal, promises)
+    for name, text in draft.other_texts:
+        found += [f"{name}:{code}" for code in content_violations(text, internal, promises)]
+    return found
+
+
+def content_violations(
+    text: str,
+    internal: InternalText | None = None,
+    promises: Mapping[str, Sequence[str]] = FORBIDDEN_PROMISES,
+) -> list[str]:
+    """The checks of check group 4 and 5 that apply to any model-written text."""
+    found: list[str] = []
+    if has_card_data(text):
+        found.append(Violation.CARD_DATA)
+    if _PLACEHOLDERS.search(text):
+        found.append(Violation.PLACEHOLDER)
+    if internal is not None and internal.found_in(text):
+        found.append(Violation.INTERNAL_TEXT)
+    found += [f"{Violation.FORBIDDEN_PROMISE}:{n}" for n in forbidden_promises(text, promises)]
+    return found
+
+
+def _answer_violations(
+    draft: DraftToCheck,
+    internal: InternalText | None,
+    promises: Mapping[str, Sequence[str]],
+) -> list[str]:
     if not draft.can_answer:
         return [Violation.CANNOT_ANSWER]
     text = draft.answer
@@ -259,13 +318,7 @@ def check_draft(
         found.append(Violation.NO_CITATION)
     if any(_FACT.search(_MARKER.sub("", part)) and not markers(part) for part in paragraphs(text)):
         found.append(Violation.UNMARKED_FACT)
-    if has_card_data(text):
-        found.append(Violation.CARD_DATA)
-    if _PLACEHOLDERS.search(text):
-        found.append(Violation.PLACEHOLDER)
-    if internal is not None and internal.found_in(text):
-        found.append(Violation.INTERNAL_TEXT)
-    found += [f"{Violation.FORBIDDEN_PROMISE}:{n}" for n in forbidden_promises(text, promises)]
+    found += content_violations(text, internal, promises)
     if len(text) > MAX_LENGTH:
         found.append(Violation.TOO_LONG)
     if not looks_english(text):

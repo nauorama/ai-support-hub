@@ -193,8 +193,38 @@ def test_a_forbidden_promise_fails(text: str, name: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        # Phrasings found in review (PR #34).
+        ("Your refund will be issued within 3 days.", "refund"),
+        ("The refund has been processed.", "refund"),
+        ("We're happy to refund your payment.", "refund"),
+        ("We've unfrozen your account.", "unfreeze"),
+        ("We have lifted the restriction on your account.", "unfreeze"),
+        ("Your account is restricted for security reasons.", "restriction_reason"),
+        ("Your account is under review for suspicious activity.", "restriction_reason"),
+        # Invisible characters and look-alike letters (the folded view of G4).
+        ("We wi\u200bll refund your payment.", "refund"),
+        ("We will r\u0435fund your payment.", "refund"),
+        ("We will re\u00adfund your payment.", "refund"),
+        ("Your c\u0430rd h\u0430s been unblocked.", "unfreeze"),
+        ("\uff37\uff45 will refund your payment.", "refund"),  # full-width letters (NFKC)
+        ("We\u02bcll unfreeze your card.", "unfreeze"),
+    ],
+)
+def test_a_reworded_or_disguised_promise_is_found(text: str, name: str) -> None:
+    assert forbidden_promises(text) == [name]
+
+
+def test_promise_text_uses_the_folded_view_of_g4() -> None:
+    assert oc.promise_text("  We\u2019ll  R\u0415FUND\u200b you ") == "we'll refund you"
+
+
+@pytest.mark.parametrize(
     "text",
     [
+        "Your account is under review for up to 2 business days.",
+        "We're not able to refund card payments; ask the merchant.",
         "You can ask for a refund from the merchant.",
         "You can ask us to raise your limit in the app.",
         "We cannot give legal or tax advice.",
@@ -211,6 +241,43 @@ def test_no_external_chunk_makes_a_forbidden_promise() -> None:
 
 def test_the_promise_patterns_can_be_passed_in() -> None:
     assert forbidden_promises("free coffee", {"coffee": (r"\bcoffee\b",)}) == ["coffee"]
+
+
+# --- other model-written strings (missing information, proposed actions) ----------------------
+
+
+def test_missing_information_and_proposed_actions_get_the_content_checks() -> None:
+    internal = InternalText.build(INTERNAL, EXTERNAL)
+    copied = " ".join(oc.words(INTERNAL[0])[:20])
+    draft = DraftToCheck(
+        can_answer=False,
+        answer="",
+        citations=[],
+        evidence_ids=frozenset(),
+        other_texts=[
+            ("missing_information", f"Card {TEST_PAN}; reply to <EMAIL_3>."),
+            ("proposed_action", "Refund\nWe will refund the customer in full."),
+            ("proposed_action", f"Escalate\n{copied}"),
+        ],
+    )
+    assert check_draft(draft, internal=internal) == [
+        Violation.CANNOT_ANSWER,
+        "missing_information:card_data",
+        "missing_information:placeholder",
+        "proposed_action:forbidden_promise:refund",
+        "proposed_action:internal_text",
+    ]
+
+
+def test_clean_other_texts_add_nothing() -> None:
+    draft = DraftToCheck(
+        can_answer=True,
+        answer=GOOD,
+        citations=[(1, "withdrawal-times#0"), (2, "withdrawal-times#3")],
+        evidence_ids=frozenset({"withdrawal-times#0", "withdrawal-times#3"}),
+        other_texts=[("proposed_action", "Dispute\nCheck the card payment of 12 November.")],
+    )
+    assert check_draft(draft) == []
 
 
 # --- 6. length and language -------------------------------------------------------------------

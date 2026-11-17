@@ -419,11 +419,19 @@ def draft_to_check(
 ) -> DraftToCheck:
     """The answer as the model wrote it, for the code checks: the run's placeholders restored
     (one left over is the model's own), not card masked, every marker still in."""
+    others: list[tuple[str, str]] = []
+    if answer.missing_information:
+        others.append(("missing_information", intake_result.restore(answer.missing_information)))
+    others += [
+        ("proposed_action", intake_result.restore(f"{action.summary}\n{action.description}"))
+        for action in answer.proposed_actions
+    ]
     return DraftToCheck(
         can_answer=answer.can_answer,
         answer=intake_result.restore(answer.answer),
         citations=[(citation.marker, citation.source_id) for citation in answer.citations],
         evidence_ids=frozenset(evidence.citable),
+        other_texts=others,
     )
 
 

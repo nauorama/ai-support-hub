@@ -66,8 +66,20 @@ def test_an_unsupported_claim_fails_and_lowers_groundedness() -> None:
 
 def test_a_claim_supported_by_a_source_the_writer_was_not_given_counts_as_unsupported() -> None:
     result = verification(ClaimsAnswer(claims=[_claim("invented#3")]), {"a#0"})
-    assert result.claims == [_claim("invented#3", supported=False)]
+    # The invented id is never stored: only ids the writer was given reach the draft.
+    assert result.claims == [_claim(None, supported=False)]
     assert (result.groundedness, result.passed) == (0.0, False)
+
+
+def test_an_unknown_source_id_of_an_unsupported_claim_is_dropped_too() -> None:
+    answer = ClaimsAnswer(claims=[_claim("internal-escalation#0", supported=False)])
+    assert verification(answer, {"a#0"}).claims == [_claim(None, supported=False)]
+
+
+def test_a_claim_marked_supported_without_a_source_counts_as_unsupported() -> None:
+    result = verification(ClaimsAnswer(claims=[_claim(None)]), {"a#0"})
+    assert result.claims == [_claim(None, supported=False)]
+    assert not result.passed
 
 
 def test_an_answer_without_any_claim_fails() -> None:

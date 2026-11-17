@@ -66,7 +66,7 @@ Every ticket went to operator approval: B0 has no policy gate or handoff yet, so
 
 Run `2026-11-17-rag_hybrid-4fc85cb`: the linear pipeline with one hybrid knowledge-base search (top 6 chunks), the writer `write/v2` citing chunks, and the new verify step (code checks, then an LLM claim check). Full report: [evals/runs/2026-11-17-rag_hybrid-4fc85cb/report.md](evals/runs/2026-11-17-rag_hybrid-4fc85cb/report.md); error analysis: [error-analysis.md](evals/runs/2026-11-17-rag_hybrid-4fc85cb/error-analysis.md).
 
-**B0 against RAG is not measured.** The comparison experiment (E1) was removed in budget mode (ADR-0018), and this run's faithfulness and citation numbers come from `judge_*/v2`, while B0 was judged with v1, so they are not comparable.
+**B0 against RAG is not measured.** The comparison experiment (E1) was removed in budget mode (ADR-0018), and the faithfulness and citation numbers are not comparable for two reasons: this run was judged with `judge_*/v2` and B0 with v1, and the judges' evidence differs (here every chunk the writer read; in B0 only the documents the draft cites).
 
 | Metric | Value (count, 95% Wilson interval) | Gate 5 / red line | Result |
 |---|---|---|---|
