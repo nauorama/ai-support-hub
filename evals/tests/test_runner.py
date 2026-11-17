@@ -478,6 +478,68 @@ async def test_a_failing_judge_is_noted_and_an_outage_is_raised() -> None:
         )
 
 
+def _no_facts_present(ticket: Ticket) -> j.KeyFactsVerdict:
+    return j.KeyFactsVerdict(
+        facts=[
+            j.FactCheck(fact=n, quote="", present=False)
+            for n in range(1, len(ticket.key_facts) + 1)
+        ]
+    )
+
+
+async def test_paid_judge_calls_count_against_the_limit_also_on_an_outage() -> None:
+    from hub.llm.schemas import ProviderError
+
+    ticket = _tickets()[0]
+    outage = ProviderError("APIConnectionError", transient=False)
+    recorder = MemoryRecorder()
+    provider = queue(answer(_no_facts_present(ticket)), outage, outage)
+    limit = CostLimit(limit=Decimal(10), enforced=True)
+    with pytest.raises(LlmUnavailableError):
+        await judge_ticket(
+            make_gateway(provider, recorder, LlmCallMode.REAL),
+            JUDGES,
+            ticket,
+            _draft("A SEPA withdrawal costs \u20ac1.50. [1]"),
+            {s.id: s for s in _sources()},
+            limit,
+        )
+    # The key-facts call was paid before faithfulness failed: the limit has it.
+    paid = sum((row.cost_usd for row in recorder.rows if row.mode == LlmCallMode.REAL), Decimal(0))
+    assert paid > 0
+    assert limit.spent == paid
+
+
+async def test_every_judge_call_checks_the_limit() -> None:
+    ticket = _tickets()[0]
+    provider = queue(answer(_no_facts_present(ticket)))
+    # Below the price of one judge call: the first call is allowed, the second refused.
+    limit = CostLimit(limit=Decimal("0.000001"), enforced=True)
+    with pytest.raises(BudgetExceededError):
+        await judge_ticket(
+            make_gateway(provider, MemoryRecorder(), LlmCallMode.REAL),
+            JUDGES,
+            ticket,
+            _draft("A SEPA withdrawal costs \u20ac1.50. [1]"),
+            {s.id: s for s in _sources()},
+            limit,
+        )
+    assert len(provider.requests) == 1
+    assert limit.spent > limit.limit
+    # Fake mode: the limit is not enforced and every judge runs.
+    fake = CostLimit(limit=Decimal(0), enforced=False)
+    result = await judge_ticket(
+        make_gateway(queue(answer(_no_facts_present(ticket)))),
+        JUDGES,
+        ticket,
+        _draft(""),
+        {},
+        fake,
+    )
+    assert result.llm_calls == 0  # an empty draft: no call, nothing refused
+    assert fake.spent == 0
+
+
 def test_the_estimate_adds_the_judges_at_their_largest(tmp_path: Path) -> None:
     from hub.graph.linear import Pipeline
 

@@ -274,7 +274,9 @@ class Status(StrEnum):
 @dataclass(frozen=True)
 class Check:
     """One row of the report table. `higher_is_better`: the value must be at least the target
-    and the red line (accuracy, recall); otherwise at most (errors, cost, latency)."""
+    and the red line (accuracy, recall); otherwise at most (errors, cost, latency). The red line
+    is the last acceptable value (PRD §7, eval plan §2): reaching it is "below target", anything
+    worse is a breach."""
 
     name: str
     value: float | None

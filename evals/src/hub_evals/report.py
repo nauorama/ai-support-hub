@@ -124,7 +124,9 @@ def problems(ticket: Ticket, result: TicketResult) -> list[str]:
     if judges is not None:
         if judges.key_facts is not None and judges.key_facts.coverage < m.WRONG_COVERAGE:
             found.append(f"key-fact coverage {judges.key_facts.coverage:.2f}")
-        if judges.faithfulness is not None and not judges.faithfulness.faithful:
+        if judges.faithfulness is not None and judges.faithfulness.unchecked:
+            found.append("no claim listed by the faithfulness judge")
+        elif judges.faithfulness is not None and not judges.faithfulness.faithful:
             found.append(f"{judges.faithfulness.unsupported} unsupported claims")
         for name, error in sorted(judges.errors.items()):
             found.append(f"judge {name} failed ({error})")
@@ -206,6 +208,7 @@ def _answers(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, Any]:
             "quotes_not_found": sum(
                 not c.quote_found and c.judge_supported for f in faithful_judged for c in f.claims
             ),
+            "no_claims_listed": sum(f.unchecked for f in faithful_judged),
         },
         "citation_validity": {
             "invalid": m.rate(citations_invalid(r) for r in answered_results),
@@ -510,7 +513,9 @@ def render_report(config: RunConfig, data: dict[str, Any], *, run_name: str) -> 
         f"Faithfulness: {faithfulness['answered']} answered tickets, "
         f"{faithfulness['not_judged']} not judged, "
         f"{faithfulness['quotes_not_found']} claims counted unsupported because the judge's "
-        "quote was not in the evidence. "
+        "quote was not in the evidence, "
+        f"{faithfulness['no_claims_listed']} cited answers counted unfaithful because the judge "
+        "listed no claim. "
         f"Citations: {citations['code_problems']} marker problems found by code, "
         f"{citations['judged_unsupported']} of {citations['judged_citations']} judged citations "
         "not supported. "

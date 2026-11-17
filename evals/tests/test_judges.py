@@ -167,6 +167,36 @@ def test_sentences_keep_their_markers_and_numbers() -> None:
     assert j.marked_sentences("No markers here.") == []
 
 
+def test_a_list_number_does_not_end_a_sentence() -> None:
+    text = "Do this:\n1. Open the app. [1]\n2) Tap Cards. Then retry. [2]\na. Wait 3 days. [3]"
+    assert j.sentences(text) == [
+        "Do this:",
+        "1. Open the app. [1]",
+        "2) Tap Cards.",
+        "Then retry. [2]",
+        "a. Wait 3 days. [3]",
+    ]
+    assert j.marked_sentences(text) == [
+        (1, "1. Open the app. [1]"),
+        (2, "Then retry. [2]"),
+        (3, "a. Wait 3 days. [3]"),
+    ]
+
+
+def test_an_abbreviation_does_not_end_a_sentence() -> None:
+    text = (
+        "Some transfers, e.g. SEPA, take 1 day. [1] Fees (approx. 1%) apply, i.e. on FX. [2] "
+        "Cards, wallets etc. are free. Ends with etc."
+    )
+    assert j.sentences(text) == [
+        "Some transfers, e.g. SEPA, take 1 day. [1]",
+        "Fees (approx. 1%) apply, i.e. on FX. [2]",
+        "Cards, wallets etc. are free.",
+        "Ends with etc.",
+    ]
+    assert [marker for marker, _ in j.marked_sentences(text)] == [1, 2]
+
+
 # --- key facts ----------------------------------------------------------------------------------
 
 
@@ -270,14 +300,30 @@ async def test_faithfulness_counts_a_claim_without_a_real_quote_as_unsupported()
     assert not result.faithful
 
 
-async def test_a_draft_without_claims_is_faithful() -> None:
+async def test_a_draft_without_markers_or_claims_is_faithful() -> None:
     result = await j.judge_faithfulness(
         make_gateway(queue(answer(j.FaithfulnessVerdict(claims=[])))),
         JUDGES.faithfulness,
         draft="Thank you for your message.",
         evidence=EVIDENCE,
     )
+    assert not result.cites
+    assert not result.unchecked
     assert result.faithful
+
+
+async def test_a_cited_draft_without_claims_is_unfaithful() -> None:
+    # A judge that lists no claim for a cited answer checked nothing (owner decision, P4-05).
+    result = await j.judge_faithfulness(
+        make_gateway(queue(answer(j.FaithfulnessVerdict(claims=[])))),
+        JUDGES.faithfulness,
+        draft=DRAFT,
+        evidence=EVIDENCE,
+    )
+    assert result.cites
+    assert result.unchecked
+    assert result.unsupported == 0
+    assert not result.faithful
 
 
 async def test_citation_supports_only_with_a_quote_from_the_source() -> None:

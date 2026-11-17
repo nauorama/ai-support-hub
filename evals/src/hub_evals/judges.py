@@ -134,14 +134,22 @@ class ClaimResult(_Result):
 
 class FaithfulnessResult(_Result):
     claims: list[ClaimResult]
+    # The draft has `[n]` markers, so it states something a source must support.
+    cites: bool = False
 
     @property
     def unsupported(self) -> int:
         return sum(not claim.supported for claim in self.claims)
 
     @property
+    def unchecked(self) -> bool:
+        """A cited draft for which the judge listed no claim: it checked nothing, so the draft
+        counts as unfaithful. Otherwise a lazy judge could pass a wrong answer."""
+        return self.cites and not self.claims
+
+    @property
     def faithful(self) -> bool:
-        return self.unsupported == 0
+        return self.unsupported == 0 and not self.unchecked
 
 
 class CitationResult(_Result):
@@ -194,15 +202,38 @@ def quote_in(quote: str, text: str) -> bool:
 
 # A sentence ends at `.`, `!` or `?` followed by white space or the end, and takes the `[n]`
 # markers written after its full stop (the write prompt puts them "right after the sentence").
-# A full stop inside a number (`1.5%`) is not an end.
+# A full stop inside a number (`1.5%`) is not an end. Two full stops are not an end either: the
+# one of a list number at the start of a line (`1. Open the app`) and the one of an
+# abbreviation (`e.g.`, `approx.`); otherwise the marker would land in a fragment.
 _SENTENCE = re.compile(r"\S.*?(?:[.!?]+(?:\s*\[\d+\])*(?=\s|\Z)|\Z)", re.DOTALL)
+_LIST_NUMBER = re.compile(r"\s*(?:\d+|[a-zA-Z])[.)]\s+")
+_ABBREVIATIONS = frozenset(
+    {"e.g.", "i.e.", "etc.", "approx.", "incl.", "vs.", "no.", "min.", "max.", "mr.", "mrs.", "ms."}
+)
+
+
+def _ends_with_abbreviation(sentence: str) -> bool:
+    words = sentence.split()
+    return bool(words) and words[-1].lstrip("([\"'").casefold() in _ABBREVIATIONS
 
 
 def sentences(text: str) -> list[str]:
-    """The sentences of a draft, each with its markers; paragraphs never join."""
+    """The sentences of a draft, each with its markers; paragraphs never join. A list number
+    at the start of a line stays with its item, and an abbreviation does not end a sentence."""
     found: list[str] = []
-    for paragraph in text.splitlines():
-        found.extend(match.group(0).strip() for match in _SENTENCE.finditer(paragraph))
+    for line in text.splitlines():
+        number = _LIST_NUMBER.match(line)
+        prefix = number.group(0).strip() + " " if number else ""
+        rest = line[number.end() :] if number else line
+        pending = ""
+        for match in _SENTENCE.finditer(rest):
+            part = match.group(0).strip()
+            pending = f"{pending} {part}" if pending else part
+            if not _ends_with_abbreviation(pending) or match.end() == len(rest):
+                found.append(prefix + pending)
+                prefix, pending = "", ""
+        if pending:
+            found.append(prefix + pending)
     return [sentence for sentence in found if sentence]
 
 
@@ -351,7 +382,7 @@ async def judge_faithfulness(
                 quote_found=found,
             )
         )
-    return FaithfulnessResult(claims=results)
+    return FaithfulnessResult(claims=results, cites=bool(_MARKER.search(draft)))
 
 
 async def judge_citation(

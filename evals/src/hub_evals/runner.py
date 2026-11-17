@@ -18,9 +18,13 @@ run's own cost limit in place of the daily budget, and the disk cache.
 - **Cost.** Before the first call the runner prints an estimate (input tokens ≈ characters / 4,
   output tokens = the role's `max_tokens`, cached calls free) and stops when it is above
   `EVAL_MAX_COST_USD` in real mode. While the run goes, each ticket checks the money already paid
-  in this run before its first model call; once the limit is reached the remaining tickets are
-  not run (and not written, so a resume with a higher limit runs them). The limit is soft by up
-  to the tickets already in flight. In fake mode nothing is paid and the limit does not apply.
+  in this run before its first model call, and every judge call checks it again; once the limit
+  is reached the remaining tickets are not run or judged (and not written, so a resume with a
+  higher limit runs them). The limit is soft by up to the answer calls of the tickets already in
+  flight and one judge call each. Money paid for a ticket that is not written counts in this
+  run only: a resume starts from the written results, and the disk cache serves the paid
+  answers again for free (with `--no-cache` they are paid again). In fake mode nothing is paid
+  and the limit does not apply.
 - **Judges** (P4-05, on by default; `--no-judges` turns them off): after a ticket's run, its
   draft goes to the LLM judges (`hub_evals.judges`): key facts, faithfulness against the cited
   documents, and one citation call per marked sentence. Judge calls use the same gateway, cache
@@ -34,12 +38,13 @@ The output names counts only, never ticket text. The test set is never read (AGE
 import argparse
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import logging
 import subprocess
 import sys
 import time
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -556,9 +561,12 @@ async def run_eval_ticket(pipeline: Pipeline, ticket: Ticket) -> files.TicketRes
 @dataclass
 class CallTally:
     """Wraps the recorder of one ticket's judge gateway: counts its `llm_calls` rows, their
-    cost and what was paid (rows with mode `real`; a cache hit is `fake`)."""
+    cost and what was paid (rows with mode `real`; a cache hit is `fake`). Each paid call goes
+    into the run's cost limit as it is recorded, so a judge that fails later (an outage, the
+    limit) loses none of the money already paid."""
 
     inner: CallRecorder
+    limit: CostLimit | None = None
     calls: int = 0
     cost_usd: Decimal = Decimal(0)
     paid_cost_usd: Decimal = Decimal(0)
@@ -568,6 +576,8 @@ class CallTally:
         self.cost_usd += call.cost_usd
         if call.mode == LlmCallMode.REAL:
             self.paid_cost_usd += call.cost_usd
+            if self.limit is not None:
+                self.limit.add(call.cost_usd)
 
     async def record(self, call: LlmCallRecord) -> None:
         await self.inner.record(call)
@@ -594,21 +604,27 @@ async def judge_ticket(
     ticket: Ticket,
     draft: files.DraftOut,
     sources: Mapping[str, KbSource],
+    limit: CostLimit | None = None,
 ) -> files.Judgements:
     """The judges of one draft (eval plan §5). Key facts are judged on every draft (an empty
     one states none, without a call); faithfulness and citations only on an answer. The
     evidence of faithfulness is the cited documents, as the writer cited them. An outage
     (`LlmUnavailableError`) is raised: the result is not written and a resume judges again.
-    Any other judge error is noted and leaves the ticket out of that metric."""
-    tally = CallTally(gateway.recorder)
+    Any other judge error is noted and leaves the ticket out of that metric.
+
+    `limit`: the run's cost limit. It is checked before every judge call (`BudgetExceededError`
+    is raised, like an outage) and gets each paid call as it is recorded."""
+    tally = CallTally(gateway.recorder, limit)
     judge_gateway = dataclasses.replace(gateway, recorder=tally)
     errors: dict[str, str] = {}
     body = draft.body if draft.can_answer else ""
     cited = cited_sources(draft, sources)
 
-    async def attempt[T](name: str, job: Awaitable[T]) -> T | None:
+    async def attempt[T](name: str, job: Callable[[], Awaitable[T]]) -> T | None:
+        if limit is not None:
+            await limit.check()
         try:
-            return await job
+            return await job()
         except LlmUnavailableError:
             raise
         except LlmError as exc:
@@ -618,7 +634,7 @@ async def judge_ticket(
     key_facts = (
         await attempt(
             "key_facts",
-            judging.judge_key_facts(
+            lambda: judging.judge_key_facts(
                 judge_gateway, judge_set.key_facts, draft=body, key_facts=ticket.key_facts
             ),
         )
@@ -633,7 +649,7 @@ async def judge_ticket(
         )
         faithfulness = await attempt(
             "faithfulness",
-            judging.judge_faithfulness(
+            lambda: judging.judge_faithfulness(
                 judge_gateway, judge_set.faithfulness, draft=body, evidence=evidence
             ),
         )
@@ -643,7 +659,8 @@ async def judge_ticket(
                 continue  # a marker without a citation: found by the code check
             verdict = await attempt(
                 "citation",
-                judging.judge_citation(
+                functools.partial(
+                    judging.judge_citation,
                     judge_gateway,
                     judge_set.citation,
                     marker=marker,
@@ -698,6 +715,9 @@ class Report:
     estimate: Estimate | None = None
     cache_hits: int = 0
     cache_misses: int = 0
+    # Paid in this run directory: written results (resumed ones included) and the calls of
+    # this run, also those of tickets that were not written.
+    spent_usd: Decimal = Decimal(0)
     lines: list[str] = field(default_factory=list)
 
 
@@ -856,6 +876,7 @@ async def _run(
     by_id = {source.id: source for source in sources}
     if limit.enforced and limit.spent + report.estimate.cost_usd > limit.limit:
         report.stopped_by_estimate = True
+        report.spent_usd = limit.spent
         _finish(run_dir, config, tickets, results_path, report, cache)
         return report
 
@@ -883,19 +904,24 @@ async def _run(
                     # answer comes from the cache).
                     report.stopped_at_cost_limit = True
                     return
+                # The judges' paid calls go into the limit as they are recorded, also when a
+                # later judge call fails (`CallTally`).
                 try:
                     judgements = await judge_ticket(
-                        pipeline.gateway, judge_set, ticket, result.draft, by_id
+                        pipeline.gateway, judge_set, ticket, result.draft, by_id, limit
                     )
                 except LlmUnavailableError:
                     report.unavailable += 1
                     return
-                limit.add(judgements.paid_cost_usd)
+                except BudgetExceededError:
+                    report.stopped_at_cost_limit = True
+                    return
                 result = result.model_copy(update={"judges": judgements})
             files.append_result(results_path, result)
             report.ran += 1
 
     await asyncio.gather(*(one(ticket) for ticket in todo))
+    report.spent_usd = limit.spent
     _finish(run_dir, config, tickets, results_path, report, cache)
     return report
 

@@ -198,6 +198,13 @@ def test_problems_of_one_ticket() -> None:
         "judge citation failed (E)",
     ]
     assert r.problems(ticket("T-0002"), result("T-0002")) == []
+    unchecked = judged(supported=()).model_copy(
+        update={"faithfulness": FaithfulnessResult(claims=[], cites=True)}
+    )
+    assert r.problems(ticket("T-0002"), result("T-0002", judges=unchecked)) == [
+        "no claim listed by the faithfulness judge"
+    ]
+    assert r.wrong_answer(result("T-0002", judges=unchecked)) is True
     failed = r.problems(
         ticket("T-0003", should_escalate=True, expected_reason="no_kb_answer"),
         result(
@@ -262,6 +269,7 @@ def test_evaluate_counts_with_known_answers() -> None:
     assert coverage["tickets_without_key_facts"] == 1
     faithfulness = metrics["answers"]["faithfulness"]
     assert (faithfulness["answered"], faithfulness["unfaithful"]["count"]) == (2, 1)
+    assert faithfulness["no_claims_listed"] == 0
     assert metrics["retrieval"]["covered"] == 0
     assert metrics["retrieval"]["excluded_no_kb_search"] == 4
     assert metrics["cost"]["per_ticket_usd"] == "0.004"

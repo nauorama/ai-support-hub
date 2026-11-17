@@ -395,7 +395,9 @@ async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
     assert judges.key_facts is not None
     assert judges.key_facts.coverage == 0.0
     assert judges.faithfulness is not None
-    assert judges.faithfulness.faithful
+    # The fixed verdict lists no claim for a cited answer: counted unfaithful.
+    assert judges.faithfulness.unchecked
+    assert not judges.faithfulness.faithful
     assert len(judges.citations) >= 1
     assert judges.llm_calls == provider.judge_calls == 2 + len(judges.citations)
     assert judges.paid_cost_usd == judges.cost_usd > 0
@@ -418,14 +420,88 @@ async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
     assert "unvalidated, same model family" in text
     assert "key-fact coverage 0.00" in text
     assert "invalid citation" in text
+    assert "no claim listed by the faithfulness judge" in text
 
-    # A resume judges nothing again: the result is complete.
+    # A resume judges nothing again: the result is complete. Its limit starts from what the
+    # written result paid, judges included.
     again = await run(_settings(eval_db), options, provider=provider)
     assert (again.skipped, again.ran) == (1, 0)
     assert provider.judge_calls == judges.llm_calls
+    assert result.paid_total_usd > result.paid_cost_usd > 0
+    assert again.spent_usd == result.paid_total_usd
     # Judges are part of the run's fingerprint.
     with pytest.raises(EvalSetupError, match="judge_prompt_versions"):
         await run(_settings(eval_db), dataclass_replace(options, judges=False), provider=provider)
+
+
+def _paid(urls: Urls) -> Decimal:
+    """All money paid in the evaluation database so far (`llm_calls` rows of mode `real`)."""
+    ((total,),) = run_sql(
+        urls, "SELECT coalesce(sum(cost_usd), 0) FROM llm_calls WHERE mode = 'real'"
+    )
+    return Decimal(total)
+
+
+@dataclass
+class JudgeDownProvider(JudgingProvider):
+    """The answers and the key-facts judge work; the faithfulness judge and its fallback are
+    down."""
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        if request.schema_name == "FaithfulnessVerdict":
+            raise ProviderError("ServiceUnavailable", transient=False)
+        return await super().complete(request)
+
+
+async def test_a_judge_outage_is_not_written_and_its_paid_calls_count(
+    eval_db: Urls, tmp_path: Path
+) -> None:
+    tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
+    options = Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache")
+    before = _paid(eval_db)
+    down = JudgeDownProvider()
+    report = await run(_settings(eval_db), options, provider=down)
+    assert (report.ran, report.unavailable) == (0, 1)
+    assert down.judge_calls == 1  # key facts, then faithfulness is down
+    assert files.read_results(tmp_path / "run" / files.RESULTS_FILE) == []
+    # The limit has every paid call: the answer and the key-facts judge.
+    assert report.spent_usd == _paid(eval_db) - before > 0
+
+    # A resume judges again. The answer and the key-facts verdict come from the cache.
+    provider = JudgingProvider()
+    resumed = await run(_settings(eval_db), options, provider=provider)
+    assert (resumed.ran, resumed.unavailable) == (1, 0)
+    assert provider.inner.calls == 0
+    (result,) = files.read_results(tmp_path / "run" / files.RESULTS_FILE)
+    assert result.judges is not None
+    assert provider.judge_calls == 1 + len(result.judges.citations)  # faithfulness, citations
+
+
+@dataclass
+class CostlyProvider(JudgingProvider):
+    """Answers that cost far more than the estimate: the limit is reached before the judges."""
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        response = await super().complete(request)
+        if request.schema_name in {"KeyFactsVerdict", "FaithfulnessVerdict", "CitationVerdict"}:
+            return response
+        return response.model_copy(update={"usage": Usage(input_tokens=5_000_000)})
+
+
+async def test_the_limit_reached_before_the_judges_writes_nothing(
+    eval_db: Urls, tmp_path: Path
+) -> None:
+    tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
+    options = Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache")
+    provider = CostlyProvider()
+    settings = _settings(eval_db, eval_max_cost_usd=1.0)
+    report = await run(settings, options, provider=provider)
+    assert not report.stopped_by_estimate
+    assert report.stopped_at_cost_limit
+    assert report.ran == 0
+    assert provider.judge_calls == 0
+    assert report.spent_usd > Decimal("1.0")
+    assert files.read_results(tmp_path / "run" / files.RESULTS_FILE) == []
 
 
 def dataclass_replace(options: Options, **changes: object) -> Options:
