@@ -4,7 +4,7 @@
 - `hybrid` (default): Qdrant Query API with two prefetches (dense top 20, sparse BM25 top 20)
   fused with reciprocal rank fusion. Exact tokens (`SWIFT`) come from BM25, loose wording
   (`my money is stuck`) from the dense vector (ADR-0005).
-  **Exact error-code lookup** (owner decision, P5-02): an error code in the query (`ERR-2003`,
+  **Exact error-code lookup** (ADR-0020, P5-02): an error code in the query (`ERR-2003`,
   any case) puts its chunk `error-codes#ERR-2003` first, then the fused hits without it. BM25
   alone cannot do this: FastEmbed's tokenizer splits `ERR-2003` into `err` and `2003`, three
   articles mention the same code, and the small dense model barely tells codes apart, so the

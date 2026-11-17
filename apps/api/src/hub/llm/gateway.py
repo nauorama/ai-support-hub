@@ -20,9 +20,10 @@ plan §4): a hit makes no provider call and is recorded with mode `fake`, becaus
 stored answer and nothing was paid.
 
 The budget guard (G8, `hub/llm/budget.py`) runs before every `online` chat call, before the G2
-scan and before any provider call: a refused call is no attempt and writes no row. Embedding
-calls skip it: the embedding model runs locally (`LocalEmbeddingProvider`, ADR-0018) and costs
-nothing, so a spent budget must not stop knowledge-base search or indexing.
+scan and before any provider call: a refused call is no attempt and writes no row. Calls to a
+local `fastembed/` embedding model skip it: it runs on our CPU (`LocalEmbeddingProvider`,
+ADR-0018) and costs nothing, so a spent budget must not stop knowledge-base search or
+indexing. Any other embedding model is checked like a chat call.
 """
 
 import asyncio
@@ -46,6 +47,7 @@ from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus
 from hub.guardrails.masking import mask
 from hub.llm.budget import BudgetCheck
 from hub.llm.config import ConfigError, ModelsConfig, RoleConfig, load_models
+from hub.llm.local_embedding import PROVIDER_PREFIX as LOCAL_MODEL_PREFIX
 from hub.llm.local_embedding import LocalEmbeddingProvider
 from hub.llm.pricing import Pricing, load_pricing
 from hub.llm.recorder import CallRecorder
@@ -509,7 +511,13 @@ class Gateway:
         self, texts: Sequence[str], *, call: CallContext, role: str = "embedding"
     ) -> Embeddings:
         request = self.embedding_request(texts, role)
-        outcome = await self._run([request], call, self.provider.embed, budget_check=False)
+        # Only the local model is free (ADR-0018); any other embedding model is guarded.
+        outcome = await self._run(
+            [request],
+            call,
+            self.provider.embed,
+            budget_check=not request.model.startswith(LOCAL_MODEL_PREFIX),
+        )
         if len(outcome.response.vectors) != len(texts):
             raise LlmUnavailableError(f"role {role}: wrong number of vectors")
         return Embeddings(
@@ -599,7 +607,7 @@ class Gateway:
     ) -> _Outcome:
         """`first_index`: position of `requests[0]` in the role's model list (1 when the call
         starts at the fallback), so `_Outcome.index` always names the model's role.
-        `budget_check`: false only for the free local embedding model (module docstring)."""
+        `budget_check`: false only for a local `fastembed/` embedding model (module docstring)."""
         if budget_check and call.context == LlmCallContext.ONLINE and self.budget is not None:
             await self.budget.check()
         # The model and fallback requests differ only in model and parameters: one scan covers

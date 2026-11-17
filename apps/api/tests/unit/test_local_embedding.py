@@ -8,9 +8,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hub.domain.enums import LlmCallContext, LlmCallStatus, LlmNode
 from hub.llm import local_embedding
+from hub.llm.config import parse_models
 from hub.llm.gateway import embedder
 from hub.llm.local_embedding import (
     LocalEmbeddingProvider,
@@ -28,7 +30,7 @@ from hub.llm.schemas import (
     ProviderRequest,
 )
 
-from ._llm import MemoryRecorder, ScriptedProvider, make_gateway
+from ._llm import MODELS_YAML, MemoryRecorder, ScriptedProvider, make_gateway
 
 MODEL = "fastembed/BAAI/bge-small-en-v1.5"
 
@@ -204,3 +206,26 @@ async def test_the_embedder_helper_calls_the_gateway_with_its_context(tmp_path: 
     call = CallContext(context=LlmCallContext.EVAL, node=LlmNode.EMBEDDING)
     assert await embedder(gateway, call)(["abc"]) == [[3.0, 1.0]]
     assert [row.context for row in recorder.rows] == [LlmCallContext.EVAL]
+
+
+async def test_an_embedding_model_that_is_not_local_is_still_budget_checked(
+    tmp_path: Path,
+) -> None:
+    class Refuses:
+        async def check(self) -> None:
+            raise BudgetExceededError(Decimal("0.5"), Decimal("0.5"))
+
+    data = yaml.safe_load(MODELS_YAML.read_text(encoding="utf-8"))
+    data["models"]["voyage/voyage-3"] = {"tools": False}
+    data["roles"]["embedding"]["model"] = "voyage/voyage-3"
+    recorder = MemoryRecorder()
+    gateway = make_gateway(
+        LocalEmbeddingProvider(ScriptedProvider({}), tmp_path, Loader()),
+        recorder=recorder,
+        models=parse_models(data),
+        budget=Refuses(),
+    )
+    call = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.EMBEDDING)
+    with pytest.raises(BudgetExceededError):
+        await gateway.embed(["a"], call=call)
+    assert recorder.rows == []  # refused before any attempt

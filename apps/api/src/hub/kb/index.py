@@ -247,10 +247,15 @@ class KbIndex:
             },
             sparse_vectors_config={SPARSE: models.SparseVectorParams(modifier=models.Modifier.IDF)},
         )
-        for field_name in KEYWORD_INDEXES:
-            await self._client.create_payload_index(
-                name, field_name=field_name, field_schema=models.PayloadSchemaType.KEYWORD
-            )
+        try:
+            for field_name in KEYWORD_INDEXES:
+                await self._client.create_payload_index(
+                    name, field_name=field_name, field_schema=models.PayloadSchemaType.KEYWORD
+                )
+        except BaseException:
+            # No half-built collection is left behind.
+            await self._client.delete_collection(name)
+            raise
         return name
 
     async def _move_alias(self, name: str, *, had_alias: bool) -> None:

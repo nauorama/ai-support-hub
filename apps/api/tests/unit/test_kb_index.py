@@ -161,6 +161,19 @@ async def test_a_failed_rebuild_keeps_the_old_index(
     assert {c.name for c in (await client.get_collections()).collections} == {"kb_chunks_v1"}
 
 
+async def test_a_failed_payload_index_leaves_no_half_built_collection(
+    client: AsyncQdrantClient, dense: FakeDense, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("index refused")
+
+    monkeypatch.setattr(client, "create_payload_index", broken)
+    with pytest.raises(RuntimeError, match="index refused"):
+        await KbIndex(client, dense, FakeSparse()).sync(CHUNKS)
+    assert (await client.get_collections()).collections == []
+    assert (await client.get_aliases()).aliases == []
+
+
 async def test_a_collection_with_another_vector_size_is_refused(
     index: KbIndex, client: AsyncQdrantClient
 ) -> None:

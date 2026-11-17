@@ -11,7 +11,10 @@ model is an error, never a download.
 **Pinning.** FastEmbed 0.9.1 has no revision option: it always downloads the revision the
 Hugging Face repository has now (`model_info(...).sha` in `fastembed.common.model_management`).
 The model file is therefore pinned by its SHA-256 (`PINNED_MODELS`), checked after the download
-and again at every load: a changed file stops the setup and every embedding call.
+and again at every load: a changed file stops the setup and every embedding call. Limit: only
+the weights file is hashed. The tokenizer and config files of the same snapshot, and the BM25
+stop-word files (`Qdrant/bm25`), are not; a change to them upstream could change the vectors
+without failing the check (they are small text files, read from the same cached snapshot).
 
 Calls run in a worker thread (`asyncio.to_thread`): ONNX inference is CPU work and must not
 block the event loop.
