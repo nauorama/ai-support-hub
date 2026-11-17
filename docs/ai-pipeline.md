@@ -82,6 +82,8 @@ Keep the state small: chunk texts are stored once in `evidence`; nodes do not co
 
 Every node: writes an audit record for its decision, emits a `run.status` event at start, and has a timeout.
 
+How "fails into" is built (P6-01, `hub/graph/build.py`): failures have no edges of their own, so the drawn graph is the one above. A node that fails into a handoff records `<node>:<error class>` in `errors`; the nodes up to `verify` are then skipped, and `policy_gate` (after intake or triage) or `decide` (after research, write or verify) route to `handoff_prep` (row 2). A timeout is a failure (`TimeoutError`); a model node's timeout is longer than one call (`timeout_s`) and shorter than all retries and the fallback in a row. From `handoff_prep` on, a failure stops the graph and the run's last resort (`hub/graph/run.py`) marks the run `failed` and hands the ticket off. Until P6-02 and P6-03, `policy_gate` and `decide` apply row 2 only (everything else: approval, `auto_reply_off`), `human_review` stores the draft without pausing, `handoff_prep` sends no notice, and `act` has nothing to run.
+
 ## 4. Research step in detail
 
 Tools given to the model (OpenAI-style function schemas through LiteLLM):
@@ -332,6 +334,6 @@ For evaluation runs, the workflow accepts a `variant` in the run config. ADR-001
 | Variant | Meaning |
 |---|---|
 | `b0_full_kb` | No retrieval: all external articles in the system part of the write prompt inside one `<kb>` tag, separated by plain-text `Document id:` lines (with prompt caching); citations point to document ids (P3-05, `hub/graph/linear.py`, `hub/kb/full_text.py`). |
-| `rag_hybrid` (default), `rag_dense` | Retrieval settings (no reranker variant, ADR-0018). Until P6-01 the linear run (`hub/graph/linear.py`, P5-03) does step 0 of `research` only: one search with the masked ticket text, `external`, top 6, hybrid or dense; the hits go into the user part of `write/v2` (`Source id:` lines, `hub/kb/chunk_text.py`) and citations name chunk ids. `write/v1` stays the B0 prompt. The linear run verifies the draft of a RAG variant (P5-04, §5); B0 has no verify step. The evaluation runner runs all three; for the RAG variants it indexes the evaluation KB in Qdrant under its own alias `eval_kb_chunks` (P5-05, eval plan §4). |
+| `rag_hybrid` (default), `rag_dense` | Retrieval settings (no reranker variant, ADR-0018). The `research` node (`hub/graph/nodes/research.py`; P5-03, the graph P6-01) does step 0 only: one search with the masked ticket text, `external`, top 6, hybrid or dense; the hits go into the user part of `write/v2` (`Source id:` lines, `hub/kb/chunk_text.py`) and citations name chunk ids. `write/v1` stays the B0 prompt. The `verify` node checks the draft of a RAG variant (P5-04, §5); B0 has no verify step. The evaluation runner runs all three; for the RAG variants it indexes the evaluation KB in Qdrant under its own alias `eval_kb_chunks` (P5-05, eval plan §4). |
 
 Variants are for evaluation only; production uses the default.

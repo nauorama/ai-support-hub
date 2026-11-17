@@ -31,7 +31,7 @@ the checks of groups 4 and 5, with codes `<field>:<code>` (e.g.
 
 The checks run on the model's answer as it wrote it, with the run's placeholders restored and
 **before** the card mask and before markers without a citation are removed
-(`hub.graph.linear`): a check must see what the model did, not what the floor repaired.
+(`hub.graph.nodes.verify`): a check must see what the model did, not what the floor repaired.
 
 Canary strings and prompt fragments (security T5, T6) come with the attack suite (P8-02).
 Pure functions; no imports from the rest of the project except the other guardrails.

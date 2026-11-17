@@ -25,7 +25,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from hub.config import Settings
 from hub.db.session import connect
 from hub.deps import Container, build_pipeline
-from hub.graph.linear import Pipeline, run_ticket
+from hub.graph.pipeline import Pipeline
+from hub.graph.run import run_ticket
 from hub.kb.loader import load_kb, read_kb
 from hub.llm.budget import BudgetGuard
 from hub.llm.gateway import Provider

@@ -70,12 +70,26 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# Owned by langgraph-checkpoint-postgres (migration 0009), not by the SQLAlchemy models.
+CHECKPOINT_TABLES = frozenset(
+    {"checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"}
+)
+
+
+def include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    """Leave the checkpoint tables out of autogenerate and `alembic check`."""
+    return not (type_ == "table" and name in CHECKPOINT_TABLES)
+
+
 def do_run_migrations(connection: Connection) -> None:
     # compare_server_default: `alembic check` also compares server defaults (now(), '[]'::jsonb,
     # true, 1), which it skips by default; CHECK constraints are still not compared
     # (tests/integration/test_schema_checks.py does that).
     context.configure(
-        connection=connection, target_metadata=target_metadata, compare_server_default=True
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_server_default=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()

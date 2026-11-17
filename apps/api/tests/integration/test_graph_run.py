@@ -1,7 +1,8 @@
-"""The phase-3 run through the API against Postgres and Qdrant, with recorded model answers
-(P3-05, retrieval P5-03).
+"""The workflow graph through the API against Postgres and Qdrant, with recorded model answers
+(P3-05, retrieval P5-03, the graph and its Postgres checkpointer P6-01).
 
-`POST /tickets` starts `intake → triage → search → write`; every run ends with the ticket in
+`POST /tickets` starts the graph (`intake → triage → policy_gate → research → write → verify →
+decide → human_review → act → respond`); every run ends with the ticket in
 `pending_approval` and a draft, or, on any error, `handed_off` with reason `system_error`. The
 model answers come from `tests/fixtures/llm` (fake mode): the tickets are the ones in
 `tests/fixtures/run/tickets.jsonl`, whose requests `make llm-requests` wrote with the search hits
@@ -9,13 +10,14 @@ in `tests/fixtures/run/evidence.json`. The search here runs on the real Qdrant s
 real local models, and a test checks it finds those same hits.
 """
 
+import asyncio
 import dataclasses
 import json
 import uuid
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -27,19 +29,34 @@ from hub.audit import ChainCheck, verify_chain
 from hub.config import Settings
 from hub.db.session import connect
 from hub.deps import Container, build_pipeline
+from hub.domain.draft import DraftAnswer
 from hub.domain.enums import TicketStatus
-from hub.graph import linear
-from hub.graph.linear import (
+from hub.graph import build as build_module
+from hub.graph import run as run_module
+from hub.graph.build import compile_graph
+from hub.graph.checkpoint import CheckpointStore
+from hub.graph.context import GraphContext
+from hub.graph.nodes import handoff_prep
+from hub.graph.nodes import human_review as human_review_node
+from hub.graph.nodes import intake as intake_node
+from hub.graph.nodes import research as research_node
+from hub.graph.nodes import respond as respond_node
+from hub.graph.nodes import triage as triage_node
+from hub.graph.nodes import verify as verify_node
+from hub.graph.pipeline import (
     GRAPH_VERSION,
     RUN_FAILED_DETAIL,
     SEARCH_MODES,
     SEARCH_TOP_K,
     VARIANT,
     RunOutcome,
-    run_ticket,
+    run_failed_problem,
 )
+from hub.graph.run import run_ticket
+from hub.graph.state import TicketState, run_input
 from hub.kb.full_text import load_external_sources, sources_from_files
 from hub.kb.loader import read_kb
+from hub.kb.retriever import KbChunk
 from hub.kb.service import EMBEDDING_CALL, KbServices, build_kb_services, reload_kb
 from hub.llm.gateway import build_gateway, embedder
 from hub.llm.recorder import DbCallRecorder
@@ -61,7 +78,7 @@ from ._api import (
 from ._compose import ROOT
 from ._kb import MODEL_DIR
 
-DATABASE = "hub_linear_run_test"
+DATABASE = "hub_graph_run_test"
 KB_DIR = ROOT / "data" / "kb"
 TICKETS = {
     json.loads(line)["id"]: json.loads(line)["ticket"]
@@ -460,15 +477,51 @@ def test_a_failed_model_call_hands_the_ticket_to_a_human(app: FastAPI, run_db: U
     assert _actions(run_db)[-1] == "route.decided"
 
 
-def test_a_run_without_a_search_hands_the_ticket_to_a_human(run_db: Urls, qdrant: str) -> None:
-    _truncate(run_db)
-    add_customer(run_db)
-    with TestClient(create_app(_container(run_db, qdrant, search=False))) as application:
-        ticket_id, events = _post(customer_client(cast(FastAPI, application.app)), SEPA)
-    assert events[-2] == ("ticket.status", {"status": "handed_off"})
-    assert _one(run_db, "SELECT error FROM runs WHERE ticket_id = %s", ticket_id) == (
-        "KbUnavailableError",
+async def test_a_run_without_a_search_is_degraded_and_the_draft_cannot_answer(
+    run_db: Urls, qdrant: str
+) -> None:
+    """ai-pipeline §3 (P6-01): a failed research step continues with what it has. Without a
+    search the writer has nothing to cite; its draft waits for the operator, and the audit
+    record says the research was degraded. (The linear run handed such a ticket off.)"""
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    triage = {
+        "intent": "withdrawal_issue",
+        "secondary_intent": None,
+        "urgency": "normal",
+        "wants_human": False,
+        "reports_unauthorised_activity": False,
+        "is_complaint_or_legal": False,
+        "asks_for_action": "none",
+        "injection_suspected": False,
+        "summary": "Asks how long a SEPA withdrawal takes.",
+    }
+    draft = {
+        "can_answer": False,
+        "missing_information": "The sources do not say how long a SEPA withdrawal takes.",
+        "answer": "",
+        "citations": [],
+        "proposed_actions": [],
+    }
+    provider = _Scripted([json.dumps(triage), json.dumps(draft)])
+
+    outcome, emitted = await _run(
+        run_db, qdrant, ticket_id, message_id, provider=provider, search=False
     )
+
+    assert (outcome.failed, outcome.ticket_status) == (False, TicketStatus.PENDING_APPROVAL)
+    assert [data["step"] for name, data in emitted if name == "run.status"] == [
+        "understanding",
+        "searching",
+        "writing",
+        "checking",
+    ]
+    assert provider.answers == []  # the code check refused the empty answer: no verify call
+    can_answer, evidence = _one(
+        run_db, "SELECT can_answer, evidence FROM drafts WHERE ticket_id = %s", ticket_id
+    )
+    assert (can_answer, evidence["chunks"]) == (False, [])
+    created = _one(run_db, "SELECT details FROM audit_log WHERE action = 'draft.created'")[0]
+    assert created["research_degraded"] is True
 
 
 def _ticket_with_message(
@@ -510,7 +563,7 @@ class _Scripted:
         )
 
     async def embed(self, request: ProviderRequest) -> ProviderResponse:
-        raise AssertionError("no embeddings in the linear run")
+        raise AssertionError("no embeddings in the run")
 
 
 async def _run(
@@ -520,11 +573,13 @@ async def _run(
     message_id: uuid.UUID,
     on_event: Callable[[str, dict[str, Any]], None] = lambda _name, _data: None,
     provider: _Scripted | None = None,
+    *,
+    search: bool = True,
 ) -> tuple[RunOutcome, list[tuple[str, dict[str, Any]]]]:
     settings = _settings(urls, qdrant_url)
     database = connect(settings.database_url.get_secret_value())
     kb = _kb_services(settings, database)
-    pipeline = build_pipeline(settings, database, kb.retriever)
+    pipeline = build_pipeline(settings, database, kb.retriever if search else None)
     if provider is not None:
         pipeline = dataclasses.replace(
             pipeline, gateway=dataclasses.replace(pipeline.gateway, provider=provider)
@@ -543,6 +598,7 @@ async def _run(
             emit=emit,
         )
     finally:
+        await pipeline.checkpoints.close()
         await kb.close()
         await database.dispose()
     return outcome, emitted
@@ -644,18 +700,20 @@ async def test_a_failure_that_cannot_be_recorded_still_ends_the_stream(
 ) -> None:
     """When even the handoff cannot be written (database down), the stream gets `error` and the
     ticket's real status, `processing` (it waits in the queue); the run stays `running` for
-    `recover-runs` (phase 6)."""
+    `recover-runs` (P6-03). The model call fails (no recording), so the graph goes to
+    `handoff_prep`, which cannot write either; then the run's last resort cannot."""
     ticket_id, message_id = _ticket_with_message(run_db, NOT_RECORDED)
 
     async def broken(*_args: object) -> None:
         raise ConnectionError
 
-    monkeypatch.setattr(linear, "_fail", broken)
+    monkeypatch.setattr(handoff_prep, "hand_off", broken)
+    monkeypatch.setattr(run_module, "fail", broken)
     outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id)
 
     assert (outcome.failed, outcome.ticket_status) == (True, None)
     assert emitted[1:] == [
-        ("error", linear.run_failed_problem()),
+        ("error", run_failed_problem()),
         ("ticket.status", {"status": "processing"}),
     ]
     assert _one(run_db, "SELECT status FROM runs WHERE ticket_id = %s", ticket_id) == ("running",)
@@ -813,3 +871,255 @@ def test_the_compose_api_service_sees_the_fixtures_config_and_prompts() -> None:
     }
     assert expected <= set(volumes)
     assert all(volumes[mount] for mount in expected), "mount them read-only"
+
+
+# --- the graph: checkpoints, timeouts, nodes alone (P6-01) ----------------------------------
+
+TRIAGE = {
+    "intent": "withdrawal_issue",
+    "secondary_intent": None,
+    "urgency": "normal",
+    "wants_human": False,
+    "reports_unauthorised_activity": False,
+    "is_complaint_or_legal": False,
+    "asks_for_action": "none",
+    "injection_suspected": False,
+    "summary": "Asks how long a SEPA withdrawal takes.",
+}
+
+
+async def test_the_run_checkpoints_its_state_in_postgres_under_the_ticket(
+    run_db: Urls, qdrant: str
+) -> None:
+    """ai-pipeline §1: `thread_id` = ticket id, the Postgres checkpointer, written as the app
+    role (the checkpoint tables got its grants from migration 0001's default privileges)."""
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    outcome, _ = await _run(run_db, qdrant, ticket_id, message_id)
+    assert outcome.ticket_status == TicketStatus.PENDING_APPROVAL
+
+    [(count,)] = run_sql(
+        run_db, "SELECT count(*) FROM checkpoints WHERE thread_id = %s", str(ticket_id)
+    )
+    assert count > 0
+    store = CheckpointStore.postgres(run_db[1])
+    try:
+        graph = await store.graph(compile_graph)
+        snapshot = await graph.aget_state({"configurable": {"thread_id": str(ticket_id)}})
+    finally:
+        await store.close()
+    state = snapshot.values
+    assert snapshot.next == ()  # the run ended (no pause before P6-03)
+    assert (state["run_id"], state["route"]) == (str(outcome.run_id), "approval")
+    assert state["draft"] is not None
+    assert state["draft"].can_answer
+    assert [chunk.chunk_id for chunk in state["evidence"].chunks] == EVIDENCE["run_01"]
+
+
+async def test_a_node_that_runs_too_long_hands_the_ticket_off(
+    run_db: Urls, qdrant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+
+    @dataclasses.dataclass
+    class _Stuck(_Scripted):
+        async def complete(self, request: ProviderRequest) -> ProviderResponse:
+            await asyncio.sleep(5)
+            raise AssertionError("the node timeout should have stopped this call")
+
+    specs = [
+        dataclasses.replace(spec, timeout_s=0.2) if spec.name == "triage" else spec
+        for spec in build_module.NODES
+    ]
+    monkeypatch.setattr(build_module, "NODES", tuple(specs))
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id, provider=_Stuck([]))
+
+    assert (outcome.failed, outcome.ticket_status) == (True, TicketStatus.HANDED_OFF)
+    assert emitted[-2:] == [
+        ("error", run_failed_problem()),
+        ("ticket.status", {"status": "handed_off"}),
+    ]
+    assert _one(
+        run_db, "SELECT status, route, route_reasons, error FROM runs WHERE id = %s", outcome.run_id
+    ) == ("failed", "handoff", ["system_error"], "TimeoutError")
+    assert run_sql(run_db, "SELECT count(*) FROM drafts WHERE ticket_id = %s", ticket_id) == [(0,)]
+
+
+async def _node_context(
+    urls: Urls, qdrant_url: str, answers: list[str]
+) -> tuple[GraphContext, list[tuple[str, dict[str, Any]]], Any]:
+    settings = _settings(urls, qdrant_url)
+    database = connect(settings.database_url.get_secret_value())
+    pipeline = build_pipeline(settings, database, None)
+    pipeline = dataclasses.replace(
+        pipeline, gateway=dataclasses.replace(pipeline.gateway, provider=_Scripted(answers))
+    )
+    emitted: list[tuple[str, dict[str, Any]]] = []
+
+    async def emit(name: str, data: dict[str, Any]) -> None:
+        emitted.append((name, data))
+
+    return GraphContext(pipeline=pipeline, emit=emit), emitted, database
+
+
+def _new_run(urls: Urls, ticket_id: uuid.UUID, message_id: uuid.UUID) -> uuid.UUID:
+    run_id = uuid.uuid4()
+    run_sql(
+        urls,
+        "INSERT INTO runs (id, ticket_id, trigger_message_id, status, graph_version)"
+        " VALUES (%s, %s, %s, 'running', 'graph-v1')",
+        run_id,
+        ticket_id,
+        message_id,
+    )
+    return run_id
+
+
+def _node_state(ticket_id: uuid.UUID, run_id: uuid.UUID, message_id: uuid.UUID) -> TicketState:
+    return run_input(
+        ticket_id=str(ticket_id),
+        run_id=str(run_id),
+        message_id=str(message_id),
+        customer_ref=str(uuid.uuid4()),
+    )
+
+
+async def test_intake_alone_reads_the_ticket_and_replaces_contact_data(
+    run_db: Urls, qdrant: str
+) -> None:
+    ticket_id, message_id = _ticket_with_message(run_db, "Write to ana@example.com please")
+    run_id = _new_run(run_db, ticket_id, message_id)
+    ctx, emitted, database = await _node_context(run_db, qdrant, [])
+    try:
+        update = await intake_node.run(_node_state(ticket_id, run_id, message_id), ctx)
+    finally:
+        await database.dispose()
+    assert update["message_for_llm"] == "Write to <EMAIL_1> please"
+    assert update["placeholders"] == {"<EMAIL_1>": "ana@example.com"}
+    assert update["history_for_llm"] == "(no earlier messages)"
+    assert emitted == []  # the wrapper sends the step, not the node
+    details = _one(run_db, "SELECT details FROM audit_log WHERE action = 'intake.done'")[0]
+    assert details["pii_placeholders"] == {"EMAIL": 1}
+    assert "ana@" not in json.dumps(details)
+
+
+async def test_triage_alone_saves_the_decision_on_the_ticket(run_db: Urls, qdrant: str) -> None:
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    run_id = _new_run(run_db, ticket_id, message_id)
+    ctx, _, database = await _node_context(run_db, qdrant, [json.dumps(TRIAGE)])
+    state = _node_state(ticket_id, run_id, message_id)
+    state.update(TicketState(message_for_llm=SEPA))
+    try:
+        update = await triage_node.run(state, ctx)
+    finally:
+        await database.dispose()
+    assert update["triage"] is not None
+    assert update["triage"].intent == "withdrawal_issue"
+    assert set(update["models"]) == {"triage"}
+    assert _one(run_db, "SELECT intent, urgency FROM tickets WHERE id = %s", ticket_id) == (
+        "withdrawal_issue",
+        "normal",
+    )
+    details = _one(run_db, "SELECT details FROM audit_log WHERE action = 'triage.done'")[0]
+    assert details["run_id"] == str(run_id)
+
+
+async def test_handoff_prep_alone_hands_the_ticket_to_a_human(run_db: Urls, qdrant: str) -> None:
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    run_id = _new_run(run_db, ticket_id, message_id)
+    ctx, _, database = await _node_context(run_db, qdrant, [])
+    state = _node_state(ticket_id, run_id, message_id)
+    state.update(TicketState(route="handoff", route_reasons=["budget_exceeded"]))
+    try:
+        update = await handoff_prep.run(state, ctx)
+    finally:
+        await database.dispose()
+    assert update == {"ticket_status": "handed_off"}
+    assert _one(
+        run_db, "SELECT status, last_route, route_reasons FROM tickets WHERE id = %s", ticket_id
+    ) == ("handed_off", "handoff", ["budget_exceeded"])
+    details = _one(run_db, "SELECT details FROM audit_log WHERE action = 'route.decided'")[0]
+    assert (details["route"], details["graph_version"]) == ("handoff", "graph-v1")
+
+
+@pytest.mark.parametrize(
+    ("status", "draft_status"), [("processing", "pending"), ("handed_off", "superseded")]
+)
+async def test_human_review_alone_stores_the_draft_for_the_operator(
+    run_db: Urls, qdrant: str, status: str, draft_status: str
+) -> None:
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA, status=status)
+    run_id = _new_run(run_db, ticket_id, message_id)
+    ctx, _, database = await _node_context(run_db, qdrant, [])
+    chunks = [
+        KbChunk(
+            chunk_id="withdrawal-times#0",
+            doc_id="withdrawal-times",
+            title="How long does a withdrawal take?",
+            section="SEPA withdrawals",
+            url=SEPA_SECTION,
+            text="A SEPA withdrawal takes 1 business day.",
+            visibility="external",
+            score=0.9,
+            rank=1,
+        )
+    ]
+    state = _node_state(ticket_id, run_id, message_id)
+    state.update(
+        TicketState(
+            route="approval",
+            route_reasons=["auto_reply_off"],
+            evidence=research_node.evidence(chunks),
+            draft=DraftAnswer.model_validate(
+                {
+                    "can_answer": True,
+                    "missing_information": None,
+                    "answer": "It takes 1 business day [1].",
+                    "citations": [{"marker": 1, "source_id": chunks[0].chunk_id}],
+                    "proposed_actions": [],
+                }
+            ),
+            verification=verify_node.unavailable(),
+            verify_error="StructuredOutputError",
+            models={"write": "w"},
+        )
+    )
+    try:
+        update = await human_review_node.run(state, ctx)
+        handoff_state = state.copy()
+        handoff_state["route"] = "handoff"
+        skipped = await human_review_node.run(handoff_state, ctx)
+    finally:
+        await database.dispose()
+    assert update == {"ticket_status": "pending_approval" if status == "processing" else status}
+    assert skipped == {}
+    assert _one(run_db, "SELECT status FROM drafts WHERE ticket_id = %s", ticket_id) == (
+        draft_status,
+    )
+    verified = _one(run_db, "SELECT details FROM audit_log WHERE action = 'verify.done'")[0]
+    assert (verified["llm_check"], verified["error"]) == (False, "StructuredOutputError")
+
+
+@pytest.mark.parametrize(
+    ("errors", "expected"),
+    [([], ("completed", None)), (["write:LlmUnavailableError"], ("failed", "LlmUnavailableError"))],
+)
+async def test_respond_alone_records_the_runs_outcome(
+    run_db: Urls, qdrant: str, errors: list[str], expected: tuple[str, str | None]
+) -> None:
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+    run_id = _new_run(run_db, ticket_id, message_id)
+    ctx, _, database = await _node_context(run_db, qdrant, [])
+    state = _node_state(ticket_id, run_id, message_id)
+    state.update(
+        TicketState(route="handoff" if errors else "approval", errors=errors, models={"write": "w"})
+    )
+    try:
+        assert await respond_node.run(state, ctx) == {}
+    finally:
+        await database.dispose()
+    status, error, models, finished = _one(
+        run_db, "SELECT status, error, models, finished_at FROM runs WHERE id = %s", run_id
+    )
+    assert (status, error) == expected
+    assert models == {"write": "w"}
+    assert finished is not None

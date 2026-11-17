@@ -12,7 +12,8 @@ from hub.auth.customer_session import CustomerSessionSigner
 from hub.auth.operator_session import OperatorSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
-from hub.graph.linear import VARIANT, KbSearch, Pipeline, RunTasks, write_prompt_for
+from hub.graph.checkpoint import CheckpointStore
+from hub.graph.pipeline import VARIANT, KbSearch, Pipeline, RunTasks, write_prompt_for
 from hub.kb.service import EMBEDDING_CALL, KbServices, build_kb_services, index_counts
 from hub.llm.budget import BudgetGuard
 from hub.llm.gateway import build_gateway, embedder
@@ -34,7 +35,7 @@ class Container:
     # None in tests that need no database.
     database: Database | None = None
     rate_limits: RateLimits = field(default_factory=RateLimits)
-    # The phase-3 workflow (intake → triage → search → write). None in tests that start no
+    # The workflow graph (P6-01). None in tests that start no
     # run: then a new ticket gets the phase-2 placeholder answer and waits in the queue.
     pipeline: Pipeline | None = None
     runs: RunTasks = field(default_factory=RunTasks)
@@ -71,6 +72,7 @@ def build_pipeline(
         write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, VARIANT),
         verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify"),
         retriever=retriever,
+        checkpoints=CheckpointStore.postgres(settings.database_url.get_secret_value()),
     )
 
 

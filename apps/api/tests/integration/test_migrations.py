@@ -26,6 +26,11 @@ TABLES = {
     "drafts",
     "kb_documents",
     "kb_chunks",
+    # langgraph-checkpoint-postgres (migration 0009)
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
 }
 
 
@@ -84,8 +89,32 @@ def test_tables_created_by_later_migrations_get_the_app_privileges(fresh_db_url:
     assert row == (True, True)
 
 
+def test_the_app_role_reads_and_writes_the_checkpoint_tables_but_owns_none(
+    fresh_db_url: str,
+) -> None:
+    # Migration 0009 creates them as the migrator; the app role gets DML from the default
+    # privileges of 0001 and never DDL (the checkpointer's `setup()` never runs in the app).
+    migrate(fresh_db_url)
+    with psycopg.connect(libpq_url(fresh_db_url)) as connection:
+        rows = connection.execute(
+            "SELECT tablename, tableowner,"
+            " bool_and(has_table_privilege('hub_app', tablename, p))"
+            " FROM pg_tables, unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p"
+            " WHERE tablename LIKE 'checkpoint%' GROUP BY tablename, tableowner ORDER BY 1"
+        ).fetchall()
+        migrations = connection.execute("SELECT count(*) FROM checkpoint_migrations").fetchone()
+    assert [name for name, _, _ in rows] == sorted(
+        ["checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"]
+    )
+    assert all(owner == "hub" and allowed for _, owner, allowed in rows)
+    from langgraph.checkpoint.postgres.base import BasePostgresSaver
+
+    # Like `setup()`: one row per step, 0 included.
+    assert migrations == (len(BasePostgresSaver.MIGRATIONS),)
+
+
 def test_there_is_exactly_one_head() -> None:
     from alembic.script import ScriptDirectory
 
     heads = ScriptDirectory.from_config(alembic_config("postgresql://unused")).get_heads()
-    assert heads == ["0008"]
+    assert heads == ["0009"]

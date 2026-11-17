@@ -19,6 +19,7 @@ from hub.api.middleware import RequestContextMiddleware
 from hub.api.tickets import router as tickets_router
 from hub.config import load_settings
 from hub.deps import Container, build_container
+from hub.graph.build import compile_graph
 from hub.observability.logging import configure_logging
 
 # Longest run: triage + write timeouts with retries are longer, but a stop must not hang.
@@ -33,10 +34,18 @@ def create_app(container: Container | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if container.pipeline is not None:
+            # Compile the graph and open the checkpointer's pool now (ai-pipeline §1: once at
+            # start-up), in the app's own task: pool workers started inside a request's task
+            # would end with it.
+            await container.pipeline.checkpoints.graph(compile_graph)
         yield
-        # Runs are tasks of their own (`hub.graph.linear.RunTasks`): let the ones in flight finish
-        # before the database goes away. A run cut off here stays `running` for `recover-runs`.
+        # Runs are tasks of their own (`hub.graph.pipeline.RunTasks`): let the ones in flight
+        # finish before the database goes away. A run cut off here stays `running` for
+        # `recover-runs`.
         await container.runs.wait(timeout_s=RUN_SHUTDOWN_WAIT_S)
+        if container.pipeline is not None:
+            await container.pipeline.checkpoints.close()
         if container.kb is not None:
             await container.kb.close()
         if container.database is not None:

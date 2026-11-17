@@ -12,7 +12,7 @@ import pytest
 from hub.config import Settings
 from hub.db.session import connect
 from hub.domain.enums import LlmCallMode
-from hub.graph.linear import b0_evidence
+from hub.graph.draft import b0_evidence
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, render_kb
 from hub.kb.retriever import KbChunk
@@ -272,7 +272,7 @@ def test_build_pipeline_uses_eval_context_and_the_cache(tmp_path: Path) -> None:
 def test_the_estimate_prices_two_calls_per_ticket_and_cached_calls_are_free(
     tmp_path: Path,
 ) -> None:
-    from hub.graph.linear import Pipeline
+    from hub.graph.pipeline import Pipeline
 
     pipeline, cache = _pipeline(tmp_path, cache=True)
     assert isinstance(pipeline, Pipeline)
@@ -632,7 +632,7 @@ async def test_every_judge_call_checks_the_limit() -> None:
 
 
 def test_the_estimate_adds_the_judges_at_their_largest(tmp_path: Path) -> None:
-    from hub.graph.linear import Pipeline
+    from hub.graph.pipeline import Pipeline
 
     pipeline, cache = _pipeline(tmp_path, cache=True)
     assert isinstance(pipeline, Pipeline)
@@ -652,7 +652,8 @@ def test_the_estimate_adds_the_judges_at_their_largest(tmp_path: Path) -> None:
 
 
 def test_a_rag_estimate_adds_the_verify_call_and_uses_the_tickets_chunks(tmp_path: Path) -> None:
-    from hub.graph.linear import Pipeline, rag_evidence
+    from hub.graph.draft import rag_evidence
+    from hub.graph.pipeline import Pipeline
 
     pipeline, cache = _pipeline(tmp_path, cache=True, variant="rag_hybrid")
     assert isinstance(pipeline, Pipeline)

@@ -1,5 +1,6 @@
-"""The phase-3 run (P3-05): pure helpers and the recording requests. The run against a database
-is tested in tests/integration/test_linear_run.py."""
+"""The run's pure helpers (P3-05 to P5-04, moved into the graph modules by P6-01) and the
+recording requests. The run against a database is tested in tests/integration/test_graph_run.py;
+the graph and its nodes in test_graph_nodes.py."""
 
 import asyncio
 import uuid
@@ -12,23 +13,18 @@ from hub.db.models import Message
 from hub.domain.draft import Citation, DraftAnswer, ProposedAction
 from hub.domain.enums import MessageRole
 from hub.domain.triage import TriageResult
-from hub.graph import linear
-from hub.graph.linear import (
+from hub.graph import draft as draft_module
+from hub.graph.draft import OutputMask, b0_evidence, draft_from_answer, drop_markers, rag_evidence
+from hub.graph.nodes.intake import ChatTurn, history_turns, intake
+from hub.graph.nodes.triage import audit_details
+from hub.graph.pipeline import (
     B0_VARIANT,
     VARIANT,
-    OutputMask,
     Pipeline,
     RunTasks,
-    b0_evidence,
-    draft_from_answer,
-    drop_markers,
-    history_turns,
-    rag_evidence,
     run_failed_problem,
     write_prompt_for,
 )
-from hub.graph.nodes.intake import ChatTurn, intake
-from hub.graph.nodes.triage import audit_details
 from hub.guardrails.masking import MaskResult
 from hub.kb.full_text import KbSource
 from hub.kb.retriever import KbChunk
@@ -363,7 +359,7 @@ def test_a_restored_placeholder_is_masked_too() -> None:
 
 def test_a_failed_mask_is_counted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        linear, "mask", lambda text: MaskResult(text="#" * len(text), counts={}, failed=True)
+        draft_module, "mask", lambda text: MaskResult(text="#" * len(text), counts={}, failed=True)
     )
     clean = OutputMask(intake("hello"))
     assert clean("abc") == "###"
@@ -415,7 +411,7 @@ def test_a_rag_pipeline_needs_a_verify_prompt_and_b0_has_no_verify_step() -> Non
 
 
 def test_the_code_checks_see_the_answer_as_the_model_wrote_it() -> None:
-    from hub.graph.linear import draft_to_check
+    from hub.graph.draft import draft_to_check
 
     evidence = rag_evidence(VARIANT, HITS)
     answer = _answer(
@@ -431,7 +427,7 @@ def test_the_code_checks_see_the_answer_as_the_model_wrote_it() -> None:
 
 
 def test_the_code_checks_see_missing_information_and_proposed_actions() -> None:
-    from hub.graph.linear import draft_to_check
+    from hub.graph.draft import draft_to_check
 
     answer = _answer(
         can_answer=False,
@@ -455,7 +451,7 @@ def test_the_draft_stores_groundedness_and_the_unsupported_claims_masked() -> No
     from decimal import Decimal
 
     from hub.domain.verification import ClaimCheck, Verification
-    from hub.graph.linear import verification_columns
+    from hub.graph.draft import verification_columns
 
     claims = [
         ClaimCheck(claim="It takes 1 day", supported=True, source_id="withdrawal-times#0"),
@@ -474,7 +470,7 @@ def test_the_draft_stores_groundedness_and_the_unsupported_claims_masked() -> No
 
 def test_the_verify_audit_record_has_counts_and_codes_never_a_claim() -> None:
     from hub.domain.verification import ClaimCheck, Verification
-    from hub.graph.linear import verify_audit_details
+    from hub.graph.draft import verify_audit_details
 
     claim = ClaimCheck(claim="secret words", supported=False, source_id=None)
     details = verify_audit_details(

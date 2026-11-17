@@ -9,8 +9,9 @@ import pytest
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
 from hub.domain.kb import Visibility
-from hub.graph.linear import VARIANT, rag_evidence
+from hub.graph.draft import rag_evidence
 from hub.graph.nodes.write import write, write_messages
+from hub.graph.pipeline import VARIANT
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import SEPARATOR, KbSource, render_kb, sources_from_files
 from hub.kb.loader import KbFile, read_kb

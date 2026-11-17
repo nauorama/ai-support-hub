@@ -743,6 +743,58 @@ def test_failed_masking_on_a_follow_up_hands_off_unless_a_human_has_it(
     assert decided == [(1 if handed_off_now else 0,)]
 
 
+def test_a_replay_after_a_failed_mask_carries_the_tickets_status(
+    app_client: TestClient,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P2-06 review (deferred to P6-01): the first response says `handed_off`, so the replay of
+    # the same request must too.
+    client = _login(app_client)
+    _break_masking(monkeypatch)
+    key = _key()
+    first = _events(client.post("/api/v1/tickets", json={"message": "pin 1234"}, headers=key))
+    replay = _events(client.post("/api/v1/tickets", json={"message": "pin 1234"}, headers=key))
+    assert [name for name, _ in replay] == [name for name, _ in first]
+    assert replay[0] == first[0]
+    assert replay[2] == first[2] == ("ticket.status", {"status": "handed_off"})
+    ticket_id = first[0][1]["ticket_id"]
+
+    path = f"/api/v1/tickets/{ticket_id}/messages"
+    key = _key()
+    one = _events(client.post(path, json={"message": "pin 5678"}, headers=key))
+    two = _events(client.post(path, json={"message": "pin 5678"}, headers=key))
+    assert one[0] == two[0]
+    # The first follow-up handed nothing off (a human has the ticket); the replay still says
+    # where the ticket is.
+    assert "ticket.status" not in [name for name, _ in one]
+    assert two[2] == ("ticket.status", {"status": "handed_off"})
+
+
+def test_a_follow_up_writes_its_audit_records_in_the_same_order_as_a_new_ticket(
+    app_client: TestClient,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # P2-06 review (deferred to P6-01): message, then masking, then the route.
+    client = _login(app_client)
+    ticket_id = _new_ticket(client)["ticket_id"]
+    _sql(
+        api_db,
+        "UPDATE tickets SET status = 'processing', last_route = NULL WHERE id = %s",
+        ticket_id,
+    )
+    before = _sql(api_db, "SELECT max(id) FROM audit_log")[0][0]
+    _break_masking(monkeypatch)
+    client.post(
+        f"/api/v1/tickets/{ticket_id}/messages", json={"message": "pin 1234"}, headers=_key()
+    )
+    actions = _sql(api_db, "SELECT action FROM audit_log WHERE id > %s ORDER BY id", before)
+    assert actions == [("message.received",), ("guardrail.masked",), ("route.decided",)]
+
+
 def test_a_database_error_puts_no_message_text_in_the_logs(
     capsys: pytest.CaptureFixture[str],
     app_container: Container,

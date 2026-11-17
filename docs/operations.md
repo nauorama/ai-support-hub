@@ -13,7 +13,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks, `make models` |
 | `make models` | download the local embedding model and the BM25 files into `EMBEDDING_CACHE_DIR` (needs the network once) and check the model file against its pinned SHA-256 (`hub/llm/local_embedding.py`) |
 | `make up` / `make down` | start / stop the compose stack |
-| `make migrate` | Alembic upgrade of the app database, then of the evaluation database (`-x db=eval`, migrator `EVAL_DATABASE_URL_DIRECT`; skipped when `EVAL_DATABASE_URL` is empty, refused when it names the app database; P4-03) + LangGraph checkpointer setup |
+| `make migrate` | Alembic upgrade of the app database, then of the evaluation database (`-x db=eval`, migrator `EVAL_DATABASE_URL_DIRECT`; skipped when `EVAL_DATABASE_URL` is empty, refused when it names the app database; P4-03) , including the LangGraph checkpoint tables (migration 0009, P6-01) |
 | `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
 | `make kb-load` | load `data/kb` into Postgres (only changed documents), then sync the Qdrant index with Postgres: only chunks whose text changed are embedded again (`hub/kb/service.py`, P5-01). `FULL=1` also re-chunks unchanged files (writes only those whose chunks differ), builds a new collection and moves the alias `kb_chunks` to it |
 | `make dev` | `models` + `up` + `migrate` + `seed` + `kb-load` |
