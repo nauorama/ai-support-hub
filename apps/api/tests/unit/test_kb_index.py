@@ -13,8 +13,9 @@ from qdrant_client import AsyncQdrantClient
 from hub.kb import retriever as retriever_module
 from hub.kb.index import ALIAS, DENSE_SIZE, KbIndex, KbIndexError, point_id
 from hub.kb.retriever import (
+    FUSED_LIMIT,
     MAX_TOP_K,
-    TIE_MARGIN,
+    PREFETCH_LIMIT,
     Retriever,
     error_code_chunk_ids,
     visibility_filter,
@@ -384,4 +385,5 @@ async def test_equal_scores_are_ordered_by_chunk_id_also_across_the_cut(mode: st
     # `a#0` and `e#0` tie at the cut (rank 4): the id decides, not the server's order.
     assert [hit.chunk_id for hit in hits] == ["d#0", "b#0", "c#0", "a#0"]
     assert [hit.rank for hit in hits] == [1, 2, 3, 4]
-    assert client.limits == [4 + TIE_MARGIN]
+    # The cut is made after sorting: hybrid fetches every fused candidate, dense the prefetch.
+    assert client.limits == [FUSED_LIMIT if mode == "hybrid" else PREFETCH_LIMIT]

@@ -113,9 +113,6 @@ class AccountFact(BaseModel):
     source_tool: str
     text: str               # e.g. "Withdrawal WD-88213, €420.00, status: processing, requested 2026-11-09, expected by 2026-11-10"
 
-# Equal scores (common with RRF) are ordered by chunk id, and the search asks Qdrant for a few
-# more hits than top_k, so the same query always gives the same hits (P5-03).
-
 class Evidence(BaseModel):
     chunks: list[KbChunk]           # merged and de-duplicated, max 8
     account_facts: list[AccountFact]
@@ -123,6 +120,8 @@ class Evidence(BaseModel):
     tool_calls: int
     degraded: bool
 ```
+
+Hit order: equal scores (common with RRF) are ordered by chunk id, and the cut to `top_k` is made after that sort (hybrid fetches every fused candidate), so the same query always gives the same hits and the same writer prompt (P5-03, `hub/kb/retriever.py`).
 
 ## 5. Structured outputs
 

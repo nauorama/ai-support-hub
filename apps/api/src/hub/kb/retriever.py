@@ -16,8 +16,10 @@
 list and 4 in the other, or the other way round), and the Qdrant server orders equal scores
 differently from run to run. The same ticket would then get a different writer prompt, so
 recordings and the evaluation cache would not match. Equal scores are therefore ordered by chunk
-id, and the query asks for `TIE_MARGIN` more hits than `top_k`, so a tie across the cut is also
-decided by the id, not by the server.
+id, and the cut to `top_k` is made here, not by the server. Hybrid asks for every fused
+candidate (`FUSED_LIMIT`, both prefetch lists), so the order is fully deterministic. Dense asks
+for `PREFETCH_LIMIT` hits: a tie group that reaches past the 20th hit is still cut by the
+server. That is a bound, not a guarantee, and needs exactly equal cosine scores.
 
 There is no reranker mode (ADR-0018). `visibility="external"` filters every prefetch and the
 final query on `visibility = external`, so an internal chunk can never reach a customer
@@ -39,7 +41,8 @@ SearchMode = Literal["dense", "hybrid"]
 SearchVisibility = Literal["external", "all"]
 DEFAULT_TOP_K = 6
 PREFETCH_LIMIT = 20
-TIE_MARGIN = 4
+# Every candidate RRF can return: the union of the two prefetch lists.
+FUSED_LIMIT = 2 * PREFETCH_LIMIT
 MAX_TOP_K = 20
 _ERROR_CODE = re.compile(r"(?<![A-Za-z0-9])ERR-\d{4}(?!\d)", re.IGNORECASE)
 
@@ -100,10 +103,9 @@ class Retriever:
             return []
         where = visibility_filter(visibility)
         (dense,) = await self._dense([query])
-        limit = top_k + TIE_MARGIN
         if mode == "dense":
             response = await self._client.query_points(
-                self._alias, query=dense, using=DENSE, query_filter=where, limit=limit
+                self._alias, query=dense, using=DENSE, query_filter=where, limit=PREFETCH_LIMIT
             )
             ranked = _by_score([(p.payload or {}, p.score) for p in response.points])
             return _hits(ranked, visibility)[:top_k]
@@ -124,7 +126,7 @@ class Retriever:
             prefetch=prefetch,
             query=models.FusionQuery(fusion=models.Fusion.RRF),
             query_filter=where,
-            limit=limit,
+            limit=FUSED_LIMIT,
         )
         fused = _by_score([(point.payload or {}, point.score) for point in response.points])
         pinned = await self._error_code_payloads(query)
