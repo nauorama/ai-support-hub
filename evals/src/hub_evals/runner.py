@@ -1,0 +1,704 @@
+"""The evaluation runner (eval plan §4, P4-03): `make eval` → `python -m hub_evals.runner`.
+
+Each evaluation ticket becomes a ticket of a seed customer in the evaluation database
+(`EVAL_DATABASE_URL`, never the demo database) and goes through **the same `run_ticket`** as a
+customer message to `POST /tickets` (`hub.graph.linear`; the LangGraph workflow in phase 6). The
+pipeline differs only in what an evaluation needs: `llm_calls.context = eval`, the variant, the
+run's own cost limit in place of the daily budget, and the disk cache.
+
+- **Concurrency** 5 tickets at a time. Retries on provider errors are the gateway's (2 retries,
+  then the fallback model).
+- **Resume.** Results are written per ticket (`hub_evals/results.py`); a second start with the
+  same run directory runs only the tickets not in `results.jsonl`. The run directory is
+  `evals/runs/<date>-<variant>-<git sha>/`, so a re-run on the same day and commit continues the
+  same run. `--restart` starts it again from the first ticket.
+- **Disk cache** of model answers, on by default (`--no-cache` turns it off): `CachingProvider`
+  in the gateway, under `evals/.cache/llm/<LLM_MODE>/`. A cache hit makes no provider call and
+  is recorded with mode `fake` (nothing paid).
+- **Cost.** Before the first call the runner prints an estimate (input tokens ≈ characters / 4,
+  output tokens = the role's `max_tokens`, cached calls free) and stops when it is above
+  `EVAL_MAX_COST_USD` in real mode. While the run goes, each ticket checks the money already paid
+  in this run before its first model call; once the limit is reached the remaining tickets are
+  not run (and not written, so a resume with a higher limit runs them). The limit is soft by up
+  to the tickets already in flight. In fake mode nothing is paid and the limit does not apply.
+
+The output names counts only, never ticket text. The test set is never read (AGENTS.md rule 7).
+"""
+
+import argparse
+import asyncio
+import dataclasses
+import hashlib
+import logging
+import subprocess
+import sys
+import time
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
+from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
+
+from hub.audit import record
+from hub.config import Settings, SettingsError, load_settings
+from hub.db.models import Draft, LlmCall, Run
+from hub.db.models import Ticket as TicketRow
+from hub.db.repositories import CustomerRepository, MessageRepository, TicketRepository
+from hub.db.session import Database, connect
+from hub.domain.draft import DraftAnswer
+from hub.domain.enums import (
+    ActorType,
+    LlmCallContext,
+    LlmCallMode,
+    MessageRole,
+    Route,
+    TicketStatus,
+)
+from hub.domain.triage import TriageResult
+from hub.graph.linear import GRAPH_VERSION, VARIANT, VARIANTS, Pipeline, run_ticket
+from hub.graph.nodes.intake import ChatTurn, intake
+from hub.graph.nodes.triage import triage_messages
+from hub.graph.nodes.write import write_messages
+from hub.guardrails.masking import MaskResult, mask
+from hub.kb.full_text import load_external_sources, render_kb
+from hub.kb.loader import load_kb, read_kb
+from hub.llm.gateway import CachingProvider, Gateway, Provider, build_gateway
+from hub.llm.prompts import active_prompt
+from hub.llm.recorder import DbCallRecorder
+from hub.llm.schemas import BudgetExceededError, ProviderRequest, Usage
+from hub.seed import load_customers, read_seed
+from hub_evals import results as files
+from hub_evals.data_check import TEST_SET_FILE
+from hub_evals.schemas import Ticket
+
+logger = logging.getLogger(__name__)
+
+ROOT = Path(__file__).resolve().parents[3]
+TICKETS_FILE = ROOT / "data" / "eval" / "tickets.dev.jsonl"
+SEED_DIR = ROOT / "data" / "seed"
+KB_DIR = ROOT / "data" / "kb"
+RUNS_DIR = ROOT / "evals" / "runs"
+CACHE_DIR = ROOT / "evals" / ".cache" / "llm"
+CONCURRENCY = 5
+# A ticket's first message in the evaluation database says where it came from (audit only).
+SOURCE = "eval"
+BUDGET_REASON = "budget_exceeded"
+# Characters per token for the estimate: a rough rule for English text.
+CHARS_PER_TOKEN = 4
+# Output tokens of a role without `max_tokens` in the estimate.
+DEFAULT_OUTPUT_TOKENS = 1000
+
+EXIT_OK = 0
+EXIT_SETUP = 1
+EXIT_ESTIMATE = 2
+EXIT_COST_LIMIT = 3
+
+
+class EvalSetupError(Exception):
+    """The run cannot start (settings, database, files). The message names no ticket text."""
+
+
+# --- cost limit ---------------------------------------------------------------------------------
+
+
+@dataclass
+class CostLimit:
+    """The budget check of an evaluation pipeline (`Pipeline.budget`): refuses a ticket's first
+    model call once the money paid in this run (resumed tickets included) reaches the limit.
+    `enforced` is false in fake mode, where nothing is paid."""
+
+    limit: Decimal
+    enforced: bool
+    spent: Decimal = Decimal(0)
+
+    async def check(self) -> None:
+        if self.enforced and self.spent >= self.limit:
+            raise BudgetExceededError(self.spent, self.limit)
+
+    def add(self, amount: Decimal) -> None:
+        self.spent += amount
+
+    @property
+    def reached(self) -> bool:
+        return self.enforced and self.spent >= self.limit
+
+
+# --- pure helpers -------------------------------------------------------------------------------
+
+
+def run_name(day: str, variant: str, sha: str, *, dirty: bool) -> str:
+    return f"{day}-{variant}-{sha}{'-dirty' if dirty else ''}"
+
+
+def load_tickets(path: Path, limit: int | None = None) -> list[Ticket]:
+    """The first `limit` tickets of the file, validated. Never the test set."""
+    if path.name == TEST_SET_FILE:
+        raise EvalSetupError(f"{TEST_SET_FILE} is not read by the runner (AGENTS.md rule 7)")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        raise EvalSetupError(f"ticket file {path.name} not found") from None
+    tickets: list[Ticket] = []
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            tickets.append(Ticket.model_validate_json(line))
+        except ValidationError:
+            raise EvalSetupError(
+                f"{path.name} line {number} is invalid; run `make data-check`"
+            ) from None
+    return tickets[:limit] if limit is not None else tickets
+
+
+def pending(tickets: Sequence[Ticket], done: Sequence[files.TicketResult]) -> list[Ticket]:
+    finished = {result.ticket_id for result in done}
+    return [ticket for ticket in tickets if ticket.id not in finished]
+
+
+def masked_counts(masked: MaskResult) -> dict[str, int]:
+    """`messages.masked_entities`: counts by type, `{"failed": 1}` after a failed mask."""
+    if masked.failed:
+        return {"failed": 1}
+    return {str(kind): count for kind, count in masked.counts.items()}
+
+
+def history_turns(ticket: Ticket) -> list[ChatTurn]:
+    """The earlier messages as the workflow will read them back from the database (masked)."""
+    return [ChatTurn(role=item.role, text=mask(item.text).text) for item in ticket.history]
+
+
+def estimate_tokens(request: ProviderRequest) -> int:
+    seen = request.model_dump_json(include={"messages", "json_schema", "tools"})
+    return len(seen) // CHARS_PER_TOKEN + 1
+
+
+@dataclass(frozen=True)
+class Estimate:
+    calls: int
+    cached_calls: int
+    cost_usd: Decimal
+
+
+def estimate_cost(
+    pipeline: Pipeline, tickets: Sequence[Ticket], kb: str, cache: CachingProvider | None
+) -> Estimate:
+    """An upper bound of what the pending tickets cost with real models: the triage and the write
+    request of each ticket (the requests `run_ticket` sends, built by the same functions), each
+    priced with its role's model at the estimated input tokens and the full `max_tokens`. A call
+    whose answer is in the cache costs nothing. Repair calls and the fallback are not counted."""
+    gateway: Gateway = pipeline.gateway
+    calls = cached = 0
+    total = Decimal(0)
+    for ticket in tickets:
+        result = intake(mask(ticket.message).text, history_turns(ticket))
+        requests = [
+            gateway.chat_requests(
+                pipeline.triage_prompt.front.role,
+                triage_messages(pipeline.triage_prompt, result.message_for_llm),
+                TriageResult,
+            )[0],
+            gateway.chat_requests(
+                pipeline.write_prompt.front.role,
+                write_messages(
+                    pipeline.write_prompt,
+                    kb=kb,
+                    ticket=result.message_for_llm,
+                    history=result.history_for_llm,
+                ),
+                DraftAnswer,
+            )[0],
+        ]
+        for request in requests:
+            calls += 1
+            if cache is not None and cache.contains(request):
+                cached += 1
+                continue
+            usage = Usage(
+                input_tokens=estimate_tokens(request),
+                output_tokens=request.max_tokens or DEFAULT_OUTPUT_TOKENS,
+            )
+            total += gateway.pricing.cost(request.model, usage)
+    return Estimate(calls=calls, cached_calls=cached, cost_usd=total)
+
+
+def git_state(root: Path = ROOT) -> tuple[str, bool]:
+    """Short commit id and whether the working tree has changes; `nogit` without git."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607 - git from PATH
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],  # noqa: S607
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return "nogit", False
+    return sha, bool(status.strip())
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# --- database -----------------------------------------------------------------------------------
+
+
+def eval_database_url(settings: Settings) -> str:
+    """EVAL_DATABASE_URL; refused when empty or the same as the demo database (eval plan §1)."""
+    url = settings.eval_database_url.get_secret_value()
+    if not url:
+        raise EvalSetupError("EVAL_DATABASE_URL is empty")
+    if url == settings.database_url.get_secret_value():
+        raise EvalSetupError("EVAL_DATABASE_URL is the demo database; use its own database")
+    return url
+
+
+async def prepare_database(database: Database, seed_dir: Path, kb_dir: Path) -> None:
+    """Seed customers and the knowledge base, as the app role. Idempotent: unchanged rows are
+    not written again. Fails with a hint when the database is not migrated."""
+    seed = read_seed(seed_dir)
+    kb_files = read_kb(kb_dir)
+    try:
+        async with database.sessions.begin() as session:
+            await load_customers(session, seed)
+            await load_kb(session, kb_files)
+    except DBAPIError as exc:
+        raise EvalSetupError(
+            f"the evaluation database is not ready ({type(exc.orig).__name__}); "
+            "run `make migrate` (it also migrates hub_eval)"
+        ) from None
+
+
+async def create_ticket(database: Database, ticket: Ticket) -> tuple[Any, Any, bool]:
+    """The ticket, its history and the new customer message in the evaluation database, masked
+    as the API masks them (G1). Returns the ticket id, the message id and whether masking of the
+    new message failed (then the API hands the ticket off without a run, and so does this)."""
+    async with database.sessions.begin() as session:
+        customer = await CustomerRepository(session).get_by_external_ref(ticket.customer_ref)
+        if customer is None:
+            raise EvalSetupError(f"seed customer {ticket.customer_ref} is missing")
+        row = await TicketRepository(session).create(
+            customer_id=customer.id, ai_disclosed_at=datetime.now(UTC)
+        )
+        messages = MessageRepository(session)
+        for item in ticket.history:
+            masked_item = mask(item.text)
+            await messages.add(
+                ticket_id=row.id,
+                role=MessageRole(item.role),
+                body=masked_item.text,
+                is_ai_generated=item.role == MessageRole.ASSISTANT.value,
+                masked_entities=masked_counts(masked_item),
+            )
+        masked = mask(ticket.message)
+        message = await messages.add(
+            ticket_id=row.id,
+            role=MessageRole.CUSTOMER,
+            body=masked.text,
+            masked_entities=masked_counts(masked),
+        )
+        await record(
+            session,
+            actor_type=ActorType.CUSTOMER,
+            actor_id=customer.id,
+            action="ticket.created",
+            entity_type="ticket",
+            entity_id=row.id,
+            details={"message_id": message.id, "source": SOURCE, "eval_ticket_id": ticket.id},
+        )
+        if masked.failed:
+            row.last_route = Route.HANDOFF
+            row.route_reasons = ["system_error"]
+            await TicketRepository(session).change_status(row, TicketStatus.HANDED_OFF)
+        return row.id, message.id, masked.failed
+
+
+async def collect_result(
+    database: Database,
+    ticket: Ticket,
+    ticket_id: Any,  # noqa: ANN401 - uuid.UUID from the database
+    run_id: Any,  # noqa: ANN401
+    *,
+    failed: bool,
+    latency_ms: int,
+    events: list[str],
+) -> files.TicketResult:
+    async with database.sessions() as session:
+        row = await session.get(TicketRow, ticket_id)
+        if row is None:  # pragma: no cover - created above, never deleted
+            raise LookupError("ticket")
+        run = await session.get(Run, run_id) if run_id is not None else None
+        draft = (
+            await session.scalar(select(Draft).where(Draft.run_id == run_id))
+            if run_id is not None
+            else None
+        )
+        calls = (
+            (await session.scalars(select(LlmCall).where(LlmCall.run_id == run_id))).all()
+            if run_id is not None
+            else []
+        )
+    return files.TicketResult(
+        ticket_id=ticket.id,
+        run_id=str(run_id) if run_id is not None else None,
+        ticket_status=row.status.value,
+        run_status=run.status.value if run is not None else None,
+        run_failed=failed,
+        route=(run.route.value if run is not None and run.route is not None else None)
+        or (row.last_route.value if row.last_route is not None else None),
+        route_reasons=[str(reason) for reason in (run.route_reasons if run else row.route_reasons)],
+        error=run.error if run is not None else None,
+        triage=files.Triage(
+            intent=row.intent.value if row.intent is not None else None,
+            secondary_intent=row.secondary_intent.value if row.secondary_intent else None,
+            urgency=row.urgency.value if row.urgency is not None else None,
+            summary=row.summary,
+        ),
+        draft=files.DraftOut(
+            can_answer=draft.can_answer,
+            body=draft.body,
+            missing_information=draft.missing_information,
+            citations=list(draft.citations),
+            evidence=dict(draft.evidence),
+            proposed_actions=list(draft.proposed_actions),
+        )
+        if draft is not None
+        else None,
+        models={key: str(value) for key, value in (run.models if run else {}).items()},
+        prompt_versions={
+            key: str(value) for key, value in (run.prompt_versions if run else {}).items()
+        },
+        cost_usd=sum((call.cost_usd for call in calls), Decimal(0)),
+        paid_cost_usd=sum(
+            (call.cost_usd for call in calls if call.mode == LlmCallMode.REAL), Decimal(0)
+        ),
+        input_tokens=sum(call.input_tokens for call in calls),
+        output_tokens=sum(call.output_tokens for call in calls),
+        llm_calls=len(calls),
+        latency_ms=latency_ms,
+        events=events,
+    )
+
+
+async def run_eval_ticket(pipeline: Pipeline, ticket: Ticket) -> files.TicketResult:
+    """One evaluation ticket through the production `run_ticket`."""
+    ticket_id, message_id, mask_failed = await create_ticket(pipeline.database, ticket)
+    events: list[str] = []
+
+    async def emit(name: str, data: dict[str, Any]) -> None:
+        events.append(name)
+
+    start = time.perf_counter()
+    if mask_failed:
+        return await collect_result(
+            pipeline.database, ticket, ticket_id, None, failed=True, latency_ms=0, events=events
+        )
+    outcome = await run_ticket(pipeline, ticket_id=ticket_id, message_id=message_id, emit=emit)
+    latency_ms = round((time.perf_counter() - start) * 1000)
+    return await collect_result(
+        pipeline.database,
+        ticket,
+        ticket_id,
+        outcome.run_id,
+        failed=outcome.failed,
+        latency_ms=latency_ms,
+        events=events,
+    )
+
+
+# --- the run ------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Options:
+    tickets: Path = TICKETS_FILE
+    variant: str = VARIANT
+    limit: int | None = None
+    cache: bool = True
+    restart: bool = False
+    run_dir: Path | None = None
+    concurrency: int = CONCURRENCY
+    runs_dir: Path = RUNS_DIR
+    cache_dir: Path = CACHE_DIR
+    seed_dir: Path = SEED_DIR
+    kb_dir: Path = KB_DIR
+
+
+@dataclass
+class Report:
+    """What `run` did, for the command line and the tests."""
+
+    run_dir: Path
+    planned: int
+    skipped: int
+    ran: int
+    stopped_at_cost_limit: bool = False
+    stopped_by_estimate: bool = False
+    estimate: Estimate | None = None
+    cache_hits: int = 0
+    cache_misses: int = 0
+    lines: list[str] = field(default_factory=list)
+
+
+def build_pipeline(
+    settings: Settings,
+    database: Database,
+    *,
+    variant: str,
+    cache_dir: Path | None,
+    provider: Provider | None = None,
+) -> tuple[Pipeline, CostLimit, CachingProvider | None]:
+    """The evaluation pipeline, its cost limit and its cache (None with `--no-cache`).
+    `provider`: tests pass a scripted provider in place of the one of `LLM_MODE`."""
+    gateway = build_gateway(settings, DbCallRecorder(database), None, cache_dir=cache_dir)
+    if provider is not None:
+        if cache_dir is not None:
+            provider = CachingProvider(provider, cache_dir / settings.llm_mode)
+        gateway = dataclasses.replace(gateway, provider=provider)
+    cache = gateway.provider if isinstance(gateway.provider, CachingProvider) else None
+    limit = CostLimit(
+        limit=Decimal(str(settings.eval_max_cost_usd)), enforced=settings.llm_mode == "real"
+    )
+    pipeline = Pipeline(
+        database=database,
+        gateway=gateway,
+        budget=limit,
+        triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
+        write_prompt=active_prompt(settings.prompts_dir, gateway.models, "write"),
+        context=LlmCallContext.EVAL,
+        variant=variant,
+    )
+    return pipeline, limit, cache
+
+
+def run_config(settings: Settings, pipeline: Pipeline, options: Options) -> files.RunConfig:
+    sha, dirty = git_state()
+    models = pipeline.gateway.models
+    return files.RunConfig(
+        variant=pipeline.variant,
+        llm_mode=settings.llm_mode,
+        graph_version=GRAPH_VERSION,
+        models={
+            node: [choice.model for choice in models.role(prompt.front.role).choices()]
+            for node, prompt in (
+                ("triage", pipeline.triage_prompt),
+                ("write", pipeline.write_prompt),
+            )
+        },
+        prompt_versions=pipeline.prompt_versions,
+        git_sha=sha,
+        git_dirty=dirty,
+        core_anchor_date=settings.core_anchor_date,
+        tickets_file=_relative(options.tickets),
+        tickets_sha256=file_sha256(options.tickets),
+        limit=options.limit,
+        cache=options.cache,
+        concurrency=options.concurrency,
+        max_cost_usd=Decimal(str(settings.eval_max_cost_usd)),
+    )
+
+
+def _relative(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return path.name
+
+
+async def run(settings: Settings, options: Options, *, provider: Provider | None = None) -> Report:
+    """The whole run. `provider`: tests pass a scripted provider (the cache still wraps it unless
+    `options.cache` is false)."""
+    if options.variant not in VARIANTS:
+        raise EvalSetupError(f"unknown variant {options.variant!r}; known: {', '.join(VARIANTS)}")
+    if options.concurrency < 1:
+        raise EvalSetupError("concurrency must be at least 1")
+    tickets = load_tickets(options.tickets, options.limit)
+    database = connect(eval_database_url(settings))
+    try:
+        return await _run(settings, options, tickets, database, provider)
+    finally:
+        await database.dispose()
+
+
+async def _run(
+    settings: Settings,
+    options: Options,
+    tickets: list[Ticket],
+    database: Database,
+    provider: Provider | None,
+) -> Report:
+    pipeline, limit, cache = build_pipeline(
+        settings,
+        database,
+        variant=options.variant,
+        cache_dir=options.cache_dir if options.cache else None,
+        provider=provider,
+    )
+    config = run_config(settings, pipeline, options)
+    day = datetime.now(UTC).date().isoformat()
+    run_dir = options.run_dir or options.runs_dir / run_name(
+        day, config.variant, config.git_sha, dirty=config.git_dirty
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    results_path = run_dir / files.RESULTS_FILE
+    config_path = run_dir / files.CONFIG_FILE
+
+    stored = files.read_config(config_path)
+    if options.restart:
+        results_path.unlink(missing_ok=True)
+    elif stored is not None:
+        differences = files.config_differences(stored, config)
+        if differences:
+            raise EvalSetupError(
+                f"{run_dir.name} was run with other settings ({', '.join(differences)}); "
+                "use --restart or another --run-dir"
+            )
+    done = files.read_results(results_path)
+    files.rewrite_results(results_path, done)
+    files.write_config(config_path, config)
+    for result in done:
+        limit.add(result.paid_cost_usd)
+
+    todo = pending(tickets, done)
+    report = Report(run_dir=run_dir, planned=len(tickets), skipped=len(tickets) - len(todo), ran=0)
+
+    await prepare_database(database, options.seed_dir, options.kb_dir)
+    async with database.sessions() as session:
+        sources = await load_external_sources(session)
+    if not sources:
+        raise EvalSetupError("no external KB document in the evaluation database")
+    report.estimate = estimate_cost(pipeline, todo, render_kb(sources), cache)
+    if limit.enforced and limit.spent + report.estimate.cost_usd > limit.limit:
+        report.stopped_by_estimate = True
+        _finish(run_dir, config, tickets, results_path, report, cache)
+        return report
+
+    semaphore = asyncio.Semaphore(options.concurrency)
+
+    async def one(ticket: Ticket) -> None:
+        async with semaphore:
+            if limit.reached:
+                report.stopped_at_cost_limit = True
+                return
+            result = await run_eval_ticket(pipeline, ticket)
+            limit.add(result.paid_cost_usd)
+            if BUDGET_REASON in result.route_reasons:
+                # Not a result: the ticket never ran. A resume with a higher limit runs it.
+                report.stopped_at_cost_limit = True
+                return
+            files.append_result(results_path, result)
+            report.ran += 1
+
+    await asyncio.gather(*(one(ticket) for ticket in todo))
+    _finish(run_dir, config, tickets, results_path, report, cache)
+    return report
+
+
+def _finish(
+    run_dir: Path,
+    config: files.RunConfig,
+    tickets: Sequence[Ticket],
+    results_path: Path,
+    report: Report,
+    cache: CachingProvider | None,
+) -> None:
+    order = {ticket.id: index for index, ticket in enumerate(tickets)}
+    finished = sorted(
+        (r for r in files.read_results(results_path) if r.ticket_id in order),
+        key=lambda r: order[r.ticket_id],
+    )
+    data = files.summary(finished, planned=len(tickets))
+    data["cache"] = {
+        "enabled": cache is not None,
+        "hits": cache.hits if cache is not None else 0,
+        "misses": cache.misses if cache is not None else 0,
+    }
+    data["stopped_at_cost_limit"] = report.stopped_at_cost_limit
+    data["stopped_by_estimate"] = report.stopped_by_estimate
+    files.write_metrics(run_dir / files.METRICS_FILE, data)
+    (run_dir / files.REPORT_FILE).write_text(
+        files.render_report(config, data, run_name=run_dir.name), encoding="utf-8"
+    )
+    if cache is not None:
+        report.cache_hits, report.cache_misses = cache.hits, cache.misses
+
+
+# --- command line -------------------------------------------------------------------------------
+
+
+def parse_args(argv: Sequence[str]) -> Options:
+    parser = argparse.ArgumentParser(prog="hub_evals.runner", description=__doc__.splitlines()[0])
+    parser.add_argument("--tickets", type=Path, default=TICKETS_FILE)
+    parser.add_argument("--variant", default=VARIANT, choices=VARIANTS)
+    parser.add_argument("--limit", type=int, default=None, help="only the first N tickets")
+    parser.add_argument("--no-cache", action="store_true", help="turn the disk cache off")
+    parser.add_argument("--restart", action="store_true", help="run every ticket again")
+    parser.add_argument("--run-dir", type=Path, default=None, help="resume this run directory")
+    parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
+    args = parser.parse_args(list(argv))
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be at least 1")
+    return Options(
+        tickets=args.tickets,
+        variant=args.variant,
+        limit=args.limit,
+        cache=not args.no_cache,
+        restart=args.restart,
+        run_dir=args.run_dir,
+        concurrency=args.concurrency,
+    )
+
+
+def describe(report: Report, settings: Settings) -> list[str]:
+    lines = [f"eval: run directory {_relative(report.run_dir)}"]
+    if report.estimate is not None:
+        estimate = report.estimate
+        paid = "fake mode, nothing is paid" if settings.llm_mode == "fake" else "real mode"
+        lines.append(
+            f"eval: estimate ${estimate.cost_usd} for {estimate.calls} calls "
+            f"({estimate.cached_calls} cached; {paid}); limit ${settings.eval_max_cost_usd}"
+        )
+    lines.append(
+        f"eval: {report.planned} tickets, {report.skipped} already finished, {report.ran} run now"
+    )
+    lines.append(f"eval: cache hits {report.cache_hits}, misses {report.cache_misses}")
+    if report.stopped_by_estimate:
+        lines.append("eval: the estimate is above EVAL_MAX_COST_USD; nothing was run")
+    if report.stopped_at_cost_limit:
+        lines.append("eval: stopped at EVAL_MAX_COST_USD; raise it and run again to continue")
+    return lines
+
+
+def main(argv: Sequence[str]) -> int:
+    logging.basicConfig(level=logging.WARNING)
+    options = parse_args(argv)
+    try:
+        settings = load_settings()
+        report = asyncio.run(run(settings, options))
+    except (EvalSetupError, SettingsError) as error:
+        print(f"eval: {error}", file=sys.stderr)
+        return EXIT_SETUP
+    for line in describe(report, settings):
+        print(line)
+    if report.stopped_by_estimate:
+        return EXIT_ESTIMATE
+    if report.stopped_at_cost_limit:
+        return EXIT_COST_LIMIT
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

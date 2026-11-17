@@ -28,6 +28,8 @@ test-results/
 results.jsonl
 **/results.jsonl
 evals/runs/**/raw/
+# Disk cache of model answers of evaluation runs (eval plan §4)
+evals/.cache/
 
 # Notebooks
 .ipynb_checkpoints/

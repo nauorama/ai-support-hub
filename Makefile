@@ -8,9 +8,9 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm llm-requests
+	record-llm llm-requests eval
 NOT_IMPLEMENTED := test-e2e \
-	eval eval-smoke eval-attacks eval-report web-types retention \
+	eval-smoke eval-attacks eval-report web-types retention \
 	leak-scan export-review-candidates rollback
 
 .PHONY: help $(BUILT) $(NOT_IMPLEMENTED)
@@ -62,10 +62,13 @@ up:
 down:
 	$(COMPOSE) down
 
-# Alembic upgrade as the migrator (DATABASE_URL_DIRECT). The LangGraph checkpointer setup
-# (operations §1) joins here in phase 6.
+# Alembic upgrade as the migrator (DATABASE_URL_DIRECT), then the evaluation database hub_eval
+# (EVAL_DATABASE_URL_DIRECT, P4-03): default privileges are per database, so the app role gets
+# its grants there only from the migrations. The LangGraph checkpointer setup (operations §1)
+# joins here in phase 6.
 migrate:
 	uv run alembic -c infra/alembic.ini upgrade head
+	uv run alembic -c infra/alembic.ini -x db=eval upgrade head
 
 # Demo customers, operators (password from SEED_OPERATOR_PASSWORD) and default settings, as the
 # app role (DATABASE_URL). Idempotent: a second run changes nothing.
@@ -102,6 +105,16 @@ record-llm:
 llm-requests:
 	uv run python apps/api/tests/unit/_triage_requests.py
 	uv run python apps/api/tests/unit/_run_requests.py
+
+# The evaluation runner (eval plan §4) on the 20 dev tickets, against EVAL_DATABASE_URL (run
+# `make migrate` first). Real models cost money: by hand, only when the owner asks (ADR-0018);
+# `LLM_MODE=fake make eval LIMIT=10` checks the runner for free. Options: VARIANT=<name>,
+# LIMIT=<n> (first n tickets), NO_CACHE=1 (milestone run), RESTART=1 (run every ticket again),
+# RUN_DIR=<dir> (resume that run). Judges join in P4-05.
+eval:
+	uv run python -m hub_evals.runner $(if $(VARIANT),--variant $(VARIANT),) \
+		$(if $(LIMIT),--limit $(LIMIT),) $(if $(NO_CACHE),--no-cache,) \
+		$(if $(RESTART),--restart,) $(if $(RUN_DIR),--run-dir $(RUN_DIR),)
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"

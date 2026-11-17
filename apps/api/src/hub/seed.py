@@ -128,6 +128,14 @@ async def load_seed(
     return report
 
 
+async def load_customers(session: AsyncSession, seed: SeedData) -> SeedReport:
+    """Only the customers, inside the caller's transaction: the evaluation runner fills its own
+    database with them (P4-03); it needs no operators and keeps the default settings."""
+    report = SeedReport()
+    await _load_customers(session, seed, report)
+    return report
+
+
 async def _load_customers(session: AsyncSession, seed: SeedData, report: SeedReport) -> None:
     customers = CustomerRepository(session)
     for item in seed.customers:

@@ -31,6 +31,12 @@ first model call, and the gateway checks again before every online call (a run c
 limit half way). A refusal ends the run the same way as an error, but with reason
 `budget_exceeded` (ai-pipeline §6, row 2): no model call, the ticket `handed_off`.
 
+**Evaluation (P4-03).** `hub_evals.runner` calls the same `run_ticket` against the evaluation
+database, with a pipeline whose `context` is `eval` (the `llm_calls` rows say so) and whose
+`budget` is the run's own cost limit (`EVAL_MAX_COST_USD`) instead of the daily budget. The
+`variant` names the baseline the run uses (ai-pipeline §10); the linear run knows only
+`b0_full_kb`.
+
 An operator may claim the ticket while the run is going (`processing → handed_off`, reason
 `operator_takeover`). Then the run still finishes, but its draft is stored as `superseded` and
 the ticket is left as the operator has it.
@@ -59,6 +65,7 @@ from hub.domain.enums import (
     ActorType,
     DraftStatus,
     Intent,
+    LlmCallContext,
     MessageRole,
     Route,
     RunStatus,
@@ -80,6 +87,9 @@ logger = logging.getLogger(__name__)
 
 GRAPH_VERSION = "linear-v1"
 VARIANT = "b0_full_kb"
+# The variants this workflow can run (ai-pipeline §10). `rag_dense` and `rag_hybrid` come with
+# retrieval in phase 5.
+VARIANTS = (VARIANT,)
 APPROVAL_REASONS = ["auto_reply_off"]
 ERROR_REASONS = ["system_error"]
 BUDGET_REASONS = ["budget_exceeded"]
@@ -99,13 +109,20 @@ class KbUnavailableError(Exception):
 
 @dataclass(frozen=True)
 class Pipeline:
-    """What a run needs. Built once in the app container."""
+    """What a run needs. Built once in the app container, or by the evaluation runner with
+    `context = eval` and the evaluation database."""
 
     database: Database
     gateway: Gateway
     budget: BudgetCheck
     triage_prompt: Prompt
     write_prompt: Prompt
+    context: LlmCallContext = LlmCallContext.ONLINE
+    variant: str = VARIANT
+
+    def __post_init__(self) -> None:
+        if self.variant not in VARIANTS:
+            raise ValueError(f"unknown variant {self.variant!r}; known: {', '.join(VARIANTS)}")
 
     @property
     def prompt_versions(self) -> dict[str, str]:
@@ -192,7 +209,11 @@ def drop_markers(body: str, keep: set[int]) -> tuple[str, list[int]]:
 
 
 def draft_from_answer(
-    answer: DraftAnswer, sources: Sequence[KbSource], clean: OutputMask
+    answer: DraftAnswer,
+    sources: Sequence[KbSource],
+    clean: OutputMask,
+    *,
+    variant: str = VARIANT,
 ) -> tuple[dict[str, Any], int]:
     """The column values of the draft, and the number of citations dropped because their id is
     not an external document. Every model-written string goes through `clean` (placeholders
@@ -245,7 +266,7 @@ def draft_from_answer(
             "missing_information": clean(missing) if missing else None,
             "body": body,
             "citations": citations,
-            "evidence": {"variant": VARIANT, "documents": documents, "dropped_markers": dropped},
+            "evidence": {"variant": variant, "documents": documents, "dropped_markers": dropped},
             "proposed_actions": actions,
         },
         unknown,
@@ -403,7 +424,7 @@ async def _save_draft(
     models: dict[str, str],
 ) -> TicketStatus:
     clean = OutputMask(intake_result)
-    values, unknown = draft_from_answer(answer, sources, clean)
+    values, unknown = draft_from_answer(answer, sources, clean, variant=pipeline.variant)
     async with pipeline.database.sessions.begin() as session:
         repository = TicketRepository(session)
         ticket = await repository.lock(await _ticket(session, ticket_id))
@@ -536,7 +557,11 @@ async def run_ticket(
         await pipeline.budget.check()
 
         triaged = await triage_node.triage_structured(
-            pipeline.gateway, pipeline.triage_prompt, intake_result.message_for_llm, run_id=run_id
+            pipeline.gateway,
+            pipeline.triage_prompt,
+            intake_result.message_for_llm,
+            run_id=run_id,
+            context=pipeline.context,
         )
         models["triage"] = triaged.model
         await _save_triage(pipeline, ticket_id, run_id, triaged.value, triaged.model, intake_result)
@@ -550,6 +575,7 @@ async def run_ticket(
             ticket=intake_result.message_for_llm,
             history=intake_result.history_for_llm,
             run_id=run_id,
+            context=pipeline.context,
         )
         models["write"] = written.model
         status = await _save_draft(

@@ -16,6 +16,7 @@ from typing import Literal
 
 from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -40,6 +41,9 @@ class Settings(BaseSettings):
     database_url: SecretStr = SecretStr("postgresql+psycopg://hub_api:hub_api@localhost:5432/hub")
     database_url_direct: SecretStr = SecretStr("")
     eval_database_url: SecretStr = SecretStr("")
+    # Migrator of the evaluation database (`make migrate`); empty = DATABASE_URL_DIRECT with the
+    # database name of EVAL_DATABASE_URL (the local stack has one server for both).
+    eval_database_url_direct: SecretStr = SecretStr("")
 
     core_anchor_date: date | None = None
     jobs_token: SecretStr = SecretStr("")
@@ -90,6 +94,21 @@ class Settings(BaseSettings):
             if self.database_url_direct.get_secret_value()
             else self.database_url
         )
+
+    @property
+    def eval_database_url_for_migrations(self) -> SecretStr:
+        """The migrator connection of the evaluation database: EVAL_DATABASE_URL_DIRECT, else
+        the `hub` migrator (`database_url_for_migrations`) pointed at the database of
+        EVAL_DATABASE_URL. Empty while EVAL_DATABASE_URL is empty: there is nothing to
+        migrate."""
+        if self.eval_database_url_direct.get_secret_value():
+            return self.eval_database_url_direct
+        eval_url = self.eval_database_url.get_secret_value()
+        if not eval_url:
+            return SecretStr("")
+        database = make_url(eval_url).database
+        migrator = make_url(self.database_url_for_migrations.get_secret_value())
+        return SecretStr(migrator.set(database=database).render_as_string(hide_password=False))
 
 
 class SettingsError(Exception):
