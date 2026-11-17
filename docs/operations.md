@@ -52,7 +52,7 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `MODELS_CONFIG` | `config/models.yaml` | |
 | `PROMPTS_DIR` | `prompts` | prompt files; the active versions are in `MODELS_CONFIG` |
 | `MCP_SERVER_URL`, `MCP_SERVER_TOKEN` | `http://mcp:8001/mcp` | |
-| `JIRA_MODE`, `SLACK_MODE` | `mock` \| `real` | plus `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID` |
+| `JIRA_MODE`, `SLACK_MODE` | `mock` | only `mock` ([ADR-0019](adr/0019-scope-cuts.md)). The settings still accept `real` together with `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`; P7-02 removes them |
 | `SESSION_SECRET` | random 32 bytes | |
 | `DEMO_ACCESS_CODE` | | for the public chat |
 | `SEED_OPERATOR_PASSWORD` | | used by `make seed` |
@@ -83,9 +83,9 @@ Trace attributes on every run: `ticket_id`, `intent`, `route`, `route_reasons`, 
 
 **Dashboard numbers** (from Postgres, see [API](api.md) §5): tickets by route, automation share, route reasons, draft outcomes and edit ratio, latency p50/p95, cost per ticket and by node, feedback, budget used, last eval summary with pass/fail against the red lines.
 
-**Alerts (kept simple for a demo):** a daily summary and these conditions are posted to Slack through the MCP server when `SLACK_MODE=real`, otherwise logged: budget above 80%; error rate of runs above 10% in an hour; p95 latency above the red line in an hour; audit chain check failed.
+**Alerts** are not built: they were part of phase 9, removed by [ADR-0019](adr/0019-scope-cuts.md). The design, kept for reference: a daily summary and these conditions logged and posted to the Slack mock: budget above 80%; error rate of runs above 10% in an hour; p95 latency above the red line in an hour; audit chain check failed.
 
-**Runbook** (`docs/runbook.md`, written in phase 9): what to do when — auto-replies are wrong (switch off, find the traces, add eval tickets); the provider is down (fallback model, handoff mode); the budget is reached; a run is stuck; a card number is found in storage (incident steps).
+**Runbook** (`docs/runbook.md`): not written, phase 9 was removed (ADR-0019). Its planned content: what to do when — auto-replies are wrong (switch off, find the traces, add eval tickets); the provider is down (fallback model, handoff mode); the budget is reached; a run is stuck; a card number is found in storage (incident steps).
 
 ## 4. Cost control
 

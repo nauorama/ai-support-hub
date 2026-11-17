@@ -149,6 +149,6 @@ Transport: streamable HTTP at `/mcp` (Hub → server, bearer token from `MCP_SER
 | `jira_get_issue` | `key` | status, assignee | no |
 | `slack_post_escalation` | `ticket_id`, `urgency`, `text`, `idempotency_key` | message timestamp | yes |
 
-Adapters: `core` reads `data/seed` (always a mock). `jira` and `slack` have two implementations chosen by `JIRA_MODE` / `SLACK_MODE` = `mock` (default; writes to a local table and log) or `real` (Jira Cloud REST API, Slack Web API with a bot token).
+Adapters: `core` reads `data/seed` (always a mock). `jira` and `slack` are mocks too: they write to a local table and log. There is no real mode ([ADR-0019](adr/0019-scope-cuts.md)).
 
 How the Hub exposes tools to the model during research (see [ai-pipeline](ai-pipeline.md) §4): only the four read tools plus `search_kb`, **without** the `customer_ref` argument. The Hub adds `customer_ref` from the session. Tools with side effects are never given to the model as callable tools.

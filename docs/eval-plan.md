@@ -132,11 +132,7 @@ Rules: binary questions, not scores; the judge must quote the evidence; one judg
 
 ## 6. Experiments
 
-Each experiment is one row in `docs/experiments.md`: question, what changed, metrics before/after on dev, cost and latency, decision. After ADR-0018 one remains:
-
-| # | Question | Phase |
-|---|---|---|
-| E9 | Confidence threshold for the rule score: which threshold, how many of the 20 tickets it would auto-reply, which of those were wrong (input for H7) | 9 |
+Each experiment is one row in `docs/experiments.md`: question, what changed, metrics before/after on dev, cost and latency, decision. After ADR-0018 only E9 (the confidence threshold for the rule score) remained, and ADR-0019 removed it with phase 9: auto-reply stays off in the demo, so no threshold is chosen. No experiment is run.
 
 Removed by ADR-0018, so not measured: B0 (whole knowledge base in the prompt) against RAG (E1), dense against hybrid search (E2), reranker (E3), section against fixed-size chunks (E4), `top_k` (E5), tools on/off (E6), retry loop on/off (E7), small against strong model per role (E8), fine-tuned classifier against LLM triage (E10). The final README lists them as open questions (P12-01).
 
@@ -167,4 +163,3 @@ Not a replacement for offline evaluation, but shown on the dashboard: customer r
 | Write the runner, metrics, judges | coding agent |
 | Ask for a paid run (`make eval`, `make eval-smoke`) | Viktoriia |
 | Read failed tickets | the `eval-analyst` subagent groups them; Viktoriia reads the grouping |
-| Decide whether auto-reply goes on in the demo (H7) | Viktoriia |

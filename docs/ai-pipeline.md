@@ -262,7 +262,7 @@ Training rules (kept for reference; they assumed the earlier 210-ticket dev set,
 - If the trained model is not better than the rule version below in cross-validation, the rule version stays. This is a valid result and is written in the experiments file.
 - Retrain after every change of prompts, models or retrieval.
 
-Rule version (used in budget mode, and in the trained design until phase 9): `confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above a fixed value, else 0) and the default threshold is 0.95, with auto-reply **off** by default.
+Rule version (used in budget mode, and in the trained design until a model is trained): `confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above a fixed value, else 0) and the default threshold is 0.95, with auto-reply **off** by default.
 
 ## 7. Prompts
 

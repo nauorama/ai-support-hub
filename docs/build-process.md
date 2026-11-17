@@ -4,7 +4,7 @@ For the owner. The [build plan](build-plan.md) says **what** is built and in whi
 
 ## 1. The idea in five lines
 
-1. One task = one fresh agent session = one small pull request.
+1. One task = one fresh agent session = one small pull request. Small neighbouring tasks may share one pull request when the owner agrees; the builder names them in its plan.
 2. The agent that writes the code never approves its own work. A second agent with a clean context reviews it; CI checks it; the owner merges it.
 3. Only one agent writes code at a time. More agents at once give merge conflicts and work nobody understands.
 4. Few roles. A role exists only when it needs a different context, different permissions or a different way of thinking.
@@ -42,8 +42,9 @@ Why these and not more:
 ```mermaid
 flowchart LR
     a["Owner: new session<br/>'Do task P2-03'"] --> b["Builder: plan → tests → code<br/>→ make lint test → pull request"]
-    b --> c["Reviewer: fresh context<br/>verdict"]
-    c -- "changes needed" --> b
+    b --> c["Reviewer: fresh context<br/>verdict (one round)"]
+    c -- "changes needed" --> g["Builder: fixes in the same PR,<br/>lists each fix"]
+    g --> d
     c -- "approve" --> d["CI green?"]
     d -- "yes" --> e["Owner: reads the PR text,<br/>merges"]
     e --> f["Next task = new session"]
@@ -60,7 +61,7 @@ flowchart LR
 **Rules for sessions**
 - A new session for every task. The repository and the documents are the memory, not the chat. A long session gets worse and more expensive.
 - Size S and M tasks fit in one session. For an L task ask the builder to split it into two or three pull requests in its plan.
-- If the reviewer says "changes needed", give its report to the builder unchanged. Maximum two rounds; if the third round is needed, stop and look at the problem yourself — usually the task or a document is unclear.
+- One review round per pull request (ADR-0019). If the reviewer says "changes needed", give its report to the builder unchanged; the builder fixes the findings in the same pull request and lists each fix, and there is no second review. If the findings are large or unclear, stop and look at the problem yourself — usually the task or a document is unclear.
 - If the builder says a requirement cannot be met or two documents disagree, it must stop. Decide, fix the document first, then continue.
 - Content tasks (P2-05, P2-08, P4-02, P8-01): the prompt is "Use the content-author subagent for task P2-08". After the owner's check the builder only wires the data in.
 - After each `make eval`: "Use the eval-analyst subagent for run <id>". Then the owner chooses the next fix.
@@ -80,7 +81,7 @@ flowchart LR
 3. Write three lines into the dev log: what was built, what surprised you, what you do not understand yet.
 4. Only then tell the builder to start the next phase.
 
-**Human gates** cannot be given to an agent. The biggest ones: reviewing the attack set (H6) and deciding whether auto-reply goes on in the demo (H7). H4 and H5 (checking every evaluation ticket, labelling answers for the judge) were removed by ADR-0018.
+**Human gates** cannot be given to an agent. The biggest one: reviewing the attack set (H6). H7 (auto-reply in the demo) was removed with phase 9 by ADR-0019: auto-reply stays off. H4 and H5 (checking every evaluation ticket, labelling answers for the judge) were removed by ADR-0018.
 
 ## 6. Working in parallel
 
@@ -89,7 +90,7 @@ Default: no parallel work. Two exceptions:
 | What | How |
 |---|---|
 | Content tasks while the builder codes | The content author writes only in `data/`, the builder does not touch `data/` at that time. |
-| Web tasks P10-01 to P10-04 during phases 8 and 9 | A second builder session in its own git worktree and branch; it touches only `apps/web/`. |
+| Web tasks P10-01 to P10-03 during phase 8 | A second builder session in its own git worktree and branch; it touches only `apps/web/`. |
 
 Do not start an agent team that builds a whole phase without stops. The phase gates are the place where errors are still cheap.
 

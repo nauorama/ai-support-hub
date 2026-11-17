@@ -13,7 +13,7 @@ How the sessions, agent roles and reviews are organised: [build process](build-p
 **Loop for one task**
 1. Read the task and its references. Write a short plan (files to touch, tests to add).
 2. Check the current documentation of every library you will use. Do not write API calls from memory.
-3. Write the tests, then the code. Keep the change small: one task = one pull request.
+3. Write the tests, then the code. Keep the change small: one task = one pull request. Small neighbouring tasks may share one pull request when the owner agrees; the plan names them (ADR-0019).
 4. Content tasks (files in `data/`) go to the `content-author` subagent.
 5. Run `make lint test` (and `make test-int` when the task touches the database, Qdrant, the graph or the MCP server).
 6. Check the "Done when" list line by line. Run the "Verify" command and paste its output into the pull request.
@@ -38,8 +38,7 @@ How the sessions, agent roles and reviews are organised: [build process](build-p
 | H2. Anthropic API key; a $5 spending limit in the Anthropic console (ADR-0018) | P3 |
 | H3. Review the knowledge-base articles | P2-08 |
 | H6. Review the attack set | P8-01 |
-| H7. Decide whether auto-reply goes on in the demo | P9-03 |
-| H8. Accounts: Google Cloud (billing + budget alert), Neon, Qdrant Cloud, Langfuse; optional Jira and Slack | P9-01, P10-07 |
+| H8. Accounts: Google Cloud (billing + budget alert), Neon, Qdrant Cloud (no Langfuse, Jira or Slack, ADR-0019) | P10-07 |
 | H9. Record the demo video; publish (make the repository public and turn on branch protection for `main`, see the README) | P12 |
 
 **Rules that never bend:** see `AGENTS.md` ("Never do").
@@ -59,11 +58,12 @@ Size: S = under half a day of agent work with review, M = about a day, L = sever
 | 6 | Agents and LangGraph | Graph, routing, pause for the operator, memory |
 | 7 | Tools and MCP | MCP server, account tools, Jira and Slack actions |
 | 8 | Security | Attack suite, hardening, privacy functions |
-| 9 | LLMOps | Tracing, dashboard data, confidence model, threshold, runbook |
 | 10 | Deployment | Web app, containers, public demo, CI/CD |
 | 12 | Interview preparation | README with numbers, case study, demo script |
 
-Dependency notes: phases run in order. Exception: web tasks P10-01 to P10-04 need only the APIs of phases 2, 6, 7 and 9 and may be built in parallel with phases 8 and 9.
+Phase 9 (LLMOps) was removed by ADR-0019; phase 11 by ADR-0018.
+
+Dependency notes: phases run in order. Exception: web tasks P10-01 to P10-03 need only the APIs of phases 2, 6 and 7 and may be built in parallel with phase 8. P10-04 needs P10-09 (metrics and settings API) first.
 
 ---
 
@@ -184,7 +184,7 @@ References: [API](api.md) §7; [AI pipeline](ai-pipeline.md) §4; ADR-0011; [sec
 | ID | Task | Size | Done when | Verify |
 |---|---|---|---|---|
 | P7-01 | **MCP server with the core adapter.** `apps/mcp_server`: FastMCP server, streamable HTTP with bearer token and stdio; tools `core_*` reading `data/seed`; output schemas; argument validation. README section "Connect to Claude Code". **From P2-05 (deferred):** the Pydantic schemas of the seed files live in `hub/domain/seed.py`, which `support_tools` must not import (import-linter: `hub` and `support_tools` are independent). The core adapter needs its own schemas for `data/seed/` (or a small shared package both may import, a design change for the owner); a test must keep them in agreement with `hub.domain.seed`. The adapter resolves date offsets against `CORE_ANCHOR_DATE` (data model §3), with a test that the tools give the same dates on two runs with a fixed `CORE_ANCHOR_DATE` (P2-05 could check this only for the offset function, because `make seed` loads no dates), and must never return `support_scenarios` or `restriction_reason`. **From P2-05 (deferred):** count business days (Monday–Friday without TARGET closing days, world file §5) when the adapter computes expected dates; the seed data does not check the anchor weekday, so a 1–2-day wait that started at `-1d` (e.g. a SEPA withdrawal before the cut-off) may span a weekend. | M | Tools can be listed and called from a test client and from the MCP Inspector. `core_get_customer` never returns a restriction reason. | `make test` (mcp) |
-| P7-02 | **Jira and Slack adapters.** Mock (default, stores calls) and real implementations behind one interface; idempotency keys; per-ticket limits. | M | Same idempotency key twice = one issue. Real mode tested by hand once, with a screenshot in the PR (optional, needs H8). | `make test` |
+| P7-02 | **Jira and Slack adapters.** Mock only (stores calls); no real mode (ADR-0019). Idempotency keys; per-ticket limits. Remove the `real` value of `JIRA_MODE` / `SLACK_MODE` and the real-mode settings (`hub/config.py`, `.env.example`, operations §2) with their tests. | M | Same idempotency key twice = one issue. | `make test` |
 | P7-03 | **Hub tool client and permissions (G6).** `tools/mcp_client.py`, `tools/registry.py`, `tools/permissions.py`, table `tool_calls`. Identity injection; allow-list per node; side-effect tools need an approval object. | M | Tests: the model-facing schema has no customer argument; a call to a tool outside the allow-list is denied and recorded; a side-effect tool without approval is denied. Coverage ≥ 95% for `permissions.py`. | `make test` |
 | P7-04 | **Research tool loop.** `prompts/research/v1.md`; loop with the limits from AI pipeline §4; account facts in `Evidence`; `prompts/write/v3.md` cites account facts; `intake` loads the profile through the tool. | L | A ticket "where is my withdrawal" for a customer with a failed withdrawal gets an answer that names the real status and error code with citations. The loop stops at 5 calls (test). | `make test-int`; real run in the PR |
 | P7-05 | **Actions.** `ProposedAction` in drafts and handoff; `act` node runs approved Jira actions; `handoff_prep` sends the Slack alert for high-urgency handoffs (before the pause); `POST /console/tickets/{id}/actions`. **From the P3-05b review (note 1):** the idempotent replay of approve / edit / reject (`hub/api/console_drafts.py`, `_replay`) compares only ticket, run, role and text. The same `Idempotency-Key` with other `approved_actions` (or another reason or note on a reject with a reply) returns the first result instead of `409 idempotency_key_reused`, and the key of a reject without a reply is never stored. Harmless while actions are only recorded; once `act` runs them, a retry with different actions would be silently dropped. Store the approved actions with the review and compare them in the replay (and keep the key of a reject without a reply), with tests. | M | Dispute ticket → approval route with a draft and a prepared Jira issue → operator approves → issue key stored in `tool_calls.external_ref` and shown on the ticket. | `make test-int` |
@@ -211,20 +211,9 @@ References: [security](security.md) (all); eval plan §3 (attacks).
 
 ---
 
-## Phase 9 — LLMOps
+## Phase 9 — removed
 
-References: [operations](operations.md) §3–4; [AI pipeline](ai-pipeline.md) §6; ADR-0009, 0014.
-
-| ID | Task | Size | Done when | Verify |
-|---|---|---|---|---|
-| P9-01 | **Tracing.** OpenTelemetry + Langfuse: trace per run, spans per node, retrieval, tool and model call; attributes from operations §3; masked payloads; trace id in `runs`; off when keys are empty. | M | A run shows the full tree in Langfuse; a card number in a test ticket is masked in the trace. | screenshot in the PR |
-| P9-02 | **Metrics and settings API.** `/console/metrics/*`, `/console/evals/latest`, `/admin/settings` with audit of changes; kill switch honoured by `decide`. | M | Numbers match SQL checks on seeded data. Switching auto-reply off sends the next ticket to approval. | `make test-int` |
-| P9-03 | **Confidence (rule score).** No trained model (ADR-0018 replaces layer 2 of ADR-0009): `config/confidence.json` keeps the rule version from AI pipeline §6 (`confidence = groundedness` when `top_score` is above a fixed value, else 0). Experiment E9 in reduced form: for a few candidate thresholds, how many of the 20 tickets would be auto-replied and which of those were wrong, as counts with intervals. Auto-reply stays off by default. **Human gate H7:** the owner decides whether auto-reply goes on in the demo. | S | E9 row with the counts; the decision recorded in the experiments file. Runtime score matches the rule on hand-made rows (test). | report + `make test` |
-| P9-04 | **Cost check.** Prompt caching check (cache reads in `llm_calls`); cost per ticket from the last run against NFR-3; project spend so far against the $5 budget. (Experiment E8 removed by ADR-0018.) | S | Cost per ticket ≤ €0.05 or an explanation; spend so far stated. | `make eval-report` |
-| P9-05 | **Operations.** Alerts (operations §3), `docs/runbook.md`, `make export-review-candidates`. No scheduled evaluation workflow (ADR-0018). | M | Runbook covers the five situations. A forced budget alert appears in the Slack mock. | `make test-int` |
-| P9-06 | **Milestone run.** One run with `--no-cache` on the 20 tickets and the 16 attacks with the chosen configuration (there is no test set, ADR-0018); results into the README, marked "demo check, not a proof". | S | Table with target / red line / result for every metric, with counts and intervals; failures stated openly. | report file |
-
-**Gate 9:** milestone numbers published as a demo check; auto-reply decision made by Viktoriia and recorded in an ADR or the experiments file.
+Removed by [ADR-0019](adr/0019-scope-cuts.md). Moved: P9-02 (metrics and settings API) → **P10-09**, because the dashboard and settings pages (P10-04) and the demo's kill switch need it; P9-06 (milestone run) → **P12-00**, because the README numbers (P12-01) need it. Not built: P9-01 (tracing with Langfuse), P9-03 (confidence threshold, experiment E9, human gate H7: auto-reply stays off in the demo), P9-04 (cost check), P9-05 (alerts, runbook, `make export-review-candidates`).
 
 ---
 
@@ -241,6 +230,7 @@ References: [UI](ui.md); [operations](operations.md) §5–6; ADR-0015, 0016.
 | P10-05 | **E2E and accessibility.** The Playwright scenarios from UI §6 in CI with fake models; axe checks. | M | All scenarios green in CI. | CI run link |
 | P10-06 | **Production images.** Multi-stage `Dockerfile.api` (includes the built web app) and `Dockerfile.mcp`, non-root; the API image contains the local embedding model, so the container needs no network for embeddings (ADR-0018); `infra/compose.prod.yml` + Caddy as the VPS fallback. | S | `docker compose -f infra/compose.prod.yml up` serves the app on one port. | manual check in the PR |
 | P10-07 | **Cloud deploy.** Check current free-tier limits and update operations §6. Cloud Run services, Neon, Qdrant Cloud, secrets, `deploy.yml` (build → migrate → deploy → smoke → rollback on failure), scheduled workflows that call the job endpoints (close-stale, recover-runs, retention, ping). **Human gate H8.** **From the P2-02 review:** migration 0001 has only run with a superuser migrator; run it on Neon as the database owner (not a superuser): `CREATE ROLE hub_app` when missing, `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, `ALTER DEFAULT PRIVILEGES`; then create the app login user (operations §2, "Database roles"). **From P2-06 (deferred):** the rate limiter (`hub/api/limits.py`) counts in process memory, so with Cloud Run max 2 instances (operations §6) a customer can get up to twice the limits of API §1; choose max instances 1 or a shared limiter in Postgres. The limits key on the client IP (`request.client.host`): run uvicorn with `--proxy-headers` and `--forwarded-allow-ips` set for the Cloud Run proxy, otherwise every customer shares the proxy's address and the per-IP limit. **From the P2-06 review (deferred):** a retry with the same `Idempotency-Key` (a replay) still counts against the rate limits, so a client that retries after a network drop uses up its budget; and the 32 KB body cap is below a 4,000-character message of characters above U+FFFF written as JSON escapes (12 bytes each, about 48 KB), so 4,000 escaped emoji get `413` instead of reaching the 422 check. | L | Public URL works end to end. `make rollback` returns the previous revision. On Neon, `make migrate` succeeds as the owner and the app user cannot `UPDATE` `audit_log`. | URL + CI run link |
+| P10-09 | **Metrics and settings API** (moved from P9-02 by ADR-0019; build it before P10-04). `/console/metrics/*`, `/console/evals/latest`, `/admin/settings` with audit of changes; kill switch honoured by `decide`. | M | Numbers match SQL checks on seeded data. Switching auto-reply off sends the next ticket to approval. | `make test-int` |
 | P10-08 | **Load smoke.** Script with 10 parallel customers and 50 tickets against a deployment of the demo stack with fake models only (`LLM_MODE=fake`; no real-model cost, ADR-0018). | S | p50/p95 latency and error rate in the README, labelled "fake models: model time not included"; no lost runs. | script output |
 
 **Gate 10:** a stranger can open the URL, enter the access code, ask a question as a customer, then log in as an operator and approve a draft.
@@ -257,9 +247,10 @@ Removed by [ADR-0018](adr/0018-budget-mode.md): the fine-tuning experiment (E10)
 
 | ID | Task | Size | Done when |
 |---|---|---|---|
+| P12-00 | **Milestone run** (moved from P9-06 by ADR-0019). One run with `--no-cache` on the 20 tickets and the 16 attacks with the chosen configuration (there is no test set, ADR-0018); results into the README, marked "demo check, not a proof". | S | Table with target / red line / result for every metric, with counts and intervals; failures stated openly. |
 | P12-01 | **README final.** One page: what it is, demo link and access, architecture diagram, numbers table (milestone run on the 20 tickets, marked "demo check, not a proof", with the same-family judge note) with targets and red lines, the questions not measured (E1–E8, E10), what does not work, limits of synthetic data, how to run locally in 5 commands. Also write `docs/requirements-trace.md` (each PRD requirement → the test or metric that proves it). | S | Passes the checklist in section 3. |
-| P12-02 | **Case study** `docs/case-study.md`: problem → approach → data → architecture → evaluation → routing threshold and business numbers → security → what failed → what next. About 1,500 words. | M | Every number links to a report. |
-| P12-03 | **Demo script** `docs/demo-script.md` for a 3–5 minute video: routine ticket, card number masked, fraud handoff, operator approval with Jira, dashboard and kill switch, a trace. **Human gate H9** (recording). | S | Script runs against the demo with the listed demo customers. |
+| P12-02 | **Case study** `docs/case-study.md`: problem → approach → data → architecture → evaluation → routing and business numbers → security → what failed → what next. About 1,500 words. | M | Every number links to a report. |
+| P12-03 | **Demo script** `docs/demo-script.md` for a 3–5 minute video: routine ticket, card number masked, fraud handoff, operator approval with Jira, dashboard and kill switch. **Human gate H9** (recording). | S | Script runs against the demo with the listed demo customers. |
 | P12-04 | **Interview notes** `docs/interview-notes.md`: 25 likely questions about this system with short answers that point to the ADRs, experiments and walkthroughs. | S | Covers design, evaluation, RAG, agents, security, cost, working with coding agents. |
 
 ---
@@ -273,7 +264,7 @@ Removed by [ADR-0018](adr/0018-budget-mode.md): the fine-tuning experiment (E10)
 - [ ] Every NFR has a measured value in the README next to its target and red line.
 - [ ] Milestone results published as a demo check, including the ones that miss the target.
 - [ ] Safety modules ≥ 95% coverage; PAN leakage 0; attack suite within limits.
-- [ ] Every model call is traced and costed; the dashboard works on the demo.
+- [ ] Every model call is recorded and costed in `llm_calls`; the dashboard works on the demo.
 - [ ] CI: lint, types, tests, e2e, security scans — all required for merge (no real model calls in CI; eval smoke by hand, ADR-0018).
 - [ ] Public demo deployed from CI with rollback; budget guard on.
 - [ ] 16+ ADRs current; design documents match the code; one walkthrough per phase.
