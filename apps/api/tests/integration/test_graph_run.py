@@ -1123,3 +1123,24 @@ async def test_respond_alone_records_the_runs_outcome(
     assert (status, error) == expected
     assert models == {"write": "w"}
     assert finished is not None
+
+
+async def test_a_failure_after_the_draft_was_stored_keeps_run_and_ticket_in_agreement(
+    run_db: Urls, qdrant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round: `respond` fails after `human_review` stored the draft. The ticket waits
+    for approval as it should, and the failed run's route says so too, not `handoff`."""
+    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
+
+    async def broken(*_args: object, **_kwargs: object) -> None:
+        raise ConnectionError
+
+    monkeypatch.setattr(respond_node, "finish_run", broken)
+    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id)
+
+    assert (outcome.failed, outcome.ticket_status) == (True, TicketStatus.PENDING_APPROVAL)
+    assert emitted[-1] == ("ticket.status", {"status": "pending_approval"})
+    assert _one(
+        run_db, "SELECT status, route, route_reasons, error FROM runs WHERE id = %s", outcome.run_id
+    ) == ("failed", "approval", ["auto_reply_off"], "ConnectionError")
+    assert _one(run_db, "SELECT status FROM drafts WHERE ticket_id = %s", ticket_id) == ("pending",)

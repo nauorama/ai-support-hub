@@ -140,16 +140,20 @@ async def fail(
     reasons: list[str],
 ) -> TicketStatus:
     """The last resort when the graph itself failed (a node that does not fail into a handoff,
-    the checkpointer, the database): the run is `failed` and the ticket goes to a human."""
+    the checkpointer, the database): the run is `failed` and the ticket goes to a human. When
+    the ticket already left `processing` (e.g. the draft was stored and then `respond` failed),
+    the run's route is the one the ticket has, so `runs.route` and `tickets.last_route` agree."""
     async with pipeline.database.sessions.begin() as session:
+        status = await hand_off(session, pipeline, ticket_id, run_id, reasons)
         if run_id is not None:
+            found = await ticket(session, ticket_id)
             await finish_run(
                 session,
                 run_id,
                 status=RunStatus.FAILED,
-                route=Route.HANDOFF,
-                reasons=reasons,
+                route=found.last_route or Route.HANDOFF,
+                reasons=list(found.route_reasons or reasons),
                 models=models,
                 error=error,
             )
-        return await hand_off(session, pipeline, ticket_id, run_id, reasons)
+        return status

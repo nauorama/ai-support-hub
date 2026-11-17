@@ -110,7 +110,9 @@ def test_the_app_role_reads_and_writes_the_checkpoint_tables_but_owns_none(
     from langgraph.checkpoint.postgres.base import BasePostgresSaver
 
     # Like `setup()`: one row per step, 0 included.
-    assert migrations == (len(BasePostgresSaver.MIGRATIONS),)
+    assert migrations == (10,)
+    # 0009 is frozen at the 3.2.0 steps; a library with more needs a new migration.
+    assert len(BasePostgresSaver.MIGRATIONS) == 10
 
 
 def test_there_is_exactly_one_head() -> None:

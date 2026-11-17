@@ -7,8 +7,9 @@ needs DDL rights. The default privileges of migration 0001 give the app role its
 the new tables. Some steps are `CREATE INDEX CONCURRENTLY`, which cannot run in a transaction:
 they run in an autocommit block.
 
-Running only the steps not yet recorded keeps this idempotent. A later library version that adds
-steps needs a new migration that calls `apply_checkpoint_migrations` again (an applied migration
+Running only the steps not yet recorded keeps this idempotent. Only the first `STEPS_0009` steps
+(those of 3.2.0) run here, so a later library version cannot change what 0009 does; its new
+steps need a new migration (an applied migration
 is never edited, AGENTS.md never-do 9).
 
 The checkpoint tables are not in the SQLAlchemy models; `env.py` leaves them out of
@@ -38,8 +39,14 @@ CHECKPOINT_TABLES = (
 )
 
 
-def apply_checkpoint_migrations() -> None:
-    migrations = BasePostgresSaver.MIGRATIONS
+# The steps of langgraph-checkpoint-postgres 3.2.0. 0009 applies exactly these, whatever version
+# is installed later, so it never changes meaning; a later migration applies the rest.
+STEPS_0009 = 10
+
+
+def apply_checkpoint_migrations(steps: int) -> None:
+    """Needs a live connection: not supported in offline mode (`alembic upgrade --sql`)."""
+    migrations = BasePostgresSaver.MIGRATIONS[:steps]
     with op.get_context().autocommit_block():
         op.execute(migrations[0])
         done = op.get_bind().execute(sa.text("SELECT max(v) FROM checkpoint_migrations")).scalar()
@@ -52,7 +59,7 @@ def apply_checkpoint_migrations() -> None:
 
 
 def upgrade() -> None:
-    apply_checkpoint_migrations()
+    apply_checkpoint_migrations(STEPS_0009)
 
 
 def downgrade() -> None:

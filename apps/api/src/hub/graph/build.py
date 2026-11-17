@@ -24,7 +24,9 @@ and hands the ticket off.
 **Timeouts.** Every node has one (ai-pipeline §3). A model node's limit is longer than one call
 (`timeout_s` in config/models.yaml) so the gateway's retries and fallback can still run, and
 shorter than all of them in a row: a stuck provider ends in a handoff, not a hanging stream. A
-timeout is a failure like any other (`<node>:TimeoutError`).
+timeout is a failure like any other (`<node>:TimeoutError`), except where ai-pipeline §3 says the
+node continues: a research timeout gives degraded empty evidence, a verify timeout an unsupported
+draft (`verify_error = TimeoutError`).
 """
 
 import asyncio
@@ -84,15 +86,26 @@ class NodeSpec:
     catches: bool = True
     # Skipped once a node failed (the work would be wasted; the run is going to a human).
     skipped_after_error: bool = True
+    # What a timeout turns into when the node does not fail into a handoff (ai-pipeline §3:
+    # research continues degraded, verify treats the draft as unsupported). None: a failure.
+    on_timeout: Callable[[TicketState], TicketState] | None = None
+
+
+def research_timed_out(state: TicketState) -> TicketState:
+    return TicketState(evidence=research.evidence((), degraded=True))
+
+
+def verify_timed_out(state: TicketState) -> TicketState:
+    return TicketState(verification=verify.unavailable(), verify_error="TimeoutError")
 
 
 NODES = (
     NodeSpec("intake", intake.run, 15, STEP_UNDERSTANDING),
     NodeSpec("triage", triage.run, 75, STEP_UNDERSTANDING),
     NodeSpec("policy_gate", policy_gate.run, 10, skipped_after_error=False),
-    NodeSpec("research", research.run, 30, STEP_SEARCHING),
+    NodeSpec("research", research.run, 30, STEP_SEARCHING, on_timeout=research_timed_out),
     NodeSpec("write", write.run, 150, STEP_WRITING),
-    NodeSpec("verify", verify.run, 110, STEP_CHECKING),
+    NodeSpec("verify", verify.run, 110, STEP_CHECKING, on_timeout=verify_timed_out),
     NodeSpec("decide", decide.run, 10, skipped_after_error=False),
     NodeSpec("handoff_prep", handoff_prep.run, 30, catches=False, skipped_after_error=False),
     NodeSpec("human_review", human_review.run, 30, catches=False, skipped_after_error=False),
@@ -117,6 +130,9 @@ def guarded(spec: NodeSpec) -> "GraphNode":
         except GraphBubbleUp:
             raise  # LangGraph's own control flow (an interrupt, P6-03), never a failure
         except Exception as exc:
+            if isinstance(exc, TimeoutError) and spec.on_timeout is not None:
+                logger.warning("node timed out", extra={"node": spec.name})
+                return spec.on_timeout(state)
             if not spec.catches:
                 raise
             error = type(exc).__name__

@@ -19,7 +19,7 @@ from hub.domain.verification import ClaimCheck, ClaimsAnswer, Verification
 from hub.graph import build
 from hub.graph.checkpoint import CheckpointStore, serializer
 from hub.graph.context import GraphContext, error_class, failure_reasons
-from hub.graph.nodes import act, decide, policy_gate, research, verify, write
+from hub.graph.nodes import act, decide, handoff_prep, policy_gate, research, verify, write
 from hub.graph.pipeline import B0_VARIANT, VARIANT, KbUnavailableError, Pipeline, write_prompt_for
 from hub.graph.state import STATE_TYPES, Evidence, InputFlags, RouteName, TicketState, run_input
 from hub.guardrails.injection import InjectionResult
@@ -585,3 +585,34 @@ async def test_decide_never_auto_replies_yet() -> None:
 
 async def test_act_has_nothing_to_run_before_the_review_decision_exists() -> None:
     assert await act.run(_state(route="approval"), _ctx()) == {}
+
+
+# --- review round (P6-01) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("research", {"evidence": research.evidence((), degraded=True)}),
+        ("verify", {"verification": verify.unavailable(), "verify_error": "TimeoutError"}),
+    ],
+)
+async def test_research_and_verify_continue_after_a_timeout(
+    name: str, expected: dict[str, Any]
+) -> None:
+    """ai-pipeline §3: research continues degraded, verify treats the draft as unsupported; a
+    timeout must not turn either into a handoff."""
+
+    async def run(state: TicketState, ctx: GraphContext) -> TicketState:
+        await asyncio.sleep(5)
+        raise AssertionError("the timeout should have stopped this node")
+
+    spec = next(spec for spec in build.NODES if spec.name == name)
+    node = build.guarded(build.NodeSpec(**{**spec.__dict__, "run": run, "timeout_s": 0.01}))
+    assert await node(_state(), runtime=_runtime(_ctx())) == expected
+
+
+def test_a_handoff_always_has_a_reason_even_when_decide_failed() -> None:
+    assert handoff_prep.reasons(_state(errors=["decide:KeyError"])) == ["system_error"]
+    assert handoff_prep.reasons(_state(route_reasons=["budget_exceeded"])) == ["budget_exceeded"]
+    assert handoff_prep.reasons(_state()) == ["system_error"]

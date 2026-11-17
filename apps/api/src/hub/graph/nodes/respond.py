@@ -7,6 +7,7 @@ after the operator's decision (P6-03) come later; until then a run never sends a
 
 from hub.domain.enums import Route, RunStatus
 from hub.graph.context import GraphContext, error_class, ids
+from hub.graph.nodes.handoff_prep import reasons
 from hub.graph.state import TicketState
 from hub.graph.store import finish_run
 
@@ -21,7 +22,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             run_id,
             status=RunStatus.FAILED if errors else RunStatus.COMPLETED,
             route=Route(route),
-            reasons=list(state.get("route_reasons", [])),
+            reasons=reasons(state) if route == "handoff" else list(state.get("route_reasons", [])),
             models=dict(state.get("models", {})),
             error=error_class(errors),
         )

@@ -1,6 +1,6 @@
 """`make llm-requests`: write the recording requests of the run tickets (P3-05, retrieval P5-03).
 
-A plain module, imported by `test_linear_run.py` and run as a script by the Make target; it
+A plain module, imported by `test_graph_run.py` and run as a script by the Make target; it
 imports only from `hub`. Each ticket in `tests/fixtures/run/tickets.jsonl` becomes two request
 files, `run_NN_triage.json` and `run_NN_write.json`, built with the same functions the run uses
 (`intake`, `triage_messages`, `write_messages`, `rag_evidence`), so a ticket sent through the API
