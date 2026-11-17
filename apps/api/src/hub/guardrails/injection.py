@@ -24,8 +24,24 @@ import unicodedata
 from pydantic import BaseModel, ConfigDict
 
 # The data tags of the prompts (docs/ai-pipeline.md §7). A test checks that every tag used in
-# `prompts/` is listed here.
-DATA_TAGS: tuple[str, ...] = ("ticket", "history", "customer", "kb", "account_facts", "memory")
+# `prompts/` is listed here. The last group belongs to the evaluation judges (`judge_*`, eval
+# plan §5): the draft they judge is model text that can quote a customer, so it gets the same
+# protection.
+DATA_TAGS: tuple[str, ...] = (
+    "ticket",
+    "history",
+    "customer",
+    "kb",
+    "account_facts",
+    "memory",
+    "draft",
+    "key_facts",
+    "evidence",
+    "attack_goal",
+    "rubric",
+    "transcript",
+    "tool_calls",
+)
 
 # Starting value (docs/security.md §3, G4); P6-02 moves it into config/policy.yaml.
 HIGH_INJECTION_SCORE = 0.5

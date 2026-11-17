@@ -5,20 +5,27 @@ estimate and limit, the summary files. The whole run against Postgres is tested 
 import json
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hub.config import Settings
 from hub.db.session import connect
+from hub.domain.enums import LlmCallMode
+from hub.kb.full_text import KbSource
 from hub.llm.gateway import CachingProvider
-from hub.llm.schemas import BudgetExceededError, ProviderResponse
+from hub.llm.schemas import BudgetExceededError, LlmUnavailableError, ProviderResponse
+from hub_evals import judges as j
+from hub_evals import report as reporting
 from hub_evals import results as files
 from hub_evals.runner import (
+    ESTIMATED_CITATIONS,
     TICKETS_FILE,
     CostLimit,
     EvalSetupError,
     Report,
     build_pipeline,
+    cited_sources,
     describe,
     estimate_cost,
     estimate_tokens,
@@ -26,6 +33,8 @@ from hub_evals.runner import (
     files_sha256,
     git_state,
     history_turns,
+    judge_requests,
+    judge_ticket,
     load_tickets,
     main,
     masked_counts,
@@ -36,11 +45,15 @@ from hub_evals.runner import (
 )
 from hub_evals.schemas import HistoryMessage, Ticket
 
+from ._gateway import MemoryRecorder, answer, make_gateway, no_calls, queue
+from ._judge_requests import judges as load_test_judges
+
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_CONFIG = {
     "models_config": ROOT / "config" / "models.yaml",
     "prompts_dir": ROOT / "prompts",
 }
+JUDGES = load_test_judges()
 # A public test card number (data_check list).
 TEST_CARD = "4242 4242 4242 4242"
 
@@ -345,16 +358,158 @@ def test_describe_names_counts_only(tmp_path: Path) -> None:
 
 def test_summary_and_report(tmp_path: Path) -> None:
     done = [_result("T-0001", paid="0.003"), _result("T-0002", route="handoff")]
-    data = files.summary(done, planned=3)
+    data = reporting.evaluate(_tickets(), done, planned=3)
     assert data["tickets_finished"] == 2
     assert data["routes"] == {"approval": 1, "handoff": 1}
     assert data["paid_cost_usd"] == "0.003"
     assert data["cost_per_ticket_usd"] == "0.004"
     files.write_metrics(tmp_path / files.METRICS_FILE, data)
     assert json.loads((tmp_path / files.METRICS_FILE).read_text())["tickets_planned"] == 3
-    report = files.render_report(_config(), data, run_name="r1")
+    report = reporting.render_report(_config(), data, run_name="r1")
     assert "2 of 3" in report
     assert "Fake models" in report
     assert "demo check" in report.lower()
-    assert files.summary([], planned=0)["cost_per_ticket_usd"] is None
-    assert "Fake models" not in files.render_report(_config(llm_mode="real"), data, run_name="r")
+    assert "unvalidated, same model family" in report
+    assert reporting.summary([], planned=0)["cost_per_ticket_usd"] is None
+    real = reporting.render_report(_config(llm_mode="real"), data, run_name="r")
+    assert "Fake models" not in real
+
+
+# --- judges (P4-05) -----------------------------------------------------------------------------
+
+
+def _sources() -> list[KbSource]:
+    return [
+        KbSource("withdrawal-times", "Withdrawal times", "u1", ("A SEPA withdrawal costs €1.50.",)),
+        KbSource("fees-overview", "Fees", "u2", ("Receiving money is free.",)),
+    ]
+
+
+def _draft(body: str, *, can_answer: bool = True, citations: list[Any] | None = None) -> Any:  # noqa: ANN401
+    return files.DraftOut(
+        can_answer=can_answer,
+        body=body,
+        missing_information=None,
+        citations=citations
+        if citations is not None
+        else [{"marker": 1, "source_id": "withdrawal-times"}, {"marker": 2, "source_id": "x"}],
+        evidence={"variant": "b0_full_kb", "documents": [], "dropped_markers": []},
+        proposed_actions=[],
+    )
+
+
+def test_cited_sources_maps_markers_to_known_documents() -> None:
+    by_id = {source.id: source for source in _sources()}
+    cited = cited_sources(_draft("x"), by_id)
+    assert {marker: source.id for marker, source in cited.items()} == {1: "withdrawal-times"}
+
+
+async def test_judge_ticket_calls_each_judge_and_tallies_the_paid_calls() -> None:
+    by_id = {source.id: source for source in _sources()}
+    ticket = _tickets()[0]
+    facts = j.KeyFactsVerdict(
+        facts=[
+            j.FactCheck(fact=n, quote="", present=False)
+            for n in range(1, len(ticket.key_facts) + 1)
+        ]
+    )
+    claims = j.FaithfulnessVerdict(
+        claims=[j.ClaimCheck(claim="fee", evidence_quote="costs €1.50", supported=True)]
+    )
+    citation = j.CitationVerdict(quote="A SEPA withdrawal costs €1.50", supports=True)
+    provider = queue(
+        answer(facts),
+        answer(claims, replayed=True),  # from the cache: nothing paid
+        answer(citation),
+    )
+    recorder = MemoryRecorder()
+    gateway = make_gateway(provider, recorder, LlmCallMode.REAL)
+    body = "A SEPA withdrawal costs €1.50. [1] Something without a citation. [2]"
+    result = await judge_ticket(gateway, JUDGES, ticket, _draft(body), by_id)
+
+    assert result.key_facts is not None
+    assert result.key_facts.coverage == 0.0
+    assert result.faithfulness is not None
+    assert result.faithfulness.faithful
+    # Marker [2] names an unknown document: left to the code check, no judge call.
+    assert [(c.marker, c.source_id, c.supports) for c in result.citations] == [
+        (1, "withdrawal-times", True)
+    ]
+    assert result.errors == {}
+    assert result.llm_calls == 3 == len(recorder.rows)
+    assert result.cost_usd == sum((row.cost_usd for row in recorder.rows), Decimal(0))
+    assert Decimal(0) < result.paid_cost_usd < result.cost_usd
+    # The evidence of faithfulness is the cited document only.
+    evidence = provider.requests[1].messages[-1]["content"]
+    assert "Document id: withdrawal-times" in evidence
+    assert "fees-overview" not in evidence
+
+
+async def test_judge_ticket_without_an_answer_judges_only_the_key_facts() -> None:
+    provider = no_calls()  # an empty draft states no key fact: no call at all
+    result = await judge_ticket(
+        make_gateway(provider), JUDGES, _tickets()[0], _draft("", can_answer=False), {}
+    )
+    assert result.key_facts is not None
+    assert result.key_facts.coverage == 0.0
+    assert result.faithfulness is None
+    assert result.citations == []
+    assert result.llm_calls == 0
+
+
+async def test_a_failing_judge_is_noted_and_an_outage_is_raised() -> None:
+    from hub.llm.schemas import ProviderError
+
+    ticket = _tickets()[0].model_copy(update={"key_facts": []})
+    broken = queue(answer({"x": 1}), answer({"x": 2}), answer({"x": 3}), answer({"x": 4}))
+    result = await judge_ticket(
+        make_gateway(broken), JUDGES, ticket, _draft("Fee. [1]"), {s.id: s for s in _sources()}
+    )
+    assert result.errors == {
+        "faithfulness": "StructuredOutputError",
+        "citation": "StructuredOutputError",
+    }
+    assert result.key_facts is None
+
+    outage = ProviderError("APIConnectionError", transient=False)
+    with pytest.raises(LlmUnavailableError):
+        await judge_ticket(
+            make_gateway(queue(outage, outage)), JUDGES, ticket, _draft("Fee. [1]"), {}
+        )
+
+
+def test_the_estimate_adds_the_judges_at_their_largest(tmp_path: Path) -> None:
+    from hub.graph.linear import Pipeline
+
+    pipeline, cache = _pipeline(tmp_path, cache=True)
+    assert isinstance(pipeline, Pipeline)
+    tickets = _tickets()[:2]
+    without = estimate_cost(pipeline, tickets, "kb text", cache)
+    with_judges = estimate_cost(pipeline, tickets, "kb text", cache, JUDGES, _sources())
+    per_ticket = 1 + ESTIMATED_CITATIONS + 1  # faithfulness, citations, key facts
+    assert with_judges.calls == without.calls + 2 * per_ticket
+    assert with_judges.cost_usd > without.cost_usd
+    requests = judge_requests(pipeline.gateway, JUDGES, tickets[0], _sources(), 400)
+    assert {request.model for request in requests} == {"anthropic/claude-haiku-5-5"}
+    assert all(request.max_tokens == 800 for request in requests)
+    no_facts = tickets[0].model_copy(update={"key_facts": []})
+    assert len(judge_requests(pipeline.gateway, JUDGES, no_facts, _sources(), 400)) == 4
+
+
+def test_no_judges_option() -> None:
+    assert parse_args([]).judges
+    assert not parse_args(["--no-judges"]).judges
+
+
+def test_the_judges_are_part_of_the_run_fingerprint() -> None:
+    assert files.config_differences(
+        _config(judge_prompt_versions={"judge_key_facts": "v1"}), _config()
+    ) == ["judge_prompt_versions"]
+
+
+def test_a_result_pays_for_its_answer_and_its_judges() -> None:
+    result = _result("T-0001", paid="0.002").model_copy(
+        update={"judges": files.Judgements(paid_cost_usd=Decimal("0.001"))}
+    )
+    assert result.paid_total_usd == Decimal("0.003")
+    assert _result("T-0001", paid="0.002").paid_total_usd == Decimal("0.002")

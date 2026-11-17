@@ -8,7 +8,8 @@ the database (`make dev`); costs money.
 
 A request file: {"role": "triage", "messages": [...], "tools": [...] (optional)}
 or {"role": "embedding", "texts": [...]}. Messages must already be masked. Optional fields:
-- "schema": the name of a structured-output schema (`SCHEMAS`); the request is built as
+- "schema": the name of a structured-output schema (`SCHEMAS`, or the registry the caller
+  passes: `hub_evals.record` adds the judge schemas); the request is built as
   `complete_structured` builds it.
 - "prompt_version": written to the `llm_calls` rows of the recording.
 - "models": "all" (default: the model and its fallback) or "primary" (the model only), to keep
@@ -21,12 +22,12 @@ A model whose fixture already holds a real recording is skipped, so a second run
 import asyncio
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, model_validator
 
 from hub.config import load_settings
 from hub.db.session import connect
@@ -89,15 +90,25 @@ class RequestSpec(BaseModel):
     messages: list[dict[str, Any]] = []
     texts: list[str] = []
     tools: list[dict[str, Any]] | None = None
-    schema_name: Literal["TriageResult", "DraftAnswer", "SchemaProbe"] | None = Field(
-        default=None, alias="schema"
-    )
+    # A name from the schema registry given as validation context (`SCHEMAS` by default), never
+    # a path to arbitrary code.
+    schema_name: str | None = Field(default=None, alias="schema")
     prompt_version: str | None = None
     models: Literal["all", "primary"] = "all"
+    _schema: type[BaseModel] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def _known_schema(self, info: ValidationInfo) -> "RequestSpec":
+        schemas: Mapping[str, type[BaseModel]] = (info.context or {}).get("schemas", SCHEMAS)
+        if self.schema_name is not None:
+            if self.schema_name not in schemas:
+                raise ValueError(f"unknown schema; known: {', '.join(sorted(schemas))}")
+            self._schema = schemas[self.schema_name]
+        return self
 
     @property
     def schema_model(self) -> type[BaseModel] | None:
-        return SCHEMAS[self.schema_name] if self.schema_name is not None else None
+        return self._schema
 
 
 def spec_requests(gateway: Gateway, spec: RequestSpec) -> list[ProviderRequest]:
@@ -119,9 +130,11 @@ def has_real_recording(directory: Path, request: ProviderRequest) -> bool:
     return isinstance(recorded, str) and recorded != "synthetic"
 
 
-def load_specs(directory: Path) -> list[tuple[Path, RequestSpec]]:
+def load_specs(
+    directory: Path, schemas: Mapping[str, type[BaseModel]] = SCHEMAS
+) -> list[tuple[Path, RequestSpec]]:
     return [
-        (path, RequestSpec.model_validate_json(path.read_bytes()))
+        (path, RequestSpec.model_validate_json(path.read_bytes(), context={"schemas": schemas}))
         for path in sorted((directory / "requests").glob("*.json"))
     ]
 
@@ -145,10 +158,16 @@ def _selector(
     return select
 
 
-async def record_all(gateway: Gateway, directory: Path, *, force: bool = False) -> int:
+async def record_all(
+    gateway: Gateway,
+    directory: Path,
+    *,
+    force: bool = False,
+    schemas: Mapping[str, type[BaseModel]] = SCHEMAS,
+) -> int:
     """Record every request file through the gateway. Returns the number of models called."""
     called = 0
-    for _, spec in load_specs(directory):
+    for _, spec in load_specs(directory, schemas):
         requests = await gateway.record_each_model(
             spec.role,
             messages=spec.messages,
@@ -179,28 +198,35 @@ def recording_gateway(
     )
 
 
-async def _main(force: bool) -> int:
+async def _main(force: bool, directory: Path, schemas: Mapping[str, type[BaseModel]]) -> int:
     settings = load_settings()
     database = connect(settings.database_url.get_secret_value())
     try:
         gateway = recording_gateway(
             LiteLLMProvider(settings),
             DbCallRecorder(database),
-            FIXTURES_DIR,
+            directory,
             settings.models_config,
         )
-        return await record_all(gateway, FIXTURES_DIR, force=force)
+        return await record_all(gateway, directory, force=force, schemas=schemas)
     finally:
         await database.dispose()
 
 
-def main() -> None:
+def main(
+    directory: Path = FIXTURES_DIR,
+    schemas: Mapping[str, type[BaseModel]] = SCHEMAS,
+    *,
+    command: str = "hub.llm.record",
+) -> None:
+    """The command line of a recording. `hub_evals.record` calls it with its own fixture folder
+    and the judge schemas: the app never imports the evaluation package."""
     args = sys.argv[1:]
     if args not in ([], ["--force"]):
-        sys.exit("usage: python -m hub.llm.record [--force]")
-    if not load_specs(FIXTURES_DIR):
+        sys.exit(f"usage: python -m {command} [--force]")
+    if not load_specs(directory, schemas):
         sys.exit("record-llm: no request files found")
-    called = asyncio.run(_main(force=args == ["--force"]))
+    called = asyncio.run(_main(args == ["--force"], directory, schemas))
     print(
         f"record-llm: {called} fixtures written (models that already had a real recording were "
         "skipped); tokens and cost are in llm_calls (context record)"

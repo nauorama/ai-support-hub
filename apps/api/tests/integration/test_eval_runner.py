@@ -26,7 +26,7 @@ from psycopg import sql
 
 from hub.config import Settings
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider
-from hub.llm.schemas import ProviderError, ProviderRequest, ProviderResponse
+from hub.llm.schemas import ProviderError, ProviderRequest, ProviderResponse, Usage
 from hub.observability.readiness import libpq_url
 from hub_evals import results as files
 from hub_evals.runner import TICKETS_FILE, EvalSetupError, Options, load_tickets, run
@@ -193,8 +193,14 @@ async def test_resume_cache_and_results(eval_db: Urls, tmp_path: Path) -> None:
     provider = CountingProvider()
     settings = _settings(eval_db)
     run_dir = tmp_path / "run"
+    # Judges off: this test counts the calls of the answers (judges: the test below).
     options = Options(
-        tickets=tickets, limit=2, run_dir=run_dir, cache_dir=tmp_path / "cache", runs_dir=tmp_path
+        tickets=tickets,
+        limit=2,
+        run_dir=run_dir,
+        cache_dir=tmp_path / "cache",
+        runs_dir=tmp_path,
+        judges=False,
     )
 
     first = await run(settings, options, provider=provider)
@@ -332,6 +338,94 @@ async def test_fake_mode_pays_nothing_and_ignores_the_limit(eval_db: Urls, tmp_p
     assert result.route == "approval"
     assert result.paid_cost_usd == Decimal(0)
     assert (tmp_path / "cache" / "fake").is_dir()
+
+
+@dataclass
+class JudgingProvider:
+    """The recordings for the answers; a fixed verdict for every judge call: no key fact
+    present, no claim, citations not supported."""
+
+    inner: CountingProvider = field(default_factory=CountingProvider)
+    judge_calls: int = 0
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        verdicts: dict[str, dict[str, object]] = {
+            "KeyFactsVerdict": {
+                "facts": [{"fact": n, "quote": "", "present": False} for n in range(1, 4)]
+            },
+            "FaithfulnessVerdict": {"claims": []},
+            "CitationVerdict": {"quote": "", "supports": False},
+        }
+        if request.schema_name in verdicts:
+            self.judge_calls += 1
+            return ProviderResponse(
+                content=json.dumps(verdicts[request.schema_name]),
+                usage=Usage(input_tokens=500, output_tokens=50),
+            )
+        return await self.inner.complete(request)
+
+    async def embed(self, request: ProviderRequest) -> ProviderResponse:
+        return await self.inner.embed(request)
+
+
+async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
+    tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
+    base = load_tickets(tickets)[0]
+    assert len(base.key_facts) == 3  # the fixed key-facts verdict has three items
+    provider = JudgingProvider()
+    run_dir = tmp_path / "run"
+    options = Options(tickets=tickets, run_dir=run_dir, cache_dir=tmp_path / "cache")
+    report = await run(_settings(eval_db), options, provider=provider)
+    assert report.ran == 1
+    assert report.estimate is not None
+    assert report.estimate.calls > 2  # the judges are in the estimate
+
+    (result,) = files.read_results(run_dir / files.RESULTS_FILE)
+    assert result.draft is not None
+    assert result.draft.can_answer
+    # The triage flags come from the run's `triage.done` audit record.
+    assert result.triage.flags() == {
+        "wants_human": False,
+        "reports_unauthorised_activity": False,
+        "is_complaint_or_legal": False,
+    }
+    judges = result.judges
+    assert judges is not None
+    assert judges.errors == {}
+    assert judges.key_facts is not None
+    assert judges.key_facts.coverage == 0.0
+    assert judges.faithfulness is not None
+    assert judges.faithfulness.faithful
+    assert len(judges.citations) >= 1
+    assert judges.llm_calls == provider.judge_calls == 2 + len(judges.citations)
+    assert judges.paid_cost_usd == judges.cost_usd > 0
+    rows = run_sql(
+        eval_db,
+        "SELECT DISTINCT context, node, run_id IS NULL, prompt_version FROM llm_calls"
+        " WHERE node = 'judge' ORDER BY prompt_version",
+    )
+    assert [row[3] for row in rows] == [
+        "judge_citation/v1",
+        "judge_faithfulness/v1",
+        "judge_key_facts/v1",
+    ]
+    assert {row[:3] for row in rows} == {("eval", "judge", True)}
+
+    metrics = json.loads((run_dir / files.METRICS_FILE).read_text())
+    assert metrics["metrics"]["answers"]["key_fact_coverage"]["covered"] == 1
+    assert metrics["judge_llm_calls"] == judges.llm_calls
+    text = (run_dir / files.REPORT_FILE).read_text()
+    assert "unvalidated, same model family" in text
+    assert "key-fact coverage 0.00" in text
+    assert "invalid citation" in text
+
+    # A resume judges nothing again: the result is complete.
+    again = await run(_settings(eval_db), options, provider=provider)
+    assert (again.skipped, again.ran) == (1, 0)
+    assert provider.judge_calls == judges.llm_calls
+    # Judges are part of the run's fingerprint.
+    with pytest.raises(EvalSetupError, match="judge_prompt_versions"):
+        await run(_settings(eval_db), dataclass_replace(options, judges=False), provider=provider)
 
 
 def dataclass_replace(options: Options, **changes: object) -> Options:

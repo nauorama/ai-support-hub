@@ -206,6 +206,29 @@ def test_a_spec_names_only_a_known_schema(tmp_path: Path) -> None:
         load_specs(tmp_path)
 
 
+class OtherSchema(SchemaProbe):
+    """A schema of another package's registry (e.g. the judges of `hub_evals.record`)."""
+
+
+async def test_a_caller_can_record_with_its_own_schema_registry(tmp_path: Path) -> None:
+    _write_spec(tmp_path, "other", {**PROBE_SPEC, "schema": "OtherSchema"})
+    # Unknown to the app's own registry ...
+    with pytest.raises(ValidationError, match="unknown schema"):
+        load_specs(tmp_path)
+    # ... known to the registry the caller passes.
+    schemas = {"OtherSchema": OtherSchema}
+    [(_, spec)] = load_specs(tmp_path, schemas)
+    assert spec.schema_model is OtherSchema
+    inner = ScriptedProvider({HAIKU: [ok('{"marker": "schema_probe"}')]})
+    gateway = _gateway(inner, MemoryRecorder(), tmp_path)
+    assert await record_all(gateway, tmp_path, schemas=schemas) == 1
+    assert inner.requests[0].schema_name == "OtherSchema"
+
+
+def test_a_spec_without_a_schema_has_no_schema_model() -> None:
+    assert RequestSpec.model_validate(TRIAGE_SPEC).schema_model is None
+
+
 async def test_record_mode_writes_real_rows_that_count_against_the_budget(
     tmp_path: Path,
 ) -> None:
@@ -253,3 +276,11 @@ def test_the_command_takes_only_force(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["record", "--everything"])
     with pytest.raises(SystemExit, match="usage"):
         main()
+    with pytest.raises(SystemExit, match=r"python -m other\.record"):
+        main(command="other.record")
+
+
+def test_the_command_needs_request_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(sys, "argv", ["record"])
+    with pytest.raises(SystemExit, match="no request files"):
+        main(tmp_path)

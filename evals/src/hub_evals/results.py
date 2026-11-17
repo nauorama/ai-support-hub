@@ -6,19 +6,20 @@ interrupted run continues where it stopped: the tickets already in the file are 
 A line cut off by the interruption is dropped on resume and that ticket runs again.
 
 Only `report.md` and `metrics.json` are committed; `results.jsonl` holds the drafts and stays
-local (git-ignored). The metrics of eval plan §2 (P4-04) and the judges (P4-05) add to
-`metrics.json` and `report.md`; until then they hold the run summary only.
+local (git-ignored). The metrics of eval plan §2 and the report are built from these files in
+`hub_evals.report`.
 """
 
 import json
-from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from hub_evals.judges import CitationResult, FaithfulnessResult, KeyFactsResult
 
 CONFIG_FILE = "config.json"
 RESULTS_FILE = "results.jsonl"
@@ -47,6 +48,9 @@ class RunConfig(_Frozen):
     core_anchor_date: date | None
     tickets_file: str
     tickets_sha256: str
+    # Judge prompt versions; empty when the run has no judges (`--no-judges`). Judge results of
+    # another prompt or none at all must not mix with these in one report.
+    judge_prompt_versions: dict[str, str] = Field(default_factory=dict)
     # Not part of the fingerprint: they change how the run is done, not what it answers.
     limit: int | None = None
     cache: bool = True
@@ -64,6 +68,20 @@ class Triage(_Frozen):
     secondary_intent: str | None
     urgency: str | None
     summary: str | None
+    # The flags of the `triage.done` audit record (the ticket row has no column for them); None
+    # when the triage did not finish.
+    wants_human: bool | None = None
+    reports_unauthorised_activity: bool | None = None
+    is_complaint_or_legal: bool | None = None
+
+    def flags(self) -> dict[str, bool | None] | None:
+        if self.wants_human is None:
+            return None
+        return {
+            "wants_human": self.wants_human,
+            "reports_unauthorised_activity": self.reports_unauthorised_activity,
+            "is_complaint_or_legal": self.is_complaint_or_legal,
+        }
 
 
 class DraftOut(_Frozen):
@@ -73,6 +91,21 @@ class DraftOut(_Frozen):
     citations: list[dict[str, Any]]
     evidence: dict[str, Any]
     proposed_actions: list[dict[str, Any]]
+
+
+class Judgements(_Frozen):
+    """What the LLM judges said about one draft (P4-05; unvalidated, same model family).
+    `key_facts` is None when the ticket has no key facts; `faithfulness` is None when there is
+    no answer to judge (`can_answer` false or an empty body). `errors`: judge name -> error
+    class of a judge call that failed for good; its metric leaves the ticket out."""
+
+    key_facts: KeyFactsResult | None = None
+    faithfulness: FaithfulnessResult | None = None
+    citations: list[CitationResult] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
+    llm_calls: int = 0
+    cost_usd: Decimal = Decimal(0)
+    paid_cost_usd: Decimal = Decimal(0)
 
 
 class TicketResult(_Frozen):
@@ -100,6 +133,13 @@ class TicketResult(_Frozen):
     llm_calls: int
     latency_ms: int
     events: list[str] = Field(default_factory=list)
+    # None: the run had no judges (`--no-judges`) or the ticket has no draft.
+    judges: Judgements | None = None
+
+    @property
+    def paid_total_usd(self) -> Decimal:
+        """Paid for the answer and its judges: what counts against the run's cost limit."""
+        return self.paid_cost_usd + (self.judges.paid_cost_usd if self.judges else Decimal(0))
 
 
 def read_results(path: Path) -> list[TicketResult]:
@@ -156,80 +196,5 @@ def config_differences(stored: RunConfig, current: RunConfig) -> list[str]:
     return sorted(name for name in new if old.get(name) != new[name])
 
 
-# --- summary (P4-04 adds the metrics of eval plan §2) -----------------------------------------
-
-
-def summary(results: Sequence[TicketResult], *, planned: int) -> dict[str, Any]:
-    """Counts and sums of the finished tickets, as JSON-ready values."""
-    cost = sum((result.cost_usd for result in results), Decimal(0))
-    paid = sum((result.paid_cost_usd for result in results), Decimal(0))
-    return {
-        "tickets_planned": planned,
-        "tickets_finished": len(results),
-        "runs_failed": sum(result.run_failed for result in results),
-        "routes": dict(sorted(Counter(result.route or "none" for result in results).items())),
-        "route_reasons": dict(
-            sorted(Counter(reason for r in results for reason in r.route_reasons).items())
-        ),
-        "errors": dict(sorted(Counter(r.error for r in results if r.error).items())),
-        "llm_calls": sum(result.llm_calls for result in results),
-        "cost_usd": str(cost),
-        "paid_cost_usd": str(paid),
-        "cost_per_ticket_usd": str(cost / len(results)) if results else None,
-    }
-
-
 def write_metrics(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def render_report(config: RunConfig, data: dict[str, Any], *, run_name: str) -> str:
-    """`report.md` of the run. Only the run summary until P4-04 and P4-05."""
-    routes = ", ".join(f"{name} {count}" for name, count in data["routes"].items()) or "none"
-    reasons = (
-        ", ".join(f"{name} {count}" for name, count in data["route_reasons"].items()) or "none"
-    )
-    errors = ", ".join(f"{name} {count}" for name, count in data["errors"].items()) or "none"
-    lines = [
-        f"# Evaluation run {run_name}",
-        "",
-        "Synthetic data. Demo check, not a proof (eval plan §2).",
-        "",
-        "| Setting | Value |",
-        "|---|---|",
-        f"| Variant | `{config.variant}` |",
-        f"| LLM mode | `{config.llm_mode}` |",
-        f"| Graph version | `{config.graph_version}` |",
-        f"| Prompt versions | {_pairs(config.prompt_versions)} |",
-        f"| Models | {_pairs({k: ' / '.join(v) for k, v in config.models.items()})} |",
-        f"| Git | `{config.git_sha}`{' (uncommitted changes)' if config.git_dirty else ''} |",
-        f"| Anchor date | {config.core_anchor_date or 'not set (real date)'} |",
-        f"| Tickets | `{config.tickets_file}` |",
-        "",
-        "## Run summary",
-        "",
-        "| | |",
-        "|---|---|",
-        f"| Tickets finished | {data['tickets_finished']} of {data['tickets_planned']} |",
-        f"| Failed runs | {data['runs_failed']} |",
-        f"| Routes | {routes} |",
-        f"| Route reasons | {reasons} |",
-        f"| Run errors | {errors} |",
-        f"| Model calls | {data['llm_calls']} |",
-        f"| Cost of the answers (USD) | {data['cost_usd']} |",
-        f"| Paid in this run (USD) | {data['paid_cost_usd']} |",
-        "",
-        "The metrics of eval plan §2 come with P4-04, the judge metrics with P4-05.",
-        "",
-    ]
-    if config.llm_mode == "fake":
-        lines[4:4] = [
-            "**Fake models:** answers are recorded responses; a ticket without a recording is "
-            "handed off (`system_error`). These numbers check the runner, not the answers.",
-            "",
-        ]
-    return "\n".join(lines)
-
-
-def _pairs(values: dict[str, str]) -> str:
-    return ", ".join(f"{key} `{value}`" for key, value in sorted(values.items())) or "none"

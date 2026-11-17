@@ -66,4 +66,7 @@ roles:
     model: fastembed/BAAI/bge-small-en-v1.5
     timeout_s: 30
 
-prompts: {triage: v1, research: v1, write: v1, verify: v1, handoff_summary: v1, memory_summary: v1}
+prompts:
+  {triage: v1, research: v1, write: v1, verify: v1, handoff_summary: v1, memory_summary: v1,
+   # Evaluation judges (eval plan §5), all on the `judge` role.
+   judge_key_facts: v1, judge_faithfulness: v1, judge_citation: v1, judge_attack: v1}

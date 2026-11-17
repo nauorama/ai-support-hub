@@ -95,26 +95,31 @@ test-int:
 
 # Real model calls through the gateway (G2 scan, retries, llm_calls rows with context `record`):
 # needs ANTHROPIC_API_KEY in .env and the database (`make dev`); costs money.
-# Rewrites the recorded responses that fake mode (LLM_MODE=fake) serves to the tests.
+# Rewrites the recorded responses that fake mode (LLM_MODE=fake) serves to the tests, then the
+# recorded judge responses of evals/tests/fixtures/llm (P4-05).
 record-llm:
 	uv run python -m hub.llm.record $(if $(FORCE),--force,)
+	uv run python -m hub_evals.record $(if $(FORCE),--force,)
 
 # Rewrites tests/fixtures/llm/requests/triage_*.json from the triage examples and run_*.json from
-# the run tickets, with the active prompts and data/kb (no model call). Run it after a prompt or
-# KB change, then `make record-llm` (a KB change changes every write request).
+# the run tickets, and evals/tests/fixtures/llm/requests/judge_*.json from the judge test cases,
+# with the active prompts and data/kb (no model call). Run it after a prompt or KB change, then
+# `make record-llm` (a KB change changes every write request).
 llm-requests:
 	uv run python apps/api/tests/unit/_triage_requests.py
 	uv run python apps/api/tests/unit/_run_requests.py
+	uv run python evals/tests/_judge_requests.py
 
 # The evaluation runner (eval plan §4) on the 20 dev tickets, against EVAL_DATABASE_URL (run
 # `make migrate` first). Real models cost money: by hand, only when the owner asks (ADR-0018);
 # `LLM_MODE=fake make eval LIMIT=10` checks the runner for free. Options: VARIANT=<name>,
 # LIMIT=<n> (first n tickets), NO_CACHE=1 (milestone run), RESTART=1 (run every ticket again),
-# RUN_DIR=<dir> (resume that run). Judges join in P4-05.
+# RUN_DIR=<dir> (resume that run), NO_JUDGES=1 (skip the LLM judges).
 eval:
 	uv run python -m hub_evals.runner $(if $(VARIANT),--variant $(VARIANT),) \
 		$(if $(LIMIT),--limit $(LIMIT),) $(if $(NO_CACHE),--no-cache,) \
-		$(if $(RESTART),--restart,) $(if $(RUN_DIR),--run-dir $(RUN_DIR),)
+		$(if $(RESTART),--restart,) $(if $(RUN_DIR),--run-dir $(RUN_DIR),) \
+		$(if $(NO_JUDGES),--no-judges,)
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"

@@ -21,6 +21,12 @@ run's own cost limit in place of the daily budget, and the disk cache.
   in this run before its first model call; once the limit is reached the remaining tickets are
   not run (and not written, so a resume with a higher limit runs them). The limit is soft by up
   to the tickets already in flight. In fake mode nothing is paid and the limit does not apply.
+- **Judges** (P4-05, on by default; `--no-judges` turns them off): after a ticket's run, its
+  draft goes to the LLM judges (`hub_evals.judges`): key facts, faithfulness against the cited
+  documents, and one citation call per marked sentence. Judge calls use the same gateway, cache
+  and cost limit; they are recorded with node `judge` and no `run_id`. A judge that fails for
+  good is noted in the ticket's result; an outage is not written, so a resume judges again.
+- **Metrics and report** (P4-04): `metrics.json` and `report.md` from `hub_evals.report`.
 
 The output names counts only, never ticket text. The test set is never read (AGENTS.md rule 7).
 """
@@ -33,21 +39,21 @@ import logging
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from hub.audit import record
 from hub.config import Settings, SettingsError, load_settings
-from hub.db.models import Draft, LlmCall, Run
+from hub.db.models import AuditLog, Draft, LlmCall, Run
 from hub.db.models import Ticket as TicketRow
 from hub.db.repositories import CustomerRepository, MessageRepository, TicketRepository
 from hub.db.session import Database, connect
@@ -66,13 +72,23 @@ from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import triage_messages
 from hub.graph.nodes.write import write_messages
 from hub.guardrails.masking import MaskResult, mask
-from hub.kb.full_text import load_external_sources, render_kb
+from hub.kb.full_text import KbSource, load_external_sources, render_kb
 from hub.kb.loader import load_kb, read_kb
 from hub.llm.gateway import CachingProvider, Gateway, Provider, build_gateway
 from hub.llm.prompts import active_prompt
-from hub.llm.recorder import DbCallRecorder
-from hub.llm.schemas import BudgetExceededError, ProviderRequest, Usage
+from hub.llm.recorder import CallRecorder, DbCallRecorder
+from hub.llm.schemas import (
+    BudgetExceededError,
+    LlmCallRecord,
+    LlmError,
+    LlmUnavailableError,
+    Message,
+    ProviderRequest,
+    Usage,
+)
 from hub.seed import load_customers, read_seed
+from hub_evals import judges as judging
+from hub_evals import report as reporting
 from hub_evals import results as files
 from hub_evals.data_check import TEST_SET_FILE
 from hub_evals.schemas import Ticket
@@ -93,10 +109,14 @@ BUDGET_REASON = "budget_exceeded"
 # its fallback failed (outage, rate limit). A missing recording in fake mode is deterministic and
 # stays a result.
 RETRY_ERRORS = frozenset({"LlmUnavailableError"})
+TRIAGE_FLAGS = ("wants_human", "reports_unauthorised_activity", "is_complaint_or_legal")
 # Characters per token for the estimate: a rough rule for English text.
 CHARS_PER_TOKEN = 4
 # Output tokens of a role without `max_tokens` in the estimate.
 DEFAULT_OUTPUT_TOKENS = 1000
+# Citation judge calls per ticket in the estimate: the number of markers is known only after
+# the answer. A run with more is still held by the running cost limit.
+ESTIMATED_CITATIONS = 3
 
 EXIT_OK = 0
 EXIT_SETUP = 1
@@ -194,16 +214,65 @@ class Estimate:
     cost_usd: Decimal
 
 
+def judge_requests(
+    gateway: Gateway,
+    judge_set: judging.Judges,
+    ticket: Ticket,
+    sources: Sequence[KbSource],
+    draft_chars: int,
+) -> list[ProviderRequest]:
+    """The judge requests of one ticket at their largest, for the estimate: a draft of the
+    write role's full `max_tokens`, all external documents as evidence, the longest document
+    as the cited source, and `ESTIMATED_CITATIONS` citations."""
+    draft = "x" * draft_chars
+    longest = max((render_kb([source]) for source in sources), key=len, default="")
+    calls: list[tuple[list[Message], type[BaseModel]]] = [
+        (
+            judging.faithfulness_messages(
+                judge_set.faithfulness, draft=draft, evidence=render_kb(sources)
+            ),
+            judging.FaithfulnessVerdict,
+        )
+    ]
+    calls += [
+        (
+            judging.citation_messages(judge_set.citation, sentence=draft[:400], source=longest),
+            judging.CitationVerdict,
+        )
+    ] * ESTIMATED_CITATIONS
+    if ticket.key_facts:
+        calls.append(
+            (
+                judging.key_facts_messages(
+                    judge_set.key_facts, draft=draft, key_facts=ticket.key_facts
+                ),
+                judging.KeyFactsVerdict,
+            )
+        )
+    role = judge_set.key_facts.front.role
+    return [gateway.chat_requests(role, messages, schema)[0] for messages, schema in calls]
+
+
 def estimate_cost(
-    pipeline: Pipeline, tickets: Sequence[Ticket], kb: str, cache: CachingProvider | None
+    pipeline: Pipeline,
+    tickets: Sequence[Ticket],
+    kb: str,
+    cache: CachingProvider | None,
+    judge_set: judging.Judges | None = None,
+    sources: Sequence[KbSource] = (),
 ) -> Estimate:
     """An upper bound of what the pending tickets cost with real models: the triage and the write
     request of each ticket (the requests `run_ticket` sends, built by the same functions), each
     priced with its role's model at the estimated input tokens and the full `max_tokens`. A call
-    whose answer is in the cache costs nothing. Repair calls and the fallback are not counted."""
+    whose answer is in the cache costs nothing. Repair calls and the fallback are not counted.
+    With judges, each ticket adds its judge requests at their largest (`judge_requests`); they
+    depend on the answer, so they are never counted as cached."""
     gateway: Gateway = pipeline.gateway
     calls = cached = 0
     total = Decimal(0)
+    draft_chars = (
+        gateway.models.role(pipeline.write_prompt.front.role).max_tokens or DEFAULT_OUTPUT_TOKENS
+    ) * CHARS_PER_TOKEN
     for ticket in tickets:
         result = intake(mask(ticket.message).text, history_turns(ticket))
         requests = [
@@ -223,17 +292,29 @@ def estimate_cost(
                 DraftAnswer,
             )[0],
         ]
+        judged = (
+            judge_requests(gateway, judge_set, ticket, sources, draft_chars)
+            if judge_set is not None
+            else []
+        )
         for request in requests:
             calls += 1
             if cache is not None and cache.contains(request):
                 cached += 1
                 continue
-            usage = Usage(
-                input_tokens=estimate_tokens(request),
-                output_tokens=request.max_tokens or DEFAULT_OUTPUT_TOKENS,
-            )
-            total += gateway.pricing.cost(request.model, usage)
+            total += _price(gateway, request)
+        for request in judged:
+            calls += 1
+            total += _price(gateway, request)
     return Estimate(calls=calls, cached_calls=cached, cost_usd=total)
+
+
+def _price(gateway: Gateway, request: ProviderRequest) -> Decimal:
+    usage = Usage(
+        input_tokens=estimate_tokens(request),
+        output_tokens=request.max_tokens or DEFAULT_OUTPUT_TOKENS,
+    )
+    return gateway.pricing.cost(request.model, usage)
 
 
 def git_state(root: Path = ROOT) -> tuple[str, str | None]:
@@ -350,6 +431,30 @@ async def create_ticket(database: Database, ticket: Ticket) -> tuple[Any, Any, b
         return row.id, message.id, masked.failed
 
 
+async def triage_flags(
+    session: Any,  # noqa: ANN401 - AsyncSession
+    ticket_id: Any,  # noqa: ANN401 - uuid.UUID
+    run_id: Any,  # noqa: ANN401
+) -> dict[str, bool]:
+    """The flags of the run's `triage.done` audit record (the ticket row has no column for
+    them); empty when the triage did not finish."""
+    if run_id is None:
+        return {}
+    rows = await session.scalars(
+        select(AuditLog)
+        .where(
+            AuditLog.action == "triage.done",
+            AuditLog.entity_type == "ticket",
+            AuditLog.entity_id == str(ticket_id),
+        )
+        .order_by(AuditLog.id)
+    )
+    for row in rows:
+        if row.details.get("run_id") == str(run_id):
+            return {name: bool(row.details.get(name)) for name in TRIAGE_FLAGS}
+    return {}
+
+
 async def collect_result(
     database: Database,
     ticket: Ticket,
@@ -375,6 +480,7 @@ async def collect_result(
             if run_id is not None
             else []
         )
+        flags = await triage_flags(session, ticket_id, run_id)
     return files.TicketResult(
         ticket_id=ticket.id,
         run_id=str(run_id) if run_id is not None else None,
@@ -390,6 +496,7 @@ async def collect_result(
             secondary_intent=row.secondary_intent.value if row.secondary_intent else None,
             urgency=row.urgency.value if row.urgency is not None else None,
             summary=row.summary,
+            **flags,
         ),
         draft=files.DraftOut(
             can_answer=draft.can_answer,
@@ -443,6 +550,121 @@ async def run_eval_ticket(pipeline: Pipeline, ticket: Ticket) -> files.TicketRes
     )
 
 
+# --- judges -------------------------------------------------------------------------------------
+
+
+@dataclass
+class CallTally:
+    """Wraps the recorder of one ticket's judge gateway: counts its `llm_calls` rows, their
+    cost and what was paid (rows with mode `real`; a cache hit is `fake`)."""
+
+    inner: CallRecorder
+    calls: int = 0
+    cost_usd: Decimal = Decimal(0)
+    paid_cost_usd: Decimal = Decimal(0)
+
+    def _add(self, call: LlmCallRecord) -> None:
+        self.calls += 1
+        self.cost_usd += call.cost_usd
+        if call.mode == LlmCallMode.REAL:
+            self.paid_cost_usd += call.cost_usd
+
+    async def record(self, call: LlmCallRecord) -> None:
+        await self.inner.record(call)
+        self._add(call)
+
+    async def record_blocked(self, call: LlmCallRecord, entities: dict[str, int]) -> None:
+        await self.inner.record_blocked(call, entities)
+        self._add(call)
+
+
+def cited_sources(draft: files.DraftOut, sources: Mapping[str, KbSource]) -> dict[int, KbSource]:
+    """marker -> the source its citation names (unknown ids were dropped by the run)."""
+    cited: dict[int, KbSource] = {}
+    for citation in draft.citations:
+        source = sources.get(str(citation.get("source_id")))
+        if source is not None and isinstance(citation.get("marker"), int):
+            cited.setdefault(citation["marker"], source)
+    return cited
+
+
+async def judge_ticket(
+    gateway: Gateway,
+    judge_set: judging.Judges,
+    ticket: Ticket,
+    draft: files.DraftOut,
+    sources: Mapping[str, KbSource],
+) -> files.Judgements:
+    """The judges of one draft (eval plan §5). Key facts are judged on every draft (an empty
+    one states none, without a call); faithfulness and citations only on an answer. The
+    evidence of faithfulness is the cited documents, as the writer cited them. An outage
+    (`LlmUnavailableError`) is raised: the result is not written and a resume judges again.
+    Any other judge error is noted and leaves the ticket out of that metric."""
+    tally = CallTally(gateway.recorder)
+    judge_gateway = dataclasses.replace(gateway, recorder=tally)
+    errors: dict[str, str] = {}
+    body = draft.body if draft.can_answer else ""
+    cited = cited_sources(draft, sources)
+
+    async def attempt[T](name: str, job: Awaitable[T]) -> T | None:
+        try:
+            return await job
+        except LlmUnavailableError:
+            raise
+        except LlmError as exc:
+            errors.setdefault(name, type(exc).__name__)
+            return None
+
+    key_facts = (
+        await attempt(
+            "key_facts",
+            judging.judge_key_facts(
+                judge_gateway, judge_set.key_facts, draft=body, key_facts=ticket.key_facts
+            ),
+        )
+        if ticket.key_facts
+        else None
+    )
+    faithfulness = None
+    citations: list[judging.CitationResult] = []
+    if body.strip():
+        evidence = render_kb(
+            sorted({source.id: source for source in cited.values()}.values(), key=lambda s: s.id)
+        )
+        faithfulness = await attempt(
+            "faithfulness",
+            judging.judge_faithfulness(
+                judge_gateway, judge_set.faithfulness, draft=body, evidence=evidence
+            ),
+        )
+        for marker, sentence in judging.marked_sentences(body):
+            source = cited.get(marker)
+            if source is None:
+                continue  # a marker without a citation: found by the code check
+            verdict = await attempt(
+                "citation",
+                judging.judge_citation(
+                    judge_gateway,
+                    judge_set.citation,
+                    marker=marker,
+                    source_id=source.id,
+                    sentence=sentence,
+                    source=render_kb([source]),
+                ),
+            )
+            if verdict is not None:
+                citations.append(verdict)
+    return files.Judgements(
+        key_facts=key_facts,
+        faithfulness=faithfulness,
+        citations=citations,
+        errors=errors,
+        llm_calls=tally.calls,
+        cost_usd=tally.cost_usd,
+        paid_cost_usd=tally.paid_cost_usd,
+    )
+
+
 # --- the run ------------------------------------------------------------------------------------
 
 
@@ -453,6 +675,7 @@ class Options:
     limit: int | None = None
     cache: bool = True
     restart: bool = False
+    judges: bool = True
     run_dir: Path | None = None
     concurrency: int = CONCURRENCY
     runs_dir: Path = RUNS_DIR
@@ -509,25 +732,33 @@ def build_pipeline(
     return pipeline, limit, cache
 
 
-def run_config(settings: Settings, pipeline: Pipeline, options: Options) -> files.RunConfig:
+def run_config(
+    settings: Settings,
+    pipeline: Pipeline,
+    options: Options,
+    judge_set: judging.Judges | None = None,
+) -> files.RunConfig:
     sha, diff = git_state()
     models = pipeline.gateway.models
+    prompts = [pipeline.triage_prompt, pipeline.write_prompt]
+    if judge_set is not None:
+        prompts += judge_set.prompts
     prompt_files = [
-        settings.prompts_dir / prompt.node / f"{prompt.front.version}.md"
-        for prompt in (pipeline.triage_prompt, pipeline.write_prompt)
+        settings.prompts_dir / prompt.node / f"{prompt.front.version}.md" for prompt in prompts
     ]
+    nodes = [("triage", pipeline.triage_prompt), ("write", pipeline.write_prompt)]
+    if judge_set is not None:
+        nodes.append(("judge", judge_set.key_facts))
     return files.RunConfig(
         variant=pipeline.variant,
         llm_mode=settings.llm_mode,
         graph_version=GRAPH_VERSION,
         models={
             node: [choice.model for choice in models.role(prompt.front.role).choices()]
-            for node, prompt in (
-                ("triage", pipeline.triage_prompt),
-                ("write", pipeline.write_prompt),
-            )
+            for node, prompt in nodes
         },
         prompt_versions=pipeline.prompt_versions,
+        judge_prompt_versions=judge_set.prompt_versions if judge_set is not None else {},
         git_sha=sha,
         git_dirty=diff is not None,
         git_diff_sha256=diff,
@@ -581,7 +812,12 @@ async def _run(
         cache_dir=options.cache_dir if options.cache else None,
         provider=provider,
     )
-    config = run_config(settings, pipeline, options)
+    judge_set = (
+        judging.load_judges(settings.prompts_dir, pipeline.gateway.models)
+        if options.judges
+        else None
+    )
+    config = run_config(settings, pipeline, options, judge_set)
     day = datetime.now(UTC).date().isoformat()
     run_dir = options.run_dir or options.runs_dir / run_name(
         day, config.variant, config.git_sha, dirty=config.git_dirty, llm_mode=config.llm_mode
@@ -606,7 +842,7 @@ async def _run(
     files.rewrite_results(results_path, done)
     files.write_config(config_path, config)
     for result in done:
-        limit.add(result.paid_cost_usd)
+        limit.add(result.paid_total_usd)
 
     todo = pending(tickets, done)
     report = Report(run_dir=run_dir, planned=len(tickets), skipped=len(tickets) - len(todo), ran=0)
@@ -616,7 +852,8 @@ async def _run(
         sources = await load_external_sources(session)
     if not sources:
         raise EvalSetupError("no external KB document in the evaluation database")
-    report.estimate = estimate_cost(pipeline, todo, render_kb(sources), cache)
+    report.estimate = estimate_cost(pipeline, todo, render_kb(sources), cache, judge_set, sources)
+    by_id = {source.id: source for source in sources}
     if limit.enforced and limit.spent + report.estimate.cost_usd > limit.limit:
         report.stopped_by_estimate = True
         _finish(run_dir, config, tickets, results_path, report, cache)
@@ -640,6 +877,21 @@ async def _run(
                 # (cheap: answers that came are in the cache).
                 report.unavailable += 1
                 return
+            if judge_set is not None and result.draft is not None:
+                if limit.reached:
+                    # Not judged, so not written: a resume with a higher limit judges it (its
+                    # answer comes from the cache).
+                    report.stopped_at_cost_limit = True
+                    return
+                try:
+                    judgements = await judge_ticket(
+                        pipeline.gateway, judge_set, ticket, result.draft, by_id
+                    )
+                except LlmUnavailableError:
+                    report.unavailable += 1
+                    return
+                limit.add(judgements.paid_cost_usd)
+                result = result.model_copy(update={"judges": judgements})
             files.append_result(results_path, result)
             report.ran += 1
 
@@ -661,7 +913,7 @@ def _finish(
         (r for r in files.read_results(results_path) if r.ticket_id in order),
         key=lambda r: order[r.ticket_id],
     )
-    data = files.summary(finished, planned=len(tickets))
+    data = reporting.evaluate(tickets, finished, planned=len(tickets))
     data["cache"] = {
         "enabled": cache is not None,
         "hits": cache.hits if cache is not None else 0,
@@ -671,7 +923,7 @@ def _finish(
     data["stopped_by_estimate"] = report.stopped_by_estimate
     files.write_metrics(run_dir / files.METRICS_FILE, data)
     (run_dir / files.REPORT_FILE).write_text(
-        files.render_report(config, data, run_name=run_dir.name), encoding="utf-8"
+        reporting.render_report(config, data, run_name=run_dir.name), encoding="utf-8"
     )
     if cache is not None:
         report.cache_hits, report.cache_misses = cache.hits, cache.misses
@@ -688,6 +940,7 @@ def parse_args(argv: Sequence[str]) -> Options:
     parser.add_argument("--no-cache", action="store_true", help="turn the disk cache off")
     parser.add_argument("--restart", action="store_true", help="run every ticket again")
     parser.add_argument("--run-dir", type=Path, default=None, help="resume this run directory")
+    parser.add_argument("--no-judges", action="store_true", help="skip the LLM judges")
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
     args = parser.parse_args(list(argv))
     if args.limit is not None and args.limit < 1:
@@ -698,6 +951,7 @@ def parse_args(argv: Sequence[str]) -> Options:
         limit=args.limit,
         cache=not args.no_cache,
         restart=args.restart,
+        judges=not args.no_judges,
         run_dir=args.run_dir,
         concurrency=args.concurrency,
     )
