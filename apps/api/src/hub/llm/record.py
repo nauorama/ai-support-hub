@@ -34,6 +34,7 @@ from hub.db.session import connect
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import LlmCallContext, LlmCallMode, LlmNode
 from hub.domain.triage import TriageResult
+from hub.domain.verification import ClaimsAnswer
 from hub.llm.config import load_models
 from hub.llm.gateway import (
     FIXTURES_DIR,
@@ -79,6 +80,7 @@ class SchemaProbe(BaseModel):
 SCHEMAS: dict[str, type[BaseModel]] = {
     "TriageResult": TriageResult,
     "DraftAnswer": DraftAnswer,
+    "ClaimsAnswer": ClaimsAnswer,
     "SchemaProbe": SchemaProbe,
 }
 

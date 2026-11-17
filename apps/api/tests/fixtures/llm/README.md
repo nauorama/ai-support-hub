@@ -20,6 +20,11 @@
   that the real server finds the same hits. A KB or search change can change the hits; run
   `make llm-requests` and `make record-llm` (about $0.0005 per write request). Only the role's
   own model is recorded.
+- `requests/run_NN_verify.json` (P5-04) holds the recorded write answer of a run ticket, so it is
+  generated only when that recording exists and the answer passes every code check of the verify
+  step (a ticket that cannot answer makes no verify call). After a new write recording, run
+  `make llm-requests` again, then `make record-llm`. `requests/verify_*.json` come from
+  `../verify/cases.jsonl` (a draft that passes and one with an invented fee).
 - `requests/schema_probe.json` checks that the provider accepts every schema shape we use
   (`SchemaProbe`: `const`, a description next to a `$ref`, a nullable `$ref`). First real
   recording 2026-11-16: accepted by Haiku 5.5 and by Sonnet 5.5 with thinking `between_tools`.

@@ -91,6 +91,18 @@ class DraftOut(_Frozen):
     citations: list[dict[str, Any]]
     evidence: dict[str, Any]
     proposed_actions: list[dict[str, Any]]
+    # From the verify step (P5-04, RAG variants); B0 results and older files have none.
+    groundedness: Decimal | None = None
+    unsupported_claims: list[dict[str, Any]] = Field(default_factory=list)
+
+    @property
+    def ranked_chunk_ids(self) -> list[str] | None:
+        """The chunk ids of the first search in rank order (`evidence.chunks`, P5-03); None
+        when the run made no search (B0)."""
+        chunks = self.evidence.get("chunks")
+        if not isinstance(chunks, list):
+            return None
+        return [str(chunk["chunk_id"]) for chunk in chunks]
 
 
 class Judgements(_Frozen):

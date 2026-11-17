@@ -1,4 +1,4 @@
-"""The evaluation runner against Postgres (P4-03).
+"""The evaluation runner against Postgres (P4-03) and Qdrant (P5-05).
 
 - `make migrate` also upgrades the evaluation database (`-x db=eval`), after which the app role
   can write there (default privileges are per database).
@@ -8,11 +8,13 @@
 
 Model answers come from the recordings in `tests/fixtures/llm` (the run tickets of
 `tests/fixtures/run/tickets.jsonl`), served through a counting provider so the test sees every
-call that would have reached a model.
+call that would have reached a model. These tests run baseline B0; the RAG variant has its own
+test at the end, with a scripted writer and verifier, the real local models and Qdrant.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -25,15 +27,24 @@ import pytest
 from psycopg import sql
 
 from hub.config import Settings
+from hub.graph.linear import B0_VARIANT
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider
 from hub.llm.schemas import ProviderError, ProviderRequest, ProviderResponse, Usage
 from hub.observability.readiness import libpq_url
 from hub_evals import results as files
-from hub_evals.runner import TICKETS_FILE, EvalSetupError, Options, load_tickets, run
+from hub_evals.runner import (
+    ESTIMATED_CITATIONS,
+    TICKETS_FILE,
+    EvalSetupError,
+    Options,
+    load_tickets,
+    run,
+)
 
 from ._api import Urls, own_database, run_sql
 from ._compose import ROOT
 from ._db import ALEMBIC_INI, app_url, as_user
+from ._kb import MODEL_DIR
 
 DATABASE = "hub_eval_runner_test"
 MIGRATE_DATABASE = "hub_eval_migrate_test"
@@ -196,6 +207,7 @@ async def test_resume_cache_and_results(eval_db: Urls, tmp_path: Path) -> None:
     # Judges off: this test counts the calls of the answers (judges: the test below).
     options = Options(
         tickets=tickets,
+        variant=B0_VARIANT,
         limit=2,
         run_dir=run_dir,
         cache_dir=tmp_path / "cache",
@@ -299,7 +311,9 @@ async def test_a_ticket_failed_by_an_outage_runs_again_on_resume(
     eval_db: Urls, tmp_path: Path
 ) -> None:
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
-    options = Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache")
+    options = Options(
+        tickets=tickets, variant=B0_VARIANT, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"
+    )
     down = DownProvider()
     report = await run(_settings(eval_db), options, provider=down)
     assert down.calls == 2  # the model and its fallback
@@ -316,7 +330,12 @@ async def test_the_estimate_above_the_limit_stops_before_any_call(
     provider = CountingProvider()
     report = await run(
         _settings(eval_db, eval_max_cost_usd=0.0001),
-        Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"),
+        Options(
+            tickets=tickets,
+            variant=B0_VARIANT,
+            run_dir=tmp_path / "run",
+            cache_dir=tmp_path / "cache",
+        ),
         provider=provider,
     )
     assert report.stopped_by_estimate
@@ -330,7 +349,12 @@ async def test_fake_mode_pays_nothing_and_ignores_the_limit(eval_db: Urls, tmp_p
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
     report = await run(
         _settings(eval_db, llm_mode="fake", eval_max_cost_usd=0),
-        Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"),
+        Options(
+            tickets=tickets,
+            variant=B0_VARIANT,
+            run_dir=tmp_path / "run",
+            cache_dir=tmp_path / "cache",
+        ),
     )
     assert report.ran == 1
     assert not report.stopped_by_estimate
@@ -374,7 +398,9 @@ async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
     assert len(base.key_facts) == 3  # the fixed key-facts verdict has three items
     provider = JudgingProvider()
     run_dir = tmp_path / "run"
-    options = Options(tickets=tickets, run_dir=run_dir, cache_dir=tmp_path / "cache")
+    options = Options(
+        tickets=tickets, variant=B0_VARIANT, run_dir=run_dir, cache_dir=tmp_path / "cache"
+    )
     report = await run(_settings(eval_db), options, provider=provider)
     assert report.ran == 1
     assert report.estimate is not None
@@ -457,7 +483,9 @@ async def test_a_judge_outage_is_not_written_and_its_paid_calls_count(
     eval_db: Urls, tmp_path: Path
 ) -> None:
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
-    options = Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache")
+    options = Options(
+        tickets=tickets, variant=B0_VARIANT, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"
+    )
     before = _paid(eval_db)
     down = JudgeDownProvider()
     report = await run(_settings(eval_db), options, provider=down)
@@ -492,7 +520,9 @@ async def test_the_limit_reached_before_the_judges_writes_nothing(
     eval_db: Urls, tmp_path: Path
 ) -> None:
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
-    options = Options(tickets=tickets, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache")
+    options = Options(
+        tickets=tickets, variant=B0_VARIANT, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"
+    )
     provider = CostlyProvider()
     settings = _settings(eval_db, eval_max_cost_usd=1.0)
     report = await run(settings, options, provider=provider)
@@ -508,3 +538,123 @@ def dataclass_replace(options: Options, **changes: object) -> Options:
     import dataclasses
 
     return dataclasses.replace(options, **changes)  # type: ignore[arg-type]
+
+
+# --- a RAG variant (P5-05) ----------------------------------------------------------------------
+
+_SOURCE_ID = re.compile(r"^Source id: (\S+)$", re.MULTILINE)
+SEPA_ANSWER = "A SEPA withdrawal arrives in 1 business day if you request it before 15:00 CET. [1]"
+
+
+@dataclass
+class ScriptedRagProvider(JudgingProvider):
+    """Triage from the recordings, the judges' fixed verdicts, and a scripted writer and
+    verifier: the draft cites the first chunk of its `<kb>`, the verifier finds the one claim
+    there."""
+
+    requests: list[ProviderRequest] = field(default_factory=list)
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        self.requests.append(request)
+        user = str(request.messages[-1]["content"])
+        if request.schema_name == "DraftAnswer":
+            first = _SOURCE_ID.findall(user)[0]
+            content: dict[str, object] = {
+                "can_answer": True,
+                "missing_information": None,
+                "answer": SEPA_ANSWER,
+                "citations": [{"marker": 1, "source_id": first}],
+                "proposed_actions": [],
+            }
+        elif request.schema_name == "ClaimsAnswer":
+            first = _SOURCE_ID.findall(user)[0]
+            content = {
+                "claims": [{"claim": "SEPA takes 1 day", "supported": True, "source_id": first}]
+            }
+        else:
+            return await super().complete(request)
+        return ProviderResponse(
+            content=json.dumps(content), usage=Usage(input_tokens=1000, output_tokens=100)
+        )
+
+
+async def _aliases(qdrant_url: str) -> dict[str, str]:
+    from qdrant_client import AsyncQdrantClient
+
+    client = AsyncQdrantClient(url=qdrant_url)
+    try:
+        response = await client.get_aliases()
+        return {item.alias_name: item.collection_name for item in response.aliases}
+    finally:
+        await client.close()
+
+
+async def test_a_rag_ticket_runs_through_the_runner(
+    eval_db: Urls, qdrant_url: str, tmp_path: Path
+) -> None:
+    """P5-05 done when: one RAG ticket through the runner with a scripted provider. The runner
+    indexes the evaluation KB under its own alias, the writer reads the search hits, verify
+    runs, the judges read the chunks the writer read, and the report shows hit@5."""
+    from hub_evals.runner import EVAL_KB_ALIAS
+
+    tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
+    run_dir = tmp_path / "run"
+    options = Options(tickets=tickets, run_dir=run_dir, cache_dir=tmp_path / "cache")
+    assert options.variant == "rag_hybrid"  # the default
+    settings = _settings(eval_db, qdrant_url=qdrant_url, embedding_cache_dir=MODEL_DIR)
+    app_aliases = {k: v for k, v in (await _aliases(qdrant_url)).items() if k != EVAL_KB_ALIAS}
+    provider = ScriptedRagProvider()
+
+    report = await run(settings, options, provider=provider)
+
+    assert report.ran == 1
+    assert report.estimate is not None
+    # triage, write, verify, and the judges: faithfulness, citations, key facts
+    assert report.estimate.calls == 3 + 1 + ESTIMATED_CITATIONS + 1
+    aliases = await _aliases(qdrant_url)
+    assert aliases[EVAL_KB_ALIAS].startswith("eval_kb_chunks_v")
+    # The app's index is never touched.
+    assert {k: v for k, v in aliases.items() if k != EVAL_KB_ALIAS} == app_aliases
+
+    (result,) = files.read_results(run_dir / files.RESULTS_FILE)
+    assert result.prompt_versions == {"triage": "v1", "write": "v2", "verify": "v1"}
+    assert result.draft is not None
+    assert result.draft.evidence["variant"] == "rag_hybrid"
+    ranked = result.draft.ranked_chunk_ids
+    assert ranked is not None
+    assert len(ranked) == 6
+    first = ranked[0]
+    assert result.draft.citations[0]["source_id"] == first
+    assert (result.draft.groundedness, result.draft.unsupported_claims) == (Decimal("1.000"), [])
+    nodes = run_sql(
+        eval_db,
+        "SELECT node FROM llm_calls WHERE run_id = %s ORDER BY created_at",
+        result.run_id,
+    )
+    assert [node for (node,) in nodes] == ["triage", "write", "verify"]
+    embeddings = run_sql(
+        eval_db,
+        "SELECT DISTINCT context, sum(cost_usd) FROM llm_calls WHERE node = 'embedding'"
+        " GROUP BY context",
+    )
+    assert embeddings == [("eval", Decimal(0))]
+
+    # The judges read what the writer read: every chunk for faithfulness, the cited one for
+    # the citation.
+    judged = {r.schema_name: str(r.messages[-1]["content"]) for r in provider.requests}
+    assert _SOURCE_ID.findall(judged["FaithfulnessVerdict"]) == ranked
+    assert _SOURCE_ID.findall(judged["CitationVerdict"]) == [first]
+    assert result.judges is not None
+    assert [c.source_id for c in result.judges.citations] == [first]
+
+    metrics = json.loads((run_dir / files.METRICS_FILE).read_text())["metrics"]
+    assert metrics["retrieval"]["covered"] == 1
+    assert metrics["retrieval"]["hit_at_5"]["total"] == 1
+    assert "| hit@5 | " in (run_dir / files.REPORT_FILE).read_text()
+
+    # A second run finds the index in line and embeds no chunk again: only the query.
+    before = run_sql(eval_db, "SELECT count(*) FROM llm_calls WHERE node = 'embedding'")[0][0]
+    again = await run(settings, dataclass_replace(options, restart=True), provider=provider)
+    assert again.ran == 1
+    after = run_sql(eval_db, "SELECT count(*) FROM llm_calls WHERE node = 'embedding'")[0][0]
+    assert after - before <= 2  # the estimate's search and the run's search

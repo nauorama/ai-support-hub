@@ -235,10 +235,15 @@ def _routing(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, m.Rate]:
     )
 
 
+def ranked_ids(result: TicketResult) -> list[str] | None:
+    """The ranked chunk ids of the run's first search (P5-05), from the draft's evidence; None
+    when no search ran (B0) or there is no draft (a failed run, a row-1 handoff)."""
+    return result.draft.ranked_chunk_ids if result.draft is not None else None
+
+
 def _retrieval(pairs: Sequence[tuple[Ticket, TicketResult]]) -> m.RetrievalScores:
-    # B0 runs no search, so no ticket has a ranked list. Phase 5 adds the ranked ids of the
-    # first search to the results; tickets that ran none stay excluded.
-    return m.retrieval([(None, t.gold_doc_ids) for t, _ in pairs])
+    # Tickets that ran no search, or have no gold documents, are excluded (P4-04).
+    return m.retrieval([(ranked_ids(r), t.gold_doc_ids) for t, r in pairs])
 
 
 def _details(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, Any]:
@@ -313,7 +318,7 @@ def _rows(pairs: Sequence[tuple[Ticket, TicketResult]]) -> list[Row]:
             )
         )
     hit = retrieval.hit_at_k
-    no_search = f"no KB search in this variant (0 of {len(pairs)} tickets)"
+    no_search = f"no ticket ran a KB search (0 of {len(pairs)} tickets)"
     rows += [
         Row(
             m.Check(f"hit@{retrieval.k}", hit.value, 0.9, 0.8, True),

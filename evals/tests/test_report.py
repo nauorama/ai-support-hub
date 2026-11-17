@@ -312,7 +312,7 @@ def test_the_report_marks_demo_check_and_unvalidated_judges() -> None:
     assert "unvalidated, same model family" in text
     assert "| key-fact coverage *(judged)* | 1.00 (2 tickets) | ≥ 0.85 | 0.75 | ✅ pass |" in text
     assert "| triage accuracy | 1 of 2 (50%; 95% CI " in text
-    assert "| hit@5 | no KB search in this variant (0 of 2 tickets) |" in text
+    assert "| hit@5 | no ticket ran a KB search (0 of 2 tickets) |" in text
     assert "| escalation recall | 0 of 0; 0 missed | 1.00 | 1 miss | — not measured |" in text
     assert "| fees_fx | withdrawal_issue 1 |" in text
     assert "| withdrawal_issue | **withdrawal_issue** 1 |" in text
@@ -332,3 +332,44 @@ def test_the_report_of_a_fake_run_without_judges_or_problems() -> None:
     assert "**Fake models:**" in text
     assert "| Judge prompts | off |" in text
     assert "## Tickets with problems\n\nNone." in text
+
+
+# --- retrieval (P5-05) --------------------------------------------------------------------------
+
+
+def _rag_draft(*chunk_ids: str) -> DraftOut:
+    chunks = [{"chunk_id": chunk_id, "text": "t"} for chunk_id in chunk_ids]
+    return draft(evidence={"variant": "rag_hybrid", "chunks": chunks, "dropped_markers": []})
+
+
+def test_hit_at_5_and_mrr_come_from_the_ranked_chunks_of_the_first_search() -> None:
+    tickets = [
+        ticket("T-0001"),  # gold withdrawal-times: rank 2
+        ticket("T-0002", gold_doc_ids=["error-codes#ERR-2003"]),  # rank 6: not in the top 5
+        ticket("T-0003"),  # no draft: no ranked list, left out
+        ticket("T-0004", gold_doc_ids=[]),  # no gold document: left out
+    ]
+    results = [
+        result("T-0001", draft=_rag_draft("fees#0", "withdrawal-times#3", "x#1")),
+        result(
+            "T-0002", draft=_rag_draft("a#0", "b#0", "c#0", "d#0", "e#0", "error-codes#ERR-2003")
+        ),
+        result("T-0003", draft=None, judges=None),
+        result("T-0004", draft=_rag_draft("withdrawal-times#0")),
+    ]
+    assert r.ranked_ids(results[0]) == ["fees#0", "withdrawal-times#3", "x#1"]
+    assert r.ranked_ids(results[2]) is None
+    data = r.evaluate(tickets, results, planned=4)
+    retrieval = data["metrics"]["retrieval"]
+    assert retrieval["hit_at_5"]["count"] == 1
+    assert retrieval["hit_at_5"]["total"] == 2
+    assert retrieval["mrr"] == (1 / 2 + 1 / 6) / 2
+    assert (retrieval["covered"], retrieval["excluded_no_kb_search"]) == (2, 2)
+    text = r.render_report(config(variant="rag_hybrid"), data, run_name="rag")
+    assert "| hit@5 | 1 of 2 (50%" in text
+
+
+def test_older_results_without_verification_still_read() -> None:
+    old = draft()
+    assert old.groundedness is None
+    assert old.unsupported_claims == []

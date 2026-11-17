@@ -12,7 +12,10 @@ import pytest
 from hub.config import Settings
 from hub.db.session import connect
 from hub.domain.enums import LlmCallMode
-from hub.kb.full_text import KbSource
+from hub.graph.linear import b0_evidence
+from hub.kb.chunk_text import render_chunks
+from hub.kb.full_text import KbSource, render_kb
+from hub.kb.retriever import KbChunk
 from hub.llm.gateway import CachingProvider
 from hub.llm.schemas import BudgetExceededError, LlmUnavailableError, ProviderResponse
 from hub_evals import judges as j
@@ -22,6 +25,7 @@ from hub_evals.runner import (
     ESTIMATED_CITATIONS,
     TICKETS_FILE,
     CostLimit,
+    EstimateEvidence,
     EvalSetupError,
     Report,
     build_pipeline,
@@ -33,6 +37,7 @@ from hub_evals.runner import (
     files_sha256,
     git_state,
     history_turns,
+    judge_evidence,
     judge_requests,
     judge_ticket,
     load_tickets,
@@ -240,13 +245,19 @@ async def test_the_cost_limit_refuses_only_when_enforced_and_reached() -> None:
     assert not fake.reached
 
 
-def _pipeline(tmp_path: Path, *, cache: bool) -> tuple[object, CachingProvider | None]:
+def _pipeline(
+    tmp_path: Path, *, cache: bool, variant: str = "b0_full_kb"
+) -> tuple[object, CachingProvider | None]:
     settings = Settings(_env_file=None, llm_mode="real", **FIXTURE_CONFIG)  # type: ignore[arg-type]
     database = connect("postgresql+psycopg://nobody@localhost:1/none")  # never connected
     pipeline, _, provider = build_pipeline(
-        settings, database, variant="b0_full_kb", cache_dir=tmp_path if cache else None
+        settings, database, variant=variant, cache_dir=tmp_path if cache else None
     )
     return pipeline, provider
+
+
+def _evidence(tickets: list[Ticket], kb: str = "kb text") -> dict[str, EstimateEvidence]:
+    return {ticket.id: EstimateEvidence(kb, (kb,)) for ticket in tickets}
 
 
 def test_build_pipeline_uses_eval_context_and_the_cache(tmp_path: Path) -> None:
@@ -267,7 +278,7 @@ def test_the_estimate_prices_two_calls_per_ticket_and_cached_calls_are_free(
     assert isinstance(pipeline, Pipeline)
     assert cache is not None
     tickets = _tickets()[:2]
-    first = estimate_cost(pipeline, tickets, "kb text", cache)
+    first = estimate_cost(pipeline, tickets, _evidence(tickets), cache)
     assert (first.calls, first.cached_calls) == (4, 0)
     assert first.cost_usd > 0
     # Store an answer for the first ticket's triage request: that call is free now.
@@ -287,7 +298,7 @@ def test_the_estimate_prices_two_calls_per_ticket_and_cached_calls_are_free(
     )[0]
     (tmp_path / "real").mkdir()
     write_fixture(tmp_path / "real", request, ProviderResponse(content="{}"))
-    second = estimate_cost(pipeline, tickets, "kb text", cache)
+    second = estimate_cost(pipeline, tickets, _evidence(tickets), cache)
     assert (second.calls, second.cached_calls) == (4, 1)
     assert second.cost_usd < first.cost_usd
     assert estimate_tokens(request) > 0
@@ -323,8 +334,11 @@ def test_parse_args() -> None:
     assert parse_args([]).cache
     with pytest.raises(SystemExit):
         parse_args(["--limit", "0"])
+    assert parse_args([]).variant == "rag_hybrid"
+    assert parse_args(["--variant", "rag_dense"]).variant == "rag_dense"
+    assert parse_args(["--variant", "b0_full_kb"]).variant == "b0_full_kb"
     with pytest.raises(SystemExit):
-        parse_args(["--variant", "rag_hybrid"])  # not built yet (phase 5)
+        parse_args(["--variant", "rag_rerank"])
 
 
 def test_main_reports_a_setup_error(
@@ -376,6 +390,83 @@ def test_summary_and_report(tmp_path: Path) -> None:
 
 
 # --- judges (P4-05) -----------------------------------------------------------------------------
+
+
+def _chunk(chunk_id: str, text: str, rank: int) -> KbChunk:
+    doc_id = chunk_id.split("#")[0]
+    return KbChunk(
+        chunk_id=chunk_id,
+        doc_id=doc_id,
+        title=doc_id,
+        section="s",
+        url=f"/help/{doc_id}#s",
+        text=text,
+        visibility="external",
+        score=1.0,
+        rank=rank,
+    )
+
+
+def _rag_draft(body: str) -> Any:  # noqa: ANN401
+    chunks = [
+        _chunk("withdrawal-times#0", "A SEPA withdrawal costs €1.50.", 1),
+        _chunk("fees-overview#2", "Receiving money is free.", 2),
+    ]
+    return files.DraftOut(
+        can_answer=True,
+        body=body,
+        missing_information=None,
+        citations=[
+            {"marker": 1, "source_id": "withdrawal-times#0"},
+            {"marker": 2, "source_id": "gone#9"},
+        ],
+        evidence={
+            "variant": "rag_hybrid",
+            "chunks": [c.model_dump(mode="json") for c in chunks],
+            "dropped_markers": [],
+        },
+        proposed_actions=[],
+    )
+
+
+def test_a_rag_draft_is_judged_against_every_chunk_the_writer_read() -> None:
+    draft = _rag_draft("x")
+    evidence = judge_evidence(draft, {})
+    read = [
+        _chunk("withdrawal-times#0", "A SEPA withdrawal costs €1.50.", 1),
+        _chunk("fees-overview#2", "Receiving money is free.", 2),
+    ]
+    assert evidence.text == render_chunks(read)
+    # Only the cited chunk the writer read; an unknown id is left to the code check.
+    assert evidence.cited == {1: ("withdrawal-times#0", render_chunks(read[:1]))}
+    assert draft.ranked_chunk_ids == ["withdrawal-times#0", "fees-overview#2"]
+
+
+def test_a_b0_draft_is_judged_against_the_cited_documents() -> None:
+    by_id = {source.id: source for source in _sources()}
+    evidence = judge_evidence(_draft("x"), by_id)
+    assert evidence.text == render_kb([by_id["withdrawal-times"]])
+    assert evidence.cited == {1: ("withdrawal-times", render_kb([by_id["withdrawal-times"]]))}
+    assert _draft("x").ranked_chunk_ids is None
+
+
+async def test_a_rag_citation_is_judged_against_its_chunk() -> None:
+    citation = j.CitationVerdict(quote="A SEPA withdrawal costs €1.50", supports=True)
+    claims = j.FaithfulnessVerdict(
+        claims=[j.ClaimCheck(claim="fee", evidence_quote="costs €1.50", supported=True)]
+    )
+    ticket = _tickets()[0].model_copy(update={"key_facts": []})
+    provider = queue(answer(claims), answer(citation))
+    body = "A SEPA withdrawal costs €1.50. [1] Receiving is free. [2]"
+    result = await judge_ticket(make_gateway(provider), JUDGES, ticket, _rag_draft(body), {})
+    assert [(c.marker, c.source_id, c.supports) for c in result.citations] == [
+        (1, "withdrawal-times#0", True)
+    ]
+    faithfulness, cited = (str(r.messages[-1]["content"]) for r in provider.requests)
+    assert "Source id: withdrawal-times#0" in faithfulness
+    assert "Source id: fees-overview#2" in faithfulness
+    assert "Source id: withdrawal-times#0" in cited
+    assert "fees-overview" not in cited
 
 
 def _sources() -> list[KbSource]:
@@ -546,16 +637,36 @@ def test_the_estimate_adds_the_judges_at_their_largest(tmp_path: Path) -> None:
     pipeline, cache = _pipeline(tmp_path, cache=True)
     assert isinstance(pipeline, Pipeline)
     tickets = _tickets()[:2]
-    without = estimate_cost(pipeline, tickets, "kb text", cache)
-    with_judges = estimate_cost(pipeline, tickets, "kb text", cache, JUDGES, _sources())
+    evidence = _evidence(tickets, render_kb(_sources()))
+    without = estimate_cost(pipeline, tickets, evidence, cache)
+    with_judges = estimate_cost(pipeline, tickets, evidence, cache, JUDGES)
     per_ticket = 1 + ESTIMATED_CITATIONS + 1  # faithfulness, citations, key facts
     assert with_judges.calls == without.calls + 2 * per_ticket
     assert with_judges.cost_usd > without.cost_usd
-    requests = judge_requests(pipeline.gateway, JUDGES, tickets[0], _sources(), 400)
+    sources = EstimateEvidence.of(b0_evidence(_sources()), _sources())
+    requests = judge_requests(pipeline.gateway, JUDGES, tickets[0], sources, 400)
     assert {request.model for request in requests} == {"anthropic/claude-haiku-5-5"}
     assert all(request.max_tokens == 800 for request in requests)
     no_facts = tickets[0].model_copy(update={"key_facts": []})
-    assert len(judge_requests(pipeline.gateway, JUDGES, no_facts, _sources(), 400)) == 4
+    assert len(judge_requests(pipeline.gateway, JUDGES, no_facts, sources, 400)) == 4
+
+
+def test_a_rag_estimate_adds_the_verify_call_and_uses_the_tickets_chunks(tmp_path: Path) -> None:
+    from hub.graph.linear import Pipeline, rag_evidence
+
+    pipeline, cache = _pipeline(tmp_path, cache=True, variant="rag_hybrid")
+    assert isinstance(pipeline, Pipeline)
+    assert pipeline.verify_prompt is not None
+    tickets = _tickets()[:2]
+    hits = [_chunk("withdrawal-times#0", "SEPA takes 1 business day.", 1)]
+    evidence = {t.id: EstimateEvidence.of(rag_evidence("rag_hybrid", hits)) for t in tickets}
+    assert evidence[tickets[0].id].sources == (render_chunks(hits),)
+    estimate = estimate_cost(pipeline, tickets, evidence, cache)
+    assert (estimate.calls, estimate.cached_calls) == (6, 0)  # triage, write, verify
+    with_judges = estimate_cost(pipeline, tickets, evidence, cache, JUDGES)
+    assert with_judges.calls == 6 + 2 * (1 + ESTIMATED_CITATIONS + 1)
+    longer = {t.id: EstimateEvidence.of(rag_evidence("rag_hybrid", hits * 6)) for t in tickets}
+    assert estimate_cost(pipeline, tickets, longer, cache).cost_usd > estimate.cost_usd
 
 
 def test_no_judges_option() -> None:

@@ -163,10 +163,13 @@ class ClaimCheck(BaseModel):
     supported: bool
     source_id: str | None
 
-class Verification(BaseModel):
+class ClaimsAnswer(BaseModel):          # what the verify model fills in (P5-04)
     claims: list[ClaimCheck]
-    groundedness: float                   # supported claims / all claims
-    policy_violations: list[str]          # from code checks
+
+class Verification(BaseModel):            # built in code, never by the model
+    claims: list[ClaimCheck]
+    groundedness: float | None            # supported claims / all claims; None when a code check failed
+    policy_violations: list[str]          # codes from the code checks
     passed: bool
 
 class ReviewDecision(BaseModel):          # built by the API from the operator's request, never by a model
@@ -183,13 +186,15 @@ Validation: the gateway asks the provider for JSON that matches the schema, vali
 - The repair call holds the original messages, the invalid answer and the validation errors (locations and messages only, never input values). It goes to the model that wrote the invalid answer, with the usual G2 scan, retries, and then the fallback when that model was the role's own.
 - A second invalid answer raises `StructuredOutputError`; the node hands off.
 
-**Code checks in `verify`** (all must pass before the LLM check is even called):
+**Code checks in `verify`** (all must pass before the LLM check is even called; `guardrails/output_checks.py`, P5-04). They run on the answer as the model wrote it: the run's placeholders restored, before the card mask and before markers without a kept citation are removed, so a check sees what the model did. Each failed check gives a violation code (`cannot_answer`, `empty_answer`, `marker_without_citation`, `unknown_source`, `no_citation`, `unmarked_fact`, `card_data`, `placeholder`, `internal_text`, `forbidden_promise:<name>`, `too_long`, `not_english`); codes hold no draft text.
 1. `can_answer` is true and the answer is not empty.
 2. Every `[n]` marker has a citation, and every citation points to a chunk or fact in `evidence`.
 3. At least one citation. Every paragraph with a number, date, fee or time has a marker.
-4. No card-data pattern, no placeholder left in the text, no text from `internal` documents (the writer never receives them; this is a second check with the list of internal chunk hashes).
-5. No forbidden promise from `config/policy.yaml` (refund, limit increase, unfreeze, the reason of a restriction, legal advice). Checked with patterns and by the LLM verifier.
-6. Length ≤ 1,200 characters; language = English.
+4. No card-data pattern, no placeholder left in the text, no text from `internal` documents (the writer never receives them; this is a second check with the list of internal chunk hashes: SHA-256 of every 8-word window of the internal chunks, without the windows an external chunk has too, read from Postgres per run).
+5. No forbidden promise from `config/policy.yaml` (refund, limit increase, unfreeze, the reason of a restriction, legal advice). Checked with patterns and by the LLM verifier. Until P6-02 creates `config/policy.yaml`, the patterns are `FORBIDDEN_PROMISES` in `output_checks.py`: conservative ones for a first-person promise or a done deed ("we will refund", "your limit has been raised"); a test checks that no external chunk matches them. The verify prompt counts a promise no source makes as an unsupported claim.
+6. Length ≤ 1,200 characters; language = English (a heuristic without a dependency: most letters ASCII, and English function words outnumber those of other European languages when there are any).
+
+**LLM check** (`prompts/verify/v1.md`, role `verify`, `graph/nodes/verify.py`): the model splits the answer into atomic claims and names, for each, the source id that states it, or null. Code then counts a claim marked supported whose source id the writer was not given as unsupported, sets `groundedness` (3 decimals) and `passed` (every claim supported; an answer without any claim gets groundedness 0 and fails). The result is stored on the draft (`groundedness`, `unsupported_claims`) and in the `verify.done` audit record (counts and codes only). Until P6-02 the linear run routes every draft to approval with reason `auto_reply_off` whatever the verification says; routing on it (row 4) and the retry (P6-04) come with the graph.
 
 If the LLM check finds unsupported claims and `retry_count == 0`, the graph goes back to `research` with the list of unsupported claims as extra search hints. After one retry, the result stands.
 
@@ -327,6 +332,6 @@ For evaluation runs, the workflow accepts a `variant` in the run config. ADR-001
 | Variant | Meaning |
 |---|---|
 | `b0_full_kb` | No retrieval: all external articles in the system part of the write prompt inside one `<kb>` tag, separated by plain-text `Document id:` lines (with prompt caching); citations point to document ids (P3-05, `hub/graph/linear.py`, `hub/kb/full_text.py`). |
-| `rag_hybrid` (default), `rag_dense` | Retrieval settings (no reranker variant, ADR-0018). Until P6-01 the linear run (`hub/graph/linear.py`, P5-03) does step 0 of `research` only: one search with the masked ticket text, `external`, top 6, hybrid or dense; the hits go into the user part of `write/v2` (`Source id:` lines, `hub/kb/chunk_text.py`) and citations name chunk ids. `write/v1` stays the B0 prompt. The evaluation runner runs B0 only until the evaluation KB is indexed in Qdrant. |
+| `rag_hybrid` (default), `rag_dense` | Retrieval settings (no reranker variant, ADR-0018). Until P6-01 the linear run (`hub/graph/linear.py`, P5-03) does step 0 of `research` only: one search with the masked ticket text, `external`, top 6, hybrid or dense; the hits go into the user part of `write/v2` (`Source id:` lines, `hub/kb/chunk_text.py`) and citations name chunk ids. `write/v1` stays the B0 prompt. The linear run verifies the draft of a RAG variant (P5-04, §5); B0 has no verify step. The evaluation runner runs all three; for the RAG variants it indexes the evaluation KB in Qdrant under its own alias `eval_kb_chunks` (P5-05, eval plan §4). |
 
 Variants are for evaluation only; production uses the default.
