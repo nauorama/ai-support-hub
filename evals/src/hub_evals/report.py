@@ -525,7 +525,8 @@ def render_report(config: RunConfig, data: dict[str, Any], *, run_name: str) -> 
         f"{citations['judged_unsupported']} of {citations['judged_citations']} judged citations "
         "not supported. "
         f"Retrieval: {metrics['retrieval']['covered']} tickets, "
-        f"{metrics['retrieval']['excluded_no_kb_search']} left out (no KB search).",
+        f"{metrics['retrieval']['excluded_no_kb_search']} left out "
+        "(no KB search, or no gold documents).",
         "",
         "## Triage",
         "",

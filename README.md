@@ -60,6 +60,25 @@ Run `2026-11-17-b0_full_kb-4bc48fc`: the phase 3 linear pipeline (whole knowledg
 
 Every ticket went to operator approval: B0 has no policy gate or handoff yet, so the hard-handoff red line cannot be met until P6-02, and the escalation-recall and wrong-auto-reply passes say nothing about routing quality or safety. Auto-reply stays off.
 
+## Phase 5 numbers (retrieval, `rag_hybrid`)
+
+> Same caveats as above: **synthetic data, demo check, not a proof**; *judged* metrics are unvalidated, same model family.
+
+Run `2026-11-17-rag_hybrid-4fc85cb`: the linear pipeline with one hybrid knowledge-base search (top 6 chunks), the writer `write/v2` citing chunks, and the new verify step (code checks, then an LLM claim check). Full report: [evals/runs/2026-11-17-rag_hybrid-4fc85cb/report.md](evals/runs/2026-11-17-rag_hybrid-4fc85cb/report.md); error analysis: [error-analysis.md](evals/runs/2026-11-17-rag_hybrid-4fc85cb/error-analysis.md).
+
+**B0 against RAG is not measured.** The comparison experiment (E1) was removed in budget mode (ADR-0018), and this run's faithfulness and citation numbers come from `judge_*/v2`, while B0 was judged with v1, so they are not comparable.
+
+| Metric | Value (count, 95% Wilson interval) | Gate 5 / red line | Result |
+|---|---|---|---|
+| hit@5 (first search) | 14 of 18 (55%–91%); MRR 0.61 | ≥ 0.80 | **missed** (one ticket short) |
+| Answered tickets with an unsupported claim *(judged)* | 6 of 9 (35%–88%) | at most 2 | **missed** |
+| Key-fact coverage *(judged)* | 0.41 (14 tickets) | 0.75 | missed |
+| Answered tickets with an invalid citation *(judged)* | 5 of 9 (27%–81%) | 1 | missed |
+| Drafts that answered (`can_answer`) | 9 of 20 | — | reported |
+| Cost per ticket (answers only) | $0.0007; $0.018 paid for the run with judges | €0.10 | pass |
+
+Gate 5 is not met. The error analysis sorts every failure by cause. The prompts were not tuned to these numbers; changes are decided by the owner. Every ticket still goes to operator approval, and auto-reply stays off.
+
 ## How this project is built
 
 The design package was written first. A coding agent builds the system phase by phase from [the build plan](docs/build-plan.md); the owner reviews each phase, checks the attack set and makes the risk decisions (whether auto-reply goes on in the demo). Each phase ends with a walkthrough for the owner, written locally to `docs/walkthrough/`. Walkthroughs are personal notes: the folder is git-ignored and they are not in this repository.
