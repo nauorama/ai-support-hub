@@ -80,6 +80,9 @@ class ProviderResponse(BaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
     vectors: list[list[float]] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
+    # Set by `CachingProvider` on a hit of the evaluation disk cache: a stored answer, nothing
+    # paid. Never written to a file (`exclude`), so fixtures and cache files stay as they were.
+    replayed: bool = Field(default=False, exclude=True)
 
 
 class Completion(BaseModel):

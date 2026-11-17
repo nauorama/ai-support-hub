@@ -1,8 +1,11 @@
 """Alembic environment (based on the `async` template of Alembic 1.20).
 
 The URL is the migrator connection: `Settings.database_url_for_migrations` (DATABASE_URL_DIRECT,
-falling back to DATABASE_URL). Tests pass their own URL in `config.attributes["url"]`; an
-attribute and not `sqlalchemy.url`, because the ini parser would read `%` in a password.
+falling back to DATABASE_URL). `-x db=eval` migrates the evaluation database instead
+(`Settings.eval_database_url_for_migrations`; `make migrate` runs both, P4-03): default privileges
+are per database, so the app role gets its grants in `hub_eval` only from these migrations.
+Tests pass their own URL in `config.attributes["url"]`; an attribute and not `sqlalchemy.url`,
+because the ini parser would read `%` in a password.
 """
 
 import asyncio
@@ -10,7 +13,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from hub.config import load_settings
@@ -25,17 +28,40 @@ if config.config_file_name is not None and not config.attributes.get("url"):
 target_metadata = Base.metadata
 
 
-def _url() -> str:
+def _database(url: str) -> tuple[str | None, int, str | None]:
+    parsed = make_url(url)
+    return parsed.host, parsed.port or 5432, parsed.database
+
+
+def _url() -> str | None:
+    """The migrator URL, or None when there is nothing to migrate (`-x db=eval` without an
+    evaluation database: an older `.env` keeps `make migrate` working)."""
     url = config.attributes.get("url")
     if isinstance(url, str) and url:
         return url
-    return load_settings().database_url_for_migrations.get_secret_value()
+    settings = load_settings()
+    target = context.get_x_argument(as_dictionary=True).get("db", "app")
+    app_url = settings.database_url_for_migrations.get_secret_value()
+    if target == "app":
+        return app_url
+    if target == "eval":
+        eval_url = settings.eval_database_url_for_migrations.get_secret_value()
+        if not eval_url:
+            print("migrate: EVAL_DATABASE_URL is empty, evaluation database skipped")
+            return None
+        if _database(eval_url) == _database(app_url):
+            raise SystemExit("the evaluation database is the app database; set EVAL_DATABASE_URL")
+        return eval_url
+    raise SystemExit(f"unknown -x db={target}; use app or eval")
 
 
 def run_migrations_offline() -> None:
     """`alembic upgrade --sql`: print the SQL instead of running it."""
+    url = _url()
+    if url is None:
+        return
     context.configure(
-        url=_url(),
+        url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -56,7 +82,10 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
-    engine = create_async_engine(_url(), poolclass=pool.NullPool)
+    url = _url()
+    if url is None:
+        return
+    engine = create_async_engine(url, poolclass=pool.NullPool)
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await engine.dispose()

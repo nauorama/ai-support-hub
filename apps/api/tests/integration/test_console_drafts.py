@@ -28,6 +28,10 @@ from ._api import Urls, add_customer, add_operator, customer_client, key, new_ti
 DATABASE = "hub_console_drafts_test"
 # Public test card number (Visa test range); never a real card.
 TEST_CARD = "4111 1111 1111 1111"
+# The full test card number in any stored form (spaces, dashes or none). Not just "4111": the row
+# text also holds random UUIDs, hashes and timestamps, which contain "4111" now and then (a draft
+# id `d684111e-…` failed CI once).
+CARD_PATTERN = "4111[ -]?1111[ -]?1111[ -]?1111"
 RAW_DIGITS = "4111111111111111"
 EMAILS = {
     "operator": "marta@tallybridge.test",
@@ -302,7 +306,7 @@ def test_edit_sends_the_operators_text_with_the_operator_label(
     assert _one(urls, "SELECT resolution FROM tickets WHERE id = %s", ticket_id) == ("ai_edited",)
     assert "guardrail.masked" in [a for (a,) in run_sql(urls, "SELECT action FROM audit_log")]
     for table in ("messages", "drafts", "audit_log"):
-        rows = run_sql(urls, f"SELECT count(*) FROM {table} WHERE {table}::text LIKE %s", "%4111%")  # noqa: S608
+        rows = run_sql(urls, f"SELECT count(*) FROM {table} WHERE {table}::text ~ %s", CARD_PATTERN)  # noqa: S608
         assert rows == [(0,)], table
 
     # An operator's text is not an AI answer: it cannot be rated.
@@ -520,7 +524,7 @@ def test_a_reject_reply_with_card_data_is_stored_masked(
     )
     assert str(masking[0]) == out["message"]["id"]
     for table in ("messages", "drafts", "audit_log"):
-        rows = run_sql(urls, f"SELECT count(*) FROM {table} WHERE {table}::text LIKE %s", "%4111%")  # noqa: S608
+        rows = run_sql(urls, f"SELECT count(*) FROM {table} WHERE {table}::text ~ %s", CARD_PATTERN)  # noqa: S608
         assert rows == [(0,)], table
 
 

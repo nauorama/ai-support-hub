@@ -12,7 +12,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 |---|---|
 | `make setup` | `uv sync`, `pnpm install`, copy `.env.example` → `.env` if missing, install pre-commit hooks |
 | `make up` / `make down` | start / stop the compose stack |
-| `make migrate` | Alembic upgrade + LangGraph checkpointer setup |
+| `make migrate` | Alembic upgrade of the app database, then of the evaluation database (`-x db=eval`, migrator `EVAL_DATABASE_URL_DIRECT`; skipped when `EVAL_DATABASE_URL` is empty, refused when it names the app database; P4-03) + LangGraph checkpointer setup |
 | `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
 | `make kb-load` | load `data/kb` into Postgres and Qdrant (only changed documents); the Qdrant part arrives in phase 5 |
 | `make dev` | `up` + `migrate` + `seed` + `kb-load` |
@@ -22,7 +22,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make lint` | ruff, mypy, import-linter, eslint, tsc |
 | `make data-check` | validate `data/` (seed schemas and rules; KB front matter, `error_codes.csv`, internal-only phrases in external content; seed error codes must be in the CSV; evaluation tickets and attacks: schema per line, known customers and external gold documents, composition rules of the [eval plan](eval-plan.md) §3) |
 | `make kb-numbers` | report every number in `data/kb/` that is not in the world file (a report, not a gate) |
-| `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018) |
+| `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018). `LLM_MODE=fake make eval LIMIT=10` checks the runner for free (the eval tickets have no recordings, so each is handed off with `system_error`) |
 | `make web-types` | generate TypeScript types from OpenAPI |
 | `make retention` | run the retention job once |
 | `make record-llm` | refresh recorded model responses for tests (real calls); skips models that already have a real recording, `FORCE=1` records them again |
@@ -43,7 +43,8 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `APP_ENV` | `local` \| `test` \| `demo` | |
 | `DATABASE_URL` | `postgresql+psycopg://…` | pooled connection as the **app role** (a login user in group `hub_app`) |
 | `DATABASE_URL_DIRECT` | | direct (not pooled) connection as the **migrator** (schema owner) for migrations and checkpointer setup; empty = same as `DATABASE_URL`, which only works when that user may create tables |
-| `EVAL_DATABASE_URL` | | separate database for evaluation runs |
+| `EVAL_DATABASE_URL` | | separate database for evaluation runs, as the app role |
+| `EVAL_DATABASE_URL_DIRECT` | | migrator of the evaluation database (`make migrate`); empty = `DATABASE_URL_DIRECT` (or `DATABASE_URL`) with the database name of `EVAL_DATABASE_URL` |
 | `CORE_ANCHOR_DATE` | empty \| `2026-11-12` | "today" for the core mock and the workflow; empty = real date; fixed in tests and evaluation |
 | `JOBS_TOKEN` | random | bearer token for `POST /admin/jobs/*` |
 | `QDRANT_URL`, `QDRANT_API_KEY` | | key empty locally |

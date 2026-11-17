@@ -117,6 +117,33 @@ def test_migrations_use_the_direct_url_when_set() -> None:
     )
 
 
+def test_the_eval_migrator_defaults_to_the_hub_migrator_on_the_eval_database() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://app:pw@host:5432/hub",
+        database_url_direct="postgresql+psycopg://owner:secret@host:5432/hub",
+        eval_database_url="postgresql+psycopg://app:pw@host:5432/hub_eval",
+    )
+    assert settings.eval_database_url_for_migrations.get_secret_value() == (
+        "postgresql+psycopg://owner:secret@host:5432/hub_eval"
+    )
+
+
+def test_the_eval_migrator_url_wins_when_set() -> None:
+    settings = Settings(
+        _env_file=None,
+        eval_database_url="postgresql+psycopg://app@host/hub_eval",
+        eval_database_url_direct="postgresql+psycopg://owner@other/hub_eval",
+    )
+    assert settings.eval_database_url_for_migrations.get_secret_value() == (
+        "postgresql+psycopg://owner@other/hub_eval"
+    )
+
+
+def test_no_eval_database_means_nothing_to_migrate() -> None:
+    assert Settings(_env_file=None).eval_database_url_for_migrations.get_secret_value() == ""
+
+
 def test_database_urls_are_hidden_in_repr() -> None:
     settings = Settings(
         _env_file=None,

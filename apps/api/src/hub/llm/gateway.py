@@ -15,6 +15,10 @@ status `invalid_output`.
 (`make record-llm`) and never makes a real call. Tests pass a scripted provider. Every row names
 the mode (`llm_calls.mode`), so the budget guard can leave fake-mode rows out.
 
+Evaluation runs wrap the provider in `CachingProvider`, a disk cache keyed by the request (eval
+plan §4): a hit makes no provider call and is recorded with mode `fake`, because it repeats a
+stored answer and nothing was paid.
+
 The budget guard (G8, `hub/llm/budget.py`) runs before every `online` call, before the G2 scan
 and before any provider call: a refused call is no attempt and writes no row.
 """
@@ -23,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -96,6 +101,8 @@ litellm.suppress_debug_info = True
 LITELLM_LOGGERS = ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy")
 for _name in LITELLM_LOGGERS:
     logging.getLogger(_name).setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 
 RETRIES = 2
 BACKOFF_S = 0.5  # waits 0.5 s, then 1 s
@@ -313,6 +320,78 @@ class RecordingProvider:
         return response
 
 
+class CachingProvider:
+    """The evaluation disk cache (eval plan §4): `<dir>/<fixture key>.json`, in the fixture
+    format. The key covers the model, its parameters and everything the model sees (the prompt
+    text, so a new prompt version is a new key), so a prompt change re-runs only the calls whose
+    input changed. A hit returns the stored answer marked `replayed` and calls nothing; a miss
+    calls `inner`. The gateway calls `store` only for an answer that passed its check (P4-03
+    review): a failed call or an answer the schema check rejects is never stored, so a passing
+    model glitch is not replayed forever. A store that fails (disk full, permissions) is logged
+    and ignored: the answer was paid and must reach the caller and its `llm_calls` row. `hits`
+    and `misses` count the calls of this process, for the run summary.
+
+    Callers keep one directory per `LLM_MODE`, so a fake answer is never replayed as a real
+    one."""
+
+    def __init__(self, inner: Provider, directory: Path) -> None:
+        self._inner = inner
+        self._directory = directory
+        self.hits = 0
+        self.misses = 0
+
+    def path(self, request: ProviderRequest) -> Path:
+        return self._directory / f"{request.fixture_key()}.json"
+
+    def contains(self, request: ProviderRequest) -> bool:
+        return self.path(request).is_file()
+
+    def _load(self, request: ProviderRequest) -> ProviderResponse | None:
+        try:
+            stored = Fixture.model_validate_json(self.path(request).read_bytes())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValidationError) as exc:
+            # An unreadable or broken cache file: a miss, never a failed call.
+            logger.warning(
+                "evaluation cache file is unreadable; calling the model again",
+                extra={"error": type(exc).__name__},
+            )
+            return None
+        return stored.response.model_copy(update={"replayed": True})
+
+    async def _call(
+        self,
+        request: ProviderRequest,
+        send: Callable[[ProviderRequest], Awaitable[ProviderResponse]],
+    ) -> ProviderResponse:
+        cached = self._load(request)
+        if cached is not None:
+            self.hits += 1
+            return cached
+        self.misses += 1
+        return await send(request)
+
+    def store(self, request: ProviderRequest, response: ProviderResponse) -> None:
+        """Keep a checked answer. Never raises: a cache that cannot write must not fail the
+        call. Only the error class is logged."""
+        if response.replayed:
+            return
+        try:
+            self._directory.mkdir(parents=True, exist_ok=True)
+            write_fixture(self._directory, request, response)
+        except (OSError, OutboundBlockedError) as exc:
+            logger.warning(
+                "evaluation cache could not store an answer", extra={"error": type(exc).__name__}
+            )
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        return await self._call(request, self._inner.complete)
+
+    async def embed(self, request: ProviderRequest) -> ProviderResponse:
+        return await self._call(request, self._inner.embed)
+
+
 def write_fixture(directory: Path, request: ProviderRequest, response: ProviderResponse) -> Path:
     """Used by `make record-llm`. The request is scanned again before it is written."""
     entities = scan_outbound(request)
@@ -324,10 +403,14 @@ def write_fixture(directory: Path, request: ProviderRequest, response: ProviderR
         recorded=time.strftime("%Y-%m-%d"),
     )
     path = directory / f"{request.fixture_key()}.json"
-    path.write_text(
-        json.dumps(fixture.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    text = json.dumps(fixture.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n"
+    # Written to a temporary file and moved into place, so an interrupted run (the evaluation
+    # cache is written while tickets run in parallel) never leaves half a file behind.
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=directory, suffix=".tmp", delete=False
+    ) as handle:
+        handle.write(text)
+    Path(handle.name).replace(path)
     return path
 
 
@@ -591,6 +674,8 @@ class Gateway:
                         raise OutputCheckError(
                             f"node {call.node.value}: the answer check failed ({kind})"
                         ) from None
+                    if invalid is None and isinstance(self.provider, CachingProvider):
+                        self.provider.store(request, response)
                     await self.recorder.record(
                         self._row(
                             call,
@@ -600,6 +685,7 @@ class Gateway:
                             cost=cost,
                             latency_ms=latency_ms,
                             error=invalid.summary if invalid is not None else None,
+                            replayed=response.replayed,
                         )
                     )
                     return _Outcome(request, response, cost, latency_ms, index, invalid)
@@ -631,13 +717,15 @@ class Gateway:
         cost: Decimal = Decimal(0),
         latency_ms: int = 0,
         error: str | None = None,
+        replayed: bool = False,
     ) -> LlmCallRecord:
+        """`replayed`: an answer from the evaluation cache, recorded as `fake` (nothing paid)."""
         usage = usage or Usage()
         return LlmCallRecord(
             id=uuid7(),
             run_id=call.run_id,
             context=call.context,
-            mode=self.mode,
+            mode=LlmCallMode.FAKE if replayed else self.mode,
             node=call.node,
             model=model,
             prompt_version=call.prompt_version,
@@ -672,16 +760,23 @@ def _structured[T: BaseModel](
 
 
 def build_gateway(
-    settings: Settings, recorder: CallRecorder, budget: BudgetCheck | None
+    settings: Settings,
+    recorder: CallRecorder,
+    budget: BudgetCheck | None,
+    *,
+    cache_dir: Path | None = None,
 ) -> Gateway:
     """The gateway of the app: config files next to each other, provider and row mode from
-    LLM_MODE. `budget`: the app always passes its guard."""
+    LLM_MODE. `budget`: the app always passes its guard. `cache_dir`: evaluation runs only, the
+    disk cache (`CachingProvider`) in `<cache_dir>/<LLM_MODE>/`."""
     models = load_models(settings.models_config)
     pricing = load_pricing(settings.models_config.parent / "pricing.yaml")
     pricing.check_covers(models)
     provider: Provider = (
         LiteLLMProvider(settings) if settings.llm_mode == "real" else FixtureProvider(FIXTURES_DIR)
     )
+    if cache_dir is not None:
+        provider = CachingProvider(provider, cache_dir / settings.llm_mode)
     return Gateway(
         models=models,
         pricing=pricing,
