@@ -26,6 +26,11 @@ async def ticket(session: AsyncSession, ticket_id: uuid.UUID) -> Ticket:
     return found
 
 
+async def current_status(pipeline: Pipeline, ticket_id: uuid.UUID) -> TicketStatus:
+    async with pipeline.database.sessions() as session:
+        return (await ticket(session, ticket_id)).status
+
+
 async def start_run(
     pipeline: Pipeline, ticket_id: uuid.UUID, message_id: uuid.UUID
 ) -> tuple[uuid.UUID, uuid.UUID] | TicketStatus:
@@ -86,7 +91,8 @@ async def finish_run(
     run.error = error
     run.confidence = to_decimal(confidence)
     run.features = dict(features or {})
-    run.finished_at = datetime.now(UTC)
+    # A paused run (`interrupted`) has its outcome so far, but has not finished.
+    run.finished_at = None if status == RunStatus.INTERRUPTED else datetime.now(UTC)
 
 
 def to_decimal(value: float | None) -> Decimal | None:

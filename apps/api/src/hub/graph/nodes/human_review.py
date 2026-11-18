@@ -7,28 +7,37 @@ as `superseded` and the ticket is left as the operator has it. On the handoff ro
 `handoff_prep` already moved the ticket; a draft the run wrote (a handoff from `decide`) is stored
 as `superseded` for the operator (P6-02).
 
-The run does not pause yet: the operator's decision goes through the console endpoints as in
-phase 3. P6-03 adds `interrupt()` here and resumes the run with `Command(resume=…)`. A failure
-here is not caught: the run's last resort (`hub.graph.run`) records it and hands the ticket off.
+Then the run pauses with `interrupt()` (P6-03, ADR-0008) while a human has the ticket and has not
+answered it: `runs.status = interrupted`, the state stays in the Postgres checkpoint under the
+ticket. The console resumes it (`hub.graph.run.resume_run`) with a `ReviewDecision` once the
+operator approved, edited or rejected the draft, sent the first reply of a handoff or closed the
+ticket. A failure here is not caught: the run's last resort (`hub.graph.run`) records it and
+hands the ticket off.
 """
 
+from langgraph.types import interrupt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from hub.audit import record
-from hub.db.models import Draft
-from hub.db.repositories import TicketRepository
-from hub.domain.enums import ActorType, DraftStatus, Route, TicketStatus
-from hub.graph.context import GraphContext, ids
+from hub.db.models import Draft, Run
+from hub.db.repositories import DraftRepository, TicketRepository
+from hub.domain.enums import ActorType, DraftStatus, Route, RunStatus, TicketStatus
+from hub.domain.review import ReviewDecision
+from hub.graph.context import GraphContext, error_class, ids
 from hub.graph.draft import (
     OutputMask,
     draft_from_answer,
     evidence_for_writer,
     verify_audit_details,
 )
+from hub.graph.nodes.handoff_prep import reasons
 from hub.graph.nodes.intake import intake_result
 from hub.graph.pipeline import Pipeline
 from hub.graph.state import TicketState
-from hub.graph.store import audit_route, ticket, to_decimal
+from hub.graph.store import audit_route, finish_run, ticket, to_decimal
+
+# A human has the ticket and has not answered yet: the run waits for the decision.
+WAITING = frozenset({TicketStatus.PENDING_APPROVAL, TicketStatus.HANDED_OFF})
 
 
 async def store_draft(
@@ -100,32 +109,48 @@ async def store_draft(
     return draft, clean
 
 
-async def run(state: TicketState, ctx: GraphContext) -> TicketState:
-    if state.get("draft") is None:
-        return TicketState()
+async def record_outcome(session: AsyncSession, state: TicketState, status: RunStatus) -> None:
+    """The run row's outcome: route, reasons, confidence, features, models, totals, error. At the
+    pause (`interrupted`, not finished yet) and again when the run ends (`respond`)."""
+    _, run_id = ids(state)
+    errors = state.get("errors", [])
+    route = state.get("route") or "handoff"
+    await finish_run(
+        session,
+        run_id,
+        status=status,
+        route=Route(route),
+        reasons=reasons(state) if route == "handoff" else list(state.get("route_reasons", [])),
+        models=dict(state.get("models", {})),
+        error=error_class(errors),
+        confidence=state.get("confidence"),
+        features=state.get("features"),
+    )
+
+
+async def prepare(state: TicketState, ctx: GraphContext) -> tuple[TicketStatus, bool]:
+    """The work before the pause: the draft for the operator and the ticket's move to
+    `pending_approval` (approval route). Returns the ticket's status and whether the run waits.
+
+    Safe to run again (ADR-0008): a recovered run may repeat it after a crash. A draft the run
+    already stored is not stored again, and the ticket moves only from `processing`.
+
+    The run waits when a human now has the ticket and has not answered it yet
+    (`pending_approval` or `handed_off`); `runs.status` becomes `interrupted` in the same
+    transaction. An operator who already answered or closed the ticket while the run worked
+    (claimed it, `operator_takeover`) leaves nothing to wait for: the run goes on and ends.
+    """
     pipeline = ctx.pipeline
-    if state.get("route") != "approval":
-        # A handoff after `decide` (e.g. `no_kb_answer`, `masking_failed`): `handoff_prep` moved
-        # the ticket; the draft is kept for the operator as `superseded` (its missing information
-        # and the `verify.done` codes stay readable), never sent.
-        async with pipeline.database.sessions.begin() as session:
-            await store_draft(session, pipeline, state, status=DraftStatus.SUPERSEDED)
-        return TicketState()
     ticket_id, run_id = ids(state)
-    reasons = list(state.get("route_reasons", []))
+    approval = state.get("route") == "approval" and state.get("draft") is not None
     async with pipeline.database.sessions.begin() as session:
         repository = TicketRepository(session)
         found = await repository.lock(await ticket(session, ticket_id))
-        waits = found.status == TicketStatus.PROCESSING
-        await store_draft(
-            session,
-            pipeline,
-            state,
-            status=DraftStatus.PENDING if waits else DraftStatus.SUPERSEDED,
-        )
-        if waits:
+        stored = await DraftRepository(session).for_run(run_id) is not None
+        if approval and found.status == TicketStatus.PROCESSING and not stored:
+            await store_draft(session, pipeline, state, status=DraftStatus.PENDING)
             found.last_route = Route.APPROVAL
-            found.route_reasons = reasons
+            found.route_reasons = list(state.get("route_reasons", []))
             found.confidence = to_decimal(state.get("confidence"))
             await repository.change_status(found, TicketStatus.PENDING_APPROVAL)
             await audit_route(
@@ -134,8 +159,37 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                 ticket_id,
                 run_id,
                 Route.APPROVAL,
-                reasons,
+                list(state.get("route_reasons", [])),
                 state.get("confidence"),
                 state.get("features"),
             )
-        return TicketState(ticket_status=found.status.value)
+        elif state.get("draft") is not None and not stored:
+            # A handoff after `decide` (e.g. `no_kb_answer`, `masking_failed`): `handoff_prep`
+            # moved the ticket; the draft is kept for the operator as `superseded` (its missing
+            # information and the `verify.done` codes stay readable), never sent. Also the draft
+            # of an approval when an operator claimed the ticket while the run worked.
+            await store_draft(session, pipeline, state, status=DraftStatus.SUPERSEDED)
+        # A failed run has nothing to resume for (no draft, no actions): it ends `failed` and
+        # the operator answers with plain replies.
+        waits = found.status in WAITING and not state.get("errors")
+        if waits:
+            await record_outcome(session, state, RunStatus.INTERRUPTED)
+        return found.status, waits
+
+
+async def run(state: TicketState, ctx: GraphContext) -> TicketState:
+    """`prepare`, then the pause. LangGraph runs the node again from the start when the run is
+    resumed, and `interrupt()` then returns the decision instead of pausing: a run that is
+    already `interrupted` therefore skips `prepare` (its ticket has moved on since, so
+    `prepare` would no longer say that the run waits)."""
+    _, run_id = ids(state)
+    async with ctx.pipeline.database.sessions.begin() as session:
+        run_row = await session.get(Run, run_id)
+        paused = run_row is not None and run_row.status == RunStatus.INTERRUPTED
+    if not paused:
+        status, waits = await prepare(state, ctx)
+        if not waits:
+            return TicketState(ticket_status=status.value)
+    # Ids only: the console reads our own tables, never the checkpoint (ADR-0008).
+    value = interrupt({"ticket_id": state["ticket_id"], "run_id": state["run_id"]})
+    return TicketState(review=ReviewDecision.model_validate(value))

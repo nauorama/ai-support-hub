@@ -14,10 +14,20 @@ or an auto-reply: the run sends its id, the stream sends the stored row, P6-02),
 saved none (approval, or a run that failed before a notice), a placeholder system message;
 `error` comes before `ticket.status` when a node failed. A `: ping` comment goes out every 10 s
 while the run works (sent by `_run_stream` itself: FastAPI's own 15 s keep-alive applies only to
-generator endpoints, which these are not). A follow-up message starts no run yet (the ownership
-rule for follow-ups comes with P6-03). Its stream and a ticket handed off because masking failed are
-`ticket.created` → placeholder → (`ticket.status`) → `done`; a replay of the same request
-(`Idempotency-Key`) always carries the ticket's current status. The placeholder is not stored:
+generator endpoints, which these are not).
+
+Ownership rule for a follow-up message (data model §1, P6-03): on an `answered` ticket the AI
+still owns (no handoff or approval so far) it starts a new run like a new ticket; once a human
+owns the ticket it goes to the operator queue (`handed_off`). A message on a ticket in any other
+status starts no run: the ticket is in a run already (`processing`) or with a human. Every
+customer message changes the ticket's `version` (`MessageRepository.add`), so an operator's
+decision loaded before it answers `409 stale_draft`. A follow-up without a run and a ticket
+handed off because masking failed stream `ticket.created` → placeholder → (`ticket.status`) →
+`done`; a replay of the same request (`Idempotency-Key`) always carries the ticket's current
+status.
+
+A read of a ticket in `processing` (the ticket or its messages) starts the recovery of a stuck
+run (`hub.api.resume.recover_on_read`). The placeholder is not stored:
 it stands in for an answer and would otherwise leave invented history in every ticket.
 
 Audit order, the same for a new ticket and a follow-up: `ticket.created` or `message.received`,
@@ -39,6 +49,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hub.api.dependencies import ContainerDep, CustomerDep, SessionDep, client_ip
 from hub.api.errors import ProblemError
 from hub.api.message_helpers import SYSTEM_LABEL, audit_masking, author_label, masked_entities
+from hub.api.resume import recover_on_read
 from hub.api.schemas import (
     FeedbackIn,
     FeedbackOut,
@@ -352,7 +363,7 @@ async def _hand_off_after_mask_failure(
 
 async def _save_or_replay(
     session: AsyncSession,
-    save: Callable[[], Awaitable[tuple[Message, TicketStatus | None]]],
+    save: Callable[[], Awaitable[tuple[Message, TicketStatus | None, bool]]],
     scoped_key: str,
     *,
     ticket_id: uuid.UUID | None,
@@ -363,12 +374,13 @@ async def _save_or_replay(
     the same key saved first, the unique constraint on `messages.idempotency_key` fails (at the
     flush of the message or at commit); answer with that request's message instead.
 
-    `run_in`: start a run for the saved message with this container's pipeline, unless the save
-    already handed the ticket to a human. A replay never starts a run.
+    `save` returns the message, the status it handed the ticket off with (or None) and whether
+    the message starts a run. `run_in`: the container whose pipeline runs it. A replay never
+    starts a run.
 
     `ticket_id` is passed as a value: the rollback expires every loaded object."""
     try:
-        message, status = await save()
+        message, status, starts_run = await save()
     except IntegrityError:
         await session.rollback()
         stored = await MessageRepository(session).get_by_idempotency_key(scoped_key)
@@ -376,7 +388,7 @@ async def _save_or_replay(
             raise
         return await _replay(session, stored, expected_ticket_id=ticket_id, masked_body=masked_body)
     out = await _message_out(session, message)
-    if run_in is not None and run_in.pipeline is not None and status is None:
+    if run_in is not None and run_in.pipeline is not None and starts_run:
         return _run_stream(run_in, run_in.pipeline, out, message.ticket_id)
     return _stream(message.ticket_id, out, status)
 
@@ -409,7 +421,7 @@ async def create_ticket(
 
     customer_id = customer.id
 
-    async def save() -> tuple[Message, TicketStatus | None]:
+    async def save() -> tuple[Message, TicketStatus | None, bool]:
         ticket = await TicketRepository(session).create(
             customer_id=customer_id, ai_disclosed_at=datetime.now(UTC)
         )
@@ -430,7 +442,7 @@ async def create_ticket(
         )
         status = await _hand_off_after_mask_failure(session, ticket, masked)
         await session.commit()
-        return message, status
+        return message, status, status is None
 
     return await _save_or_replay(
         session, save, scoped_key, ticket_id=None, masked_body=masked.text, run_in=container
@@ -461,7 +473,7 @@ async def add_message(
 
     customer_id, ticket_id = customer.id, ticket.id
 
-    async def save() -> tuple[Message, TicketStatus | None]:
+    async def save() -> tuple[Message, TicketStatus | None, bool]:
         # The check above ran before the lock: an operator may have closed the ticket since.
         await TicketRepository(session).lock(ticket)
         if ticket.status == TicketStatus.CLOSED:
@@ -482,15 +494,17 @@ async def add_message(
             action="message.received",
         )
         status = await _hand_off_after_mask_failure(session, ticket, masked)
+        starts_run = False
         if status is None and ticket.status == TicketStatus.ANSWERED:
-            # AI owns → a new run (phase 6); human owns → the operator queue.
-            target = TicketStatus.HANDED_OFF if _human_owns(ticket) else TicketStatus.PROCESSING
+            # AI owns → a new run; human owns → the operator queue (module docstring).
+            starts_run = not _human_owns(ticket)
+            target = TicketStatus.PROCESSING if starts_run else TicketStatus.HANDED_OFF
             await _change_status_or_409(session, ticket, target)
         await session.commit()
-        return message, status
+        return message, status, starts_run
 
     return await _save_or_replay(
-        session, save, scoped_key, ticket_id=ticket_id, masked_body=masked.text
+        session, save, scoped_key, ticket_id=ticket_id, masked_body=masked.text, run_in=container
     )
 
 
@@ -512,8 +526,12 @@ async def list_tickets(
 
 
 @router.get("/{ticket_id}")
-async def get_ticket(ticket_id: uuid.UUID, customer: CustomerDep, session: SessionDep) -> TicketOut:
-    return _ticket_out(await _ticket_or_404(session, ticket_id, customer))
+async def get_ticket(
+    ticket_id: uuid.UUID, customer: CustomerDep, session: SessionDep, container: ContainerDep
+) -> TicketOut:
+    ticket = await _ticket_or_404(session, ticket_id, customer)
+    await recover_on_read(container, session, ticket)
+    return _ticket_out(ticket)
 
 
 @router.get("/{ticket_id}/messages")
@@ -521,9 +539,11 @@ async def list_messages(
     ticket_id: uuid.UUID,
     customer: CustomerDep,
     session: SessionDep,
+    container: ContainerDep,
     after: uuid.UUID | None = None,
 ) -> Page[MessageOut]:
     ticket = await _ticket_or_404(session, ticket_id, customer)
+    await recover_on_read(container, session, ticket)
     messages = MessageRepository(session)
     found: Sequence[Message]
     if after is None:

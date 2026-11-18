@@ -6,6 +6,7 @@ tests/integration/test_graph_nodes.py."""
 
 import asyncio
 import re
+import uuid
 from decimal import Decimal
 from typing import Any, cast, get_type_hints
 
@@ -15,6 +16,7 @@ from langgraph.runtime import Runtime
 
 from hub.domain.draft import Citation, DraftAnswer
 from hub.domain.enums import SettingKey
+from hub.domain.review import ReviewDecision
 from hub.domain.triage import TriageResult
 from hub.domain.verification import ClaimCheck, ClaimsAnswer, Verification
 from hub.graph import build
@@ -22,7 +24,16 @@ from hub.graph import draft as draft_module
 from hub.graph.checkpoint import CheckpointStore, serializer
 from hub.graph.context import GraphContext, error_class, failure_reasons
 from hub.graph.nodes import act, decide, handoff_prep, policy_gate, research, verify, write
-from hub.graph.pipeline import B0_VARIANT, VARIANT, KbUnavailableError, Pipeline, write_prompt_for
+from hub.graph.pipeline import (
+    B0_VARIANT,
+    VARIANT,
+    KbUnavailableError,
+    LiveRuns,
+    Pipeline,
+    write_prompt_for,
+)
+from hub.graph.recover import STUCK_AFTER_S
+from hub.graph.run import RunIncompleteError, outcome_status
 from hub.graph.state import STATE_TYPES, Evidence, InputFlags, RouteName, TicketState, run_input
 from hub.guardrails.injection import InjectionResult
 from hub.guardrails.masking import MaskResult
@@ -385,6 +396,7 @@ def test_the_state_survives_the_checkpoint_serializer() -> None:
         triage,
         _answer(),
         verification,
+        ReviewDecision(kind="edit", operator_id="o", body="Edited.", message_id="m"),
     ]
     codec = serializer()
     for value in values:
@@ -401,6 +413,41 @@ def test_the_serializer_never_rebuilds_a_class_outside_the_state_types() -> None
     codec = serializer()
     back = codec.loads_typed(codec.dumps_typed(Planted()))
     assert not isinstance(back, Planted)
+
+
+def test_a_review_decision_is_built_by_the_api_and_refuses_anything_else() -> None:
+    """ai-pipeline §5: the resume value is the decision and nothing else (T15)."""
+    with pytest.raises(ValueError, match="extra"):
+        ReviewDecision.model_validate({"kind": "approve", "operator_id": "o", "route": "x"})
+    with pytest.raises(ValueError, match="kind"):
+        ReviewDecision.model_validate({"kind": "auto_reply", "operator_id": "o"})
+
+
+def test_a_run_is_live_once_per_process() -> None:
+
+    live, run_id = LiveRuns(), uuid.uuid4()
+    assert live.claim(run_id)
+    assert not live.claim(run_id)
+    assert run_id in live
+    live.release(run_id)
+    assert run_id not in live
+    live.release(run_id)  # releasing twice is harmless
+
+
+def test_a_run_counts_as_stuck_only_after_the_longest_possible_run() -> None:
+    """Owner decision (P6-03): longer than every node at its timeout, one after the other, so
+    a live run on the other instance is never recovered."""
+    assert sum(build.NODE_TIMEOUTS_S.values()) < STUCK_AFTER_S
+
+
+async def test_a_run_that_ends_without_a_status_is_incomplete() -> None:
+    pipeline = cast(Pipeline, None)
+    ticket_id = uuid.uuid4()
+    with pytest.raises(RunIncompleteError):
+        await outcome_status(pipeline, ticket_id, None)
+    with pytest.raises(RunIncompleteError):
+        await outcome_status(pipeline, ticket_id, {"ticket_status": None})
+    assert await outcome_status(pipeline, ticket_id, {"ticket_status": "answered"}) == "answered"
 
 
 async def test_the_memory_store_compiles_the_graph_once() -> None:

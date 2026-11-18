@@ -298,7 +298,8 @@ def test_ticket_detail(app: FastAPI, staff: dict[str, TestClient]) -> None:
     ticket_id = new_ticket(customer_client(app), f"My card {TEST_CARD} was declined")
     detail = _ticket(staff["operator"], ticket_id)
     assert detail["id"] == str(ticket_id)
-    assert detail["version"] == 1
+    # 1 at the INSERT, 2 after its first customer message (every one changes it, P6-03).
+    assert detail["version"] == 2
     assert detail["customer"]["customer_ref"] == "CUS-0001"
     [message] = detail["messages"]
     assert message["body"] == "My card [CARD ****1111] was declined"

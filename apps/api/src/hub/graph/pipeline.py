@@ -24,8 +24,9 @@ from hub.llm.config import ModelsConfig
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt, active_prompt, load_prompt
 
-# `graph-v1`: the LangGraph workflow of P6-01 (the linear run was `linear-v1` to `linear-v3`).
-GRAPH_VERSION = "graph-v1"
+# `graph-v2`: the pause in `human_review` (P6-03); `graph-v1` was the LangGraph workflow of P6-01
+# without it (the linear run was `linear-v1` to `linear-v3`).
+GRAPH_VERSION = "graph-v2"
 VARIANT = "rag_hybrid"
 B0_VARIANT = "b0_full_kb"
 # The variants this workflow can run (ai-pipeline §10), with the search mode of the RAG ones.
@@ -66,6 +67,28 @@ def write_prompt_for(directory: Path, models: ModelsConfig, variant: str) -> Pro
     return active_prompt(directory, models, "write")
 
 
+@dataclass
+class LiveRuns:
+    """The runs this process is working on: a new run, a resume or a recovery. Recovery and a
+    resume never take a run that is live here (another instance is ruled out by the time a
+    stuck run must have waited, `hub.graph.recover`)."""
+
+    _ids: set[uuid.UUID] = field(default_factory=set)
+
+    def __contains__(self, run_id: object) -> bool:
+        return run_id in self._ids
+
+    def claim(self, run_id: uuid.UUID) -> bool:
+        """Mark the run live; False when it already is."""
+        if run_id in self._ids:
+            return False
+        self._ids.add(run_id)
+        return True
+
+    def release(self, run_id: uuid.UUID) -> None:
+        self._ids.discard(run_id)
+
+
 @dataclass(frozen=True)
 class Pipeline:
     """What a run needs. Built once in the app container, or by the evaluation runner with
@@ -93,6 +116,7 @@ class Pipeline:
     # store (`CheckpointStore.postgres`); the in-memory default is for unit tests, which start
     # no database.
     checkpoints: CheckpointStore = field(default_factory=CheckpointStore.memory)
+    live: LiveRuns = field(default_factory=LiveRuns, compare=False)
 
     def __post_init__(self) -> None:
         if self.variant not in VARIANTS:

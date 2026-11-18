@@ -1,11 +1,41 @@
 """Rules of the operator review of a draft (docs/api.md §3, P3-05b): edit ratio and citation
-markers in an edited text. Pure functions; the console endpoints call them."""
+markers in an edited text. Pure functions; the console endpoints call them.
+
+`ReviewDecision` (ai-pipeline §5, P6-03) is what resumes a paused run: built by the API from the
+operator's request after its transaction committed, never by a model.
+"""
 
 import re
 from collections.abc import Iterable, Mapping
 from decimal import ROUND_HALF_UP, Decimal
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict
+
+type ReviewKind = Literal["approve", "edit", "reject", "reply", "close"]
+
+
+class ReviewDecision(BaseModel):
+    """The operator's decision on a paused run (ai-pipeline §1, §5).
+
+    The API has already written everything the decision changes (the message, the draft, the
+    ticket and the audit records, in one transaction under the ticket row lock, with the
+    `ticket_version` and `Idempotency-Key` checks), and then resumes the run with it. The run
+    records `message_id` as its final message and ends (owner decision, P6-03). `body` is the
+    G1-masked text the operator sent (edit, reply, reject with a reply), None otherwise.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ReviewKind
+    operator_id: str
+    body: str | None = None
+    approved_actions: list[str] = []
+    reject_reason: str | None = None
+    # The message the decision sent; None for a reject without a reply and for a close.
+    message_id: str | None = None
+
 
 _MARKER = re.compile(r"\[(\d+)\]")
 _RATIO_STEP = Decimal("0.001")

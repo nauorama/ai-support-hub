@@ -15,9 +15,10 @@ returns the first result; with another request `409 idempotency_key_reused`. A r
 reply stores no message to find the key by, so its repeat is recognised by the draft's state
 (rejected by the same operator with the same reason and no reply).
 
-The run is not resumed: in phase 3 it is already `completed` when the draft waits. Phase 6
-(P6-03) resumes the paused run with a `ReviewDecision`. Approved actions are checked against the
-draft and recorded; phase 7 runs them.
+After the commit the draft's run, paused in `human_review` (P6-03), is resumed with a
+`ReviewDecision` (`hub.api.resume`): the decision is already written, so the run only records it
+and ends. A replay does not resume again. Approved actions are checked against the draft and
+recorded; phase 7 runs them.
 """
 
 import uuid
@@ -42,12 +43,14 @@ from hub.api.console import (
     _ticket_or_404,
 )
 from hub.api.console_schemas import ApproveIn, DraftOut, DraftReviewOut, EditIn, RejectIn
-from hub.api.dependencies import SessionDep
+from hub.api.dependencies import ContainerDep, SessionDep
 from hub.api.errors import ProblemError
 from hub.api.message_helpers import audit_masking, masked_entities
+from hub.api.resume import paused_run, resume_after_commit
 from hub.audit import record
 from hub.db.models import Draft, Message, Operator, Ticket
 from hub.db.repositories import DraftRepository, MessageRepository, TicketRepository
+from hub.deps import Container
 from hub.domain.enums import (
     ActorType,
     DraftStatus,
@@ -56,7 +59,13 @@ from hub.domain.enums import (
     Resolution,
     TicketStatus,
 )
-from hub.domain.review import citations_kept, edit_ratio, unknown_markers
+from hub.domain.review import (
+    ReviewDecision,
+    ReviewKind,
+    citations_kept,
+    edit_ratio,
+    unknown_markers,
+)
 from hub.guardrails.masking import MaskResult, mask
 
 router = APIRouter(prefix="/api/v1/console", tags=["console"])
@@ -94,12 +103,15 @@ async def approve_draft(
     idempotency_key: IdempotencyKey,
     operator: Writer,
     session: SessionDep,
+    container: ContainerDep,
 ) -> DraftReviewOut:
     """Send the draft unchanged. A draft with `can_answer = false` cannot be approved
     unchanged: `409 draft_cannot_answer` (editing and sending it is allowed)."""
     draft = await _draft_or_404(session, draft_id)
     review = _approve(draft, body.approved_actions)
-    return await _apply(session, operator, draft, body.ticket_version, idempotency_key, review)
+    return await _apply(
+        session, container, operator, draft, body.ticket_version, idempotency_key, review
+    )
 
 
 @router.post("/drafts/{draft_id}/edit")
@@ -109,6 +121,7 @@ async def edit_draft(
     idempotency_key: IdempotencyKey,
     operator: Writer,
     session: SessionDep,
+    container: ContainerDep,
 ) -> DraftReviewOut:
     """Send the operator's text. It is masked (G1); every `[n]` marker in it must have a
     citation in the draft (otherwise `422 validation_error`). Text equal to the draft, apart from
@@ -145,7 +158,9 @@ async def edit_draft(
             ),
             approved_actions=body.approved_actions,
         )
-    return await _apply(session, operator, draft, body.ticket_version, idempotency_key, review)
+    return await _apply(
+        session, container, operator, draft, body.ticket_version, idempotency_key, review
+    )
 
 
 @router.post("/drafts/{draft_id}/reject")
@@ -155,6 +170,7 @@ async def reject_draft(
     idempotency_key: IdempotencyKey,
     operator: Writer,
     session: SessionDep,
+    container: ContainerDep,
 ) -> DraftReviewOut:
     """Reject the draft with a reason. With `reply_body` the operator's own answer is sent
     (masked, no citations); without it the ticket stays with a human (`handed_off`)."""
@@ -170,7 +186,9 @@ async def reject_draft(
         reject_reason=body.reason,
         reject_note=None if body.note is None else mask(body.note),
     )
-    return await _apply(session, operator, draft, body.ticket_version, idempotency_key, review)
+    return await _apply(
+        session, container, operator, draft, body.ticket_version, idempotency_key, review
+    )
 
 
 # --- steps ----------------------------------------------------------------------------------
@@ -227,6 +245,7 @@ def _check_actions(draft: Draft, approved_actions: list[str]) -> None:
 
 async def _apply(
     session: AsyncSession,
+    container: Container,
     operator: Operator,
     draft: Draft,
     ticket_version: int,
@@ -261,7 +280,9 @@ async def _apply(
 
     ticket_id, draft_id = ticket.id, draft.id
     try:
+        run_id = await paused_run(session, draft.run_id)
         message = await _write(session, operator, ticket, draft, review, scoped_key)
+        decision = _decision(operator, review, message)
         await session.commit()
     except IntegrityError:
         # The same key was used concurrently for a request on another ticket.
@@ -269,7 +290,29 @@ async def _apply(
         if await messages.get_by_idempotency_key(scoped_key) is None:
             raise
         raise _key_reused() from None
+    await resume_after_commit(container, ticket_id, run_id, decision)
     return await _result(session, ticket_id, draft_id, message)
+
+
+_KIND: dict[DraftStatus, ReviewKind] = {
+    DraftStatus.APPROVED: "approve",
+    DraftStatus.EDITED: "edit",
+    DraftStatus.REJECTED: "reject",
+}
+
+
+def _decision(operator: Operator, review: _Review, message: Message | None) -> ReviewDecision:
+    """What resumes the run: built from the request after masking, never by a model."""
+    outgoing = review.outgoing
+    return ReviewDecision(
+        kind=_KIND[review.status],
+        operator_id=str(operator.id),
+        # The operator's own text; an approve sends the AI text, which the draft holds.
+        body=None if outgoing is None or review.status == DraftStatus.APPROVED else outgoing.body,
+        approved_actions=list(review.approved_actions),
+        reject_reason=None if review.reject_reason is None else review.reject_reason.value,
+        message_id=None if message is None else str(message.id),
+    )
 
 
 async def _write(
