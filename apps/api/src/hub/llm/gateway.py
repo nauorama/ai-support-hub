@@ -718,6 +718,17 @@ class Gateway:
                 await self.sleep(BACKOFF_S * 2**attempt)
         raise LlmUnavailableError(f"node {call.node.value}: the model and its fallback failed")
 
+    async def record_abandoned(
+        self, role: str, call: CallContext, *, latency_ms: int, error: str = "CallerTimeout"
+    ) -> None:
+        """One `error` row for a call its caller stopped waiting for (an outer timeout cancels
+        the attempt before the gateway can record it). Named after the role's model: the caller
+        cannot know whether the fallback was reached."""
+        config = self._role(role, "chat")
+        await self.recorder.record(
+            self._row(call, config.model, LlmCallStatus.ERROR, latency_ms=latency_ms, error=error)
+        )
+
     def _elapsed_ms(self, start: float) -> int:
         return max(0, round((self.clock() - start) * 1000))
 

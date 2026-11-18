@@ -22,6 +22,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from hub.db.models import (
     Customer,
+    CustomerMemory,
     Draft,
     Feedback,
     Message,
@@ -34,6 +35,7 @@ from hub.db.models import (
 from hub.domain.enums import (
     FeedbackRating,
     Intent,
+    MemoryKind,
     MessageRole,
     SettingKey,
     TicketStatus,
@@ -495,3 +497,65 @@ class FeedbackRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+
+class MemoryRepository:
+    """`customer_memory` (P6-05). Contents must already be masked (G1)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(
+        self, *, customer_id: uuid.UUID, ticket_id: uuid.UUID, content: str
+    ) -> CustomerMemory:
+        memory = CustomerMemory(
+            customer_id=customer_id,
+            ticket_id=ticket_id,
+            kind=MemoryKind.TICKET_SUMMARY,
+            content=content,
+        )
+        self._session.add(memory)
+        await self._session.flush()
+        return memory
+
+    async def for_ticket(self, ticket_id: uuid.UUID) -> CustomerMemory | None:
+        result = await self._session.execute(
+            select(CustomerMemory).where(CustomerMemory.ticket_id == ticket_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def active_for_customer(
+        self, customer_id: uuid.UUID, *, limit: int, exclude_ticket: uuid.UUID | None = None
+    ) -> Sequence[tuple[CustomerMemory, Intent | None]]:
+        """The newest items that have not expired (database time), with the intent of their
+        ticket; without the item of `exclude_ticket`."""
+        conditions = [
+            CustomerMemory.customer_id == customer_id,
+            CustomerMemory.expires_at > func.now(),
+        ]
+        if exclude_ticket is not None:
+            conditions.append(CustomerMemory.ticket_id != exclude_ticket)
+        result = await self._session.execute(
+            select(CustomerMemory, Ticket.intent)
+            .join(Ticket, Ticket.id == CustomerMemory.ticket_id)
+            .where(*conditions)
+            .order_by(CustomerMemory.created_at.desc(), CustomerMemory.id.desc())
+            .limit(limit)
+        )
+        return [(memory, intent) for memory, intent in result.all()]
+
+    async def open_tickets(
+        self, customer_id: uuid.UUID, *, exclude: uuid.UUID, limit: int
+    ) -> Sequence[Ticket]:
+        """The customer's tickets that are not closed, other than `exclude`, newest first."""
+        result = await self._session.execute(
+            select(Ticket)
+            .where(
+                Ticket.customer_id == customer_id,
+                Ticket.id != exclude,
+                Ticket.status != TicketStatus.CLOSED,
+            )
+            .order_by(Ticket.id.desc())
+            .limit(limit)
+        )
+        return result.scalars().all()

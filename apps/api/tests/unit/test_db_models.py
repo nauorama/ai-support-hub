@@ -22,6 +22,7 @@ from hub.domain.enums import (
     LlmCallMode,
     LlmCallStatus,
     LlmNode,
+    MemoryKind,
     MessageRole,
     OperatorRole,
     RejectReason,
@@ -58,6 +59,7 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("drafts", "reject_reason", RejectReason),
     ("kb_documents", "product", Product),
     ("kb_documents", "visibility", Visibility),
+    ("customer_memory", "kind", MemoryKind),
 ]
 
 # The dialect the app uses (psycopg 3), without a database.
@@ -76,6 +78,7 @@ TABLES = {
     "drafts",
     "kb_documents",
     "kb_chunks",
+    "customer_memory",
 }
 # Tables whose primary key is text (the KB slug and `<doc_id>#<n>`, data model §1).
 TEXT_KEY_TABLES = {"kb_documents", "kb_chunks"}

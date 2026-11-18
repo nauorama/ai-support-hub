@@ -1,7 +1,10 @@
 """Confidence, rule version (docs/ai-pipeline.md §6, ADR-0009 layer 2 replaced by ADR-0018).
 
-`confidence = groundedness` when the top retrieval score is above `top_score_floor` in
-`config/confidence.json`, else 0; a null groundedness (a code check failed, the LLM check did not
+`confidence = groundedness` when the run's variant is one of `variants` and the top retrieval
+score is above `top_score_floor` in `config/confidence.json`, else 0. The floor was measured on
+the hybrid search's fused scores (P6-06), so it holds only for the variants listed (`rag_hybrid`);
+any other variant (dense cosine scores, B0 without a search) gets 0 and is never auto-replied
+(owner decision, PR #38 review); a null groundedness (a code check failed, the LLM check did not
 run) gives 0, so such a draft is never auto-replied. No model is trained in budget mode: the
 number is uncalibrated, and auto-reply is off by default.
 
@@ -31,6 +34,8 @@ class ConfidenceRule(BaseModel):
     version: str
     kind: Literal["rule"]
     top_score_floor: float = Field(ge=0)
+    # The variants whose scores the floor was measured on; any other variant gets confidence 0.
+    variants: frozenset[str] = Field(min_length=1)
     note: str = ""
 
 
@@ -67,8 +72,10 @@ def features(
     return found
 
 
-def confidence(rule: ConfidenceRule, found: dict[str, float]) -> float:
+def confidence(rule: ConfidenceRule, found: dict[str, float], variant: str) -> float:
     groundedness = found.get("groundedness")
+    if variant not in rule.variants:
+        return 0.0
     if groundedness is None or found["top_score"] <= rule.top_score_floor:
         return 0.0
     return round(groundedness, 3)

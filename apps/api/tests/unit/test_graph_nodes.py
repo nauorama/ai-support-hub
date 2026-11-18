@@ -5,9 +5,13 @@ that needs no database, each alone with a scripted gateway. The nodes that write
 tests/integration/test_graph_nodes.py."""
 
 import asyncio
+import contextlib
+import dataclasses
 import re
 import uuid
+from collections.abc import AsyncIterator
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, cast, get_type_hints
 
 import pytest
@@ -254,8 +258,100 @@ def test_decide_routes_each_route_to_its_node(route: RouteName | None, target: s
     assert build.after_decide(_state(route=route)) == target
 
 
-def test_verify_goes_on_to_decide_until_the_retry_loop_exists() -> None:
-    assert build.after_verify(_state(verification=None)) == "decide"
+UNSUPPORTED = Verification(
+    claims=[
+        ClaimCheck(claim="1 business day", supported=True, source_id="withdrawal-times#0"),
+        ClaimCheck(claim="Card 4111 1111 1111 1111 is free", supported=False, source_id=None),
+    ],
+    groundedness=0.5,
+    policy_violations=[],
+    passed=False,
+)
+
+
+def test_verify_goes_back_to_research_once_when_the_check_found_unsupported_claims() -> None:
+    """P6-04 (ai-pipeline §5): one retry, then the result stands."""
+    assert build.after_verify(_state(verification=UNSUPPORTED)) == "research"
+    assert build.after_verify(_state(verification=UNSUPPORTED, retry_count=1)) == "decide"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"verification": None},  # B0, or no draft
+        {"verification": UNSUPPORTED.model_copy(update={"claims": UNSUPPORTED.claims[:1]})},
+        # a failed code check: a policy violation is not a search problem
+        {"verification": verify.failed_checks(["no_citation"])},
+        # the LLM check failed: no claims to search for
+        {"verification": verify.unavailable(), "verify_error": "TimeoutError"},
+        {"verification": UNSUPPORTED, "verify_error": "TimeoutError"},
+        {"verification": UNSUPPORTED, "errors": ["write:LlmUnavailableError"]},
+    ],
+)
+def test_verify_goes_on_to_decide_without_a_retry(changes: dict[str, Any]) -> None:
+    assert build.after_verify(_state(**changes)) == "decide"
+
+
+def test_the_stuck_limit_covers_the_retry_path() -> None:
+    longest = sum(build.NODE_TIMEOUTS_S.values()) + sum(
+        build.NODE_TIMEOUTS_S[name] for name in ("research", "write", "verify")
+    )
+    assert build.LONGEST_RUN_S == longest < STUCK_AFTER_S
+
+
+def _stub(name: str, calls: list[str], update: Any = None) -> Any:  # noqa: ANN401
+    async def run(state: TicketState, ctx: GraphContext) -> TicketState:
+        calls.append(name)
+        return update(state) if callable(update) else cast(TicketState, dict(update or {}))
+
+    return run
+
+
+async def test_the_retry_loop_cannot_run_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole graph with stub nodes: a verifier that never finds the draft supported sends it
+    back to research once, and the second verdict stands (route `approval` from `decide`)."""
+    calls: list[str] = []
+    stubs = {
+        "policy_gate": {"route": None},
+        "verify": {"verification": UNSUPPORTED},
+        "decide": {"route": "approval"},
+        # the real retry counting, without the audit record
+        "research": lambda state: TicketState(
+            retry_count=state.get("retry_count", 0) + bool(research.retry_hints(state))
+        ),
+    }
+    nodes = tuple(
+        dataclasses.replace(spec, run=_stub(spec.name, calls, stubs.get(spec.name)))
+        for spec in build.NODES
+    )
+    monkeypatch.setattr(build, "NODES", nodes)
+    graph = build.compile_graph(None)
+
+    final = await graph.ainvoke(_state(), context=_ctx())
+
+    assert calls == [
+        "intake",
+        "triage",
+        "policy_gate",
+        "research",
+        "write",
+        "verify",
+        "research",
+        "write",
+        "verify",
+        "decide",
+        "human_review",
+        "act",
+        "respond",
+    ]
+    assert final["retry_count"] == 1
+
+
+async def test_a_retry_that_times_out_keeps_the_evidence_and_still_counts() -> None:
+    first = _evidence(HITS)
+    retried = build.research_timed_out(_state(evidence=first, verification=UNSUPPORTED))
+    assert retried == {"retry_count": 1}
+    assert build.research_timed_out(_state())["evidence"] == research.evidence((), degraded=True)
 
 
 # --- the node wrapper -------------------------------------------------------------------------
@@ -525,6 +621,77 @@ async def test_b0_runs_no_search() -> None:
     assert search.queries == []
     assert update["evidence"] is not None
     assert update["evidence"].chunks == []
+
+
+class _Sessions:
+    @contextlib.asynccontextmanager
+    async def begin(self) -> AsyncIterator[object]:
+        yield object()
+
+
+async def test_a_retry_searches_with_the_masked_unsupported_claims_and_adds_new_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records: list[dict[str, Any]] = []
+
+    async def record(session: object, **values: Any) -> None:  # noqa: ANN401
+        records.append(values)
+
+    monkeypatch.setattr(research, "record", record)
+    more = [_hit("withdrawal-fees#1", 1), _hit("card-fees#0", 2), _hit("card-fees#1", 3)]
+    search = FakeSearch(more)
+    pipeline = _pipeline(retriever=search)
+    object.__setattr__(pipeline, "database", SimpleNamespace(sessions=_Sessions()))
+    first = _evidence(HITS)
+    state = _state(evidence=first, verification=UNSUPPORTED, retry_count=0)
+
+    update = await research.run(state, _ctx(pipeline))
+
+    # only the unsupported claim, card-masked before it leaves the run
+    assert search.queries == [("Card [CARD ****1111] is free", "external", 6, "hybrid")]
+    evidence = update["evidence"]
+    assert evidence is not None
+    assert [chunk.chunk_id for chunk in evidence.chunks] == [
+        "withdrawal-times#0",
+        "withdrawal-fees#1",
+        "card-fees#0",
+        "card-fees#1",
+    ]
+    assert (evidence.top_score, evidence.score_margin) == (first.top_score, first.score_margin)
+    assert update["retry_count"] == 1
+    [audit] = records
+    assert audit["action"] == "research.retry"
+    assert audit["details"] == {
+        "ticket_id": uuid.UUID(TICKET_ID),
+        "unsupported_claims": 1,
+        "chunks_added": 2,
+    }
+    assert "1111" not in str(audit)
+
+
+async def test_a_failed_retry_search_keeps_the_first_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def record(session: object, **values: Any) -> None:  # noqa: ANN401
+        return None
+
+    monkeypatch.setattr(research, "record", record)
+    pipeline = _pipeline(retriever=FakeSearch(ConnectionError("qdrant down")))
+    object.__setattr__(pipeline, "database", SimpleNamespace(sessions=_Sessions()))
+    first = _evidence(HITS)
+    update = await research.run(_state(evidence=first, verification=UNSUPPORTED), _ctx(pipeline))
+    evidence = update["evidence"]
+    assert evidence is not None
+    assert [c.chunk_id for c in evidence.chunks] == [c.chunk_id for c in first.chunks]
+    assert [c.rank for c in evidence.chunks] == [1, 2]  # renumbered in the merged list
+    assert update["retry_count"] == 1
+
+
+def test_a_retry_adds_at_most_one_search_of_new_hits() -> None:
+    first = _evidence(HITS)
+    more = [_hit(f"other#{n}", n) for n in range(1, 10)]
+    merged = research.merged(first, more)
+    assert len(merged.chunks) == len(first.chunks) + 6
 
 
 def test_one_hit_has_its_score_as_the_margin() -> None:

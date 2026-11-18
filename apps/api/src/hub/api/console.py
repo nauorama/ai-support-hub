@@ -35,6 +35,7 @@ from hub.api.console_schemas import (
     ConsoleMessageOut,
     ConsoleTicketOut,
     DraftOut,
+    MemoryOut,
     QueueTicketOut,
     ReplyIn,
     RunOut,
@@ -43,7 +44,12 @@ from hub.api.console_schemas import (
 from hub.api.dependencies import ContainerDep, RequireRole, SessionDep
 from hub.api.errors import ProblemError
 from hub.api.message_helpers import audit_masking, author_label, masked_entities
-from hub.api.resume import latest_paused_run, recover_on_read, resume_after_commit
+from hub.api.resume import (
+    latest_paused_run,
+    recover_on_read,
+    resume_after_commit,
+    write_memory,
+)
 from hub.api.schemas import Page
 from hub.audit import record
 from hub.auth.roles import OPERATOR, TICKET_READER, can_override_claim
@@ -51,6 +57,7 @@ from hub.db.models import Message, Operator, Ticket
 from hub.db.repositories import (
     ConcurrentUpdateError,
     DraftRepository,
+    MemoryRepository,
     MessageRepository,
     QueueCursor,
     QueueFilters,
@@ -69,6 +76,7 @@ from hub.domain.enums import (
     TicketStatus,
     Urgency,
 )
+from hub.domain.memory import MEMORY_ITEMS
 from hub.domain.review import ReviewDecision
 from hub.guardrails.masking import mask
 
@@ -275,6 +283,9 @@ async def get_ticket(
     messages = await MessageRepository(session).list_for_ticket(ticket.id)
     run = await RunRepository(session).latest_for_ticket(ticket.id)
     draft = None if run is None else await DraftRepository(session).for_run(run.id)
+    memory = await MemoryRepository(session).active_for_customer(
+        ticket.customer_id, limit=MEMORY_ITEMS, exclude_ticket=ticket.id
+    )
     return ConsoleTicketOut(
         **_row_out(row).model_dump(),
         language=ticket.language,
@@ -286,6 +297,16 @@ async def get_ticket(
         messages=[await _message_out(session, message) for message in messages],
         latest_run=None if run is None else RunOut.model_validate(run),
         draft=None if draft is None else DraftOut.model_validate(draft),
+        memory=[
+            MemoryOut(
+                ticket_id=item.ticket_id,
+                intent=intent,
+                summary=item.content,
+                created_at=item.created_at,
+                expires_at=item.expires_at,
+            )
+            for item, intent in memory
+        ],
     )
 
 
@@ -454,8 +475,9 @@ async def close_ticket(
     container: ContainerDep,
 ) -> QueueTicketOut:
     """Close an answered or handed-off ticket (state diagram). A run still paused (a handoff
-    closed without an answer) is resumed with `kind = close` and ends without a message. The
-    memory summary on close comes with memory (P6-05)."""
+    closed without an answer) is resumed with `kind = close` and ends without a message. Then
+    the memory summary is written (P6-05, ai-pipeline §9), inside the request like the resume
+    (Cloud Run gives CPU only during a request); it never fails the close."""
     ticket = await _ticket_or_404(session, ticket_id)
     _check_version(ticket, body.ticket_version)
     _check_not_closed(ticket)
@@ -471,4 +493,5 @@ async def close_ticket(
     await session.commit()
     decision = ReviewDecision(kind="close", operator_id=str(operator.id))
     await resume_after_commit(container, ticket_id, run_id, decision)
+    await write_memory(container, ticket_id)
     return await _row(session, ticket_id)

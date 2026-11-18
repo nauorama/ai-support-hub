@@ -205,8 +205,11 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 | customer_id | uuid FK | |
 | ticket_id | uuid FK | |
 | kind | text | `ticket_summary` |
-| content | text | max 400 characters, masked, no card data, no compliance reasons |
+| content | text | max 400 characters (CHECK), masked, no card data, no compliance reasons |
 | expires_at | timestamptz | default: created + 12 months |
+| created_at | timestamptz | |
+
+`ticket_id` is unique: one summary per closed ticket (P6-05, migration 0010). Index `(customer_id, created_at)` for `intake`, which loads the 5 newest that have not expired.
 
 ### feedback
 

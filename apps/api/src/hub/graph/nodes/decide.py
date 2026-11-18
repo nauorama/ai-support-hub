@@ -5,15 +5,20 @@ confidence and the console settings `auto_reply_enabled`, `confidence_threshold`
 `intent_allowlist` (read per run, so a change counts at once). A missing or broken setting is
 the safe side: auto-reply off, nothing allowed, a threshold no confidence reaches.
 
+`memory_shows_open_case` (P6-05): the customer has another open ticket with the triage intent,
+or a memory item of the last 14 days on it (`hub.domain.memory.shows_open_case`).
+
 A failed G1 mask of any model-written string of the run (triage summary, draft, missing
 information, proposed actions, unsupported claims) hands the ticket off (`masking_failed`).
 """
 
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
 from hub.db.repositories import SettingsRepository
 from hub.domain.enums import SettingKey
+from hub.domain.memory import shows_open_case
 from hub.graph.context import GraphContext
 from hub.graph.draft import OutputMask
 from hub.graph.nodes.intake import intake_result
@@ -64,6 +69,11 @@ def threshold(value: object) -> float:
     return float(value)
 
 
+def open_case(state: TicketState, now: datetime) -> bool:
+    triage = state.get("triage")
+    return triage is not None and shows_open_case(state.get("customer_context"), triage.intent, now)
+
+
 async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     pipeline = ctx.pipeline
     errors = state.get("errors", [])
@@ -85,6 +95,8 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                 pipeline.policy, settings.get(SettingKey.INTENT_ALLOWLIST)
             ),
             confidence_threshold=threshold(settings.get(SettingKey.CONFIDENCE_THRESHOLD, NEVER)),
+            memory_shows_open_case=open_case(state, datetime.now(UTC)),
+            variant=pipeline.variant,
         ),
     )
     return TicketState(

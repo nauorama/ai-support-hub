@@ -24,9 +24,10 @@ from hub.llm.config import ModelsConfig
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt, active_prompt, load_prompt
 
-# `graph-v2`: the pause in `human_review` (P6-03); `graph-v1` was the LangGraph workflow of P6-01
-# without it (the linear run was `linear-v1` to `linear-v3`).
-GRAPH_VERSION = "graph-v2"
+# `graph-v3`: the retry loop (P6-04) and memory in `intake` and `decide` (P6-05). `graph-v2` added
+# the pause in `human_review` (P6-03); `graph-v1` was the LangGraph workflow of P6-01 without it
+# (the linear run was `linear-v1` to `linear-v3`).
+GRAPH_VERSION = "graph-v3"
 VARIANT = "rag_hybrid"
 B0_VARIANT = "b0_full_kb"
 # The variants this workflow can run (ai-pipeline §10), with the search mode of the RAG ones.
@@ -112,6 +113,9 @@ class Pipeline:
     # The operator summary of a handoff (`handoff_summary`, role triage). None: handoffs get the
     # fixed notice without a summary.
     handoff_prompt: Prompt | None = None
+    # The memory summary of a closed ticket (`memory_summary`, role triage, P6-05). None: a
+    # close writes no memory.
+    memory_prompt: Prompt | None = None
     # Where the graph keeps its checkpoints. The app and the evaluation runner pass the Postgres
     # store (`CheckpointStore.postgres`); the in-memory default is for unit tests, which start
     # no database.

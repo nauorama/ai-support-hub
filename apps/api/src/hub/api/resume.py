@@ -4,6 +4,8 @@
   (under the ticket row lock) and resumes it after the commit with the operator's
   `ReviewDecision`. The decision is written first (owner decision), so a failed resume never
   loses the answer: the run stays `interrupted` or becomes `failed`.
+- `write_memory`: the memory summary of a closed ticket (P6-05), after the commit and the
+  resume.
 - `recover_on_read`: the next read of a ticket in `processing` starts the recovery of its stuck
   run (`hub.graph.recover`) as a task of its own; the read does not wait for it.
 """
@@ -19,6 +21,7 @@ from hub.domain.enums import RunStatus, TicketStatus
 from hub.domain.review import ReviewDecision
 from hub.graph.recover import recover_ticket_later, stuck_runs
 from hub.graph.run import resume_run
+from hub.memory.summary import write_summary
 
 
 async def paused_run(session: AsyncSession, run_id: uuid.UUID | None) -> uuid.UUID | None:
@@ -57,3 +60,17 @@ async def recover_on_read(container: Container, session: AsyncSession, ticket: T
     if not await stuck_runs(session, pipeline, ticket_id=ticket.id):
         return
     container.runs.start(recover_ticket_later(pipeline, ticket.id))
+
+
+async def write_memory(container: Container, ticket_id: uuid.UUID) -> None:
+    """The memory summary of a ticket the request just closed (P6-05). Never raises."""
+    pipeline = container.pipeline
+    if pipeline is None or pipeline.memory_prompt is None:
+        return
+    await write_summary(
+        pipeline.database,
+        pipeline.gateway,
+        pipeline.memory_prompt,
+        ticket_id,
+        budget=pipeline.budget,
+    )

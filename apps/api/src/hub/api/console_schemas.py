@@ -202,10 +202,21 @@ class DraftReviewOut(BaseModel):
     ticket: QueueTicketOut
 
 
+class MemoryOut(BaseModel):
+    """A memory summary of an earlier ticket of the same customer (P6-05, ui.md "History")."""
+
+    ticket_id: uuid.UUID
+    intent: Intent | None
+    summary: str
+    created_at: datetime
+    expires_at: datetime
+
+
 class ConsoleTicketOut(QueueTicketOut):
     """`GET /console/tickets/{id}`. Fields of later phases are present and empty until then:
-    evidence chunks (phase 5; the B0 cited documents are in `draft.evidence`), memory (phase 6),
-    tool calls (phase 7), trace URL (phase 9)."""
+    evidence chunks (phase 5; the B0 cited documents are in `draft.evidence`), tool calls
+    (phase 7), trace URL (phase 9). `memory` (P6-05): the customer's memory items that have not
+    expired, newest first, at most 5, without this ticket's own."""
 
     language: str | None
     confidence: Decimal | None
@@ -218,6 +229,6 @@ class ConsoleTicketOut(QueueTicketOut):
     # The draft of the latest run, whatever its status.
     draft: DraftOut | None
     evidence: list[Any] = Field(default_factory=list)
-    memory: list[Any] = Field(default_factory=list)
+    memory: list[MemoryOut] = Field(default_factory=list)
     tool_calls: list[Any] = Field(default_factory=list)
     trace_url: None = None

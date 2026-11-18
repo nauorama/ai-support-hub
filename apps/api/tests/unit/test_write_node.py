@@ -189,7 +189,9 @@ def test_write_messages_refuse_another_prompt() -> None:
 
 def test_the_run_tickets_search_hits_are_external_chunks_of_the_kb() -> None:
     hits = {hit.chunk_id: hit for ids in EVIDENCE.values() for hit in hits_from_files(ids, FILES)}
-    assert set(EVIDENCE) == set(TICKETS)
+    # `<id>_retry`: the retry search of a ticket whose recorded verify answer found unsupported
+    # claims (P6-04).
+    assert {name.removesuffix("_retry") for name in EVIDENCE} == set(TICKETS)
     assert all(hit.visibility == "external" for hit in hits.values())
 
 
@@ -265,7 +267,8 @@ async def test_the_recorded_answer_to_a_question_outside_the_kb_cannot_answer() 
 
 def test_the_write_requests_on_disk_are_recorded() -> None:
     """Every run request (triage, write, and verify for an answer that passes the code checks,
-    P5-04) has a real recording (not synthetic), so fake mode can answer it."""
+    P5-04; the retry's write and verify, P6-04) has a real recording (not synthetic), so fake
+    mode can answer it."""
     from hub.llm.record import has_real_recording, load_specs, spec_requests
 
     gateway = _fake_gateway(MemoryRecorder())
@@ -274,7 +277,10 @@ def test_the_write_requests_on_disk_are_recorded() -> None:
     ]
     verified = {path.name for path, _ in specs if path.name.endswith("_verify.json")}
     assert verified == {"run_01_verify.json"}  # run_02 cannot answer: no verify call
-    assert len(specs) == 2 * len(TICKETS) + len(verified)
+    # run_01's recorded verify answer finds an unsupported claim: one retry, written and checked
+    retried = {path.name for path, _ in specs if "_retry" in path.name}
+    assert retried == {"run_01_write_retry.json", "run_01_verify_retry.json"}
+    assert len(specs) == 2 * len(TICKETS) + len(verified) + len(retried)
     for path, spec in specs:
         for request in spec_requests(gateway, spec):
             assert has_real_recording(FIXTURES_DIR, request), f"{path.name}: run make record-llm"

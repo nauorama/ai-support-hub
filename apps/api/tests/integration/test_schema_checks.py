@@ -24,7 +24,7 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = sorted(
 
 
 def test_enum_columns_are_found() -> None:
-    assert len(ENUM_COLUMNS) == 23
+    assert len(ENUM_COLUMNS) == 24
 
 
 @pytest.mark.parametrize(

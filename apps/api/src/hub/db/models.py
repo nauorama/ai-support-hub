@@ -53,6 +53,7 @@ from hub.domain.enums import (
     LlmCallMode,
     LlmCallStatus,
     LlmNode,
+    MemoryKind,
     MessageRole,
     OperatorRole,
     RejectReason,
@@ -327,6 +328,29 @@ class Message(Base):
         default=dict, server_default=text("'{}'::jsonb")
     )
     idempotency_key: Mapped[str | None] = mapped_column(unique=True)
+    created_at: Mapped[datetime] = _created_at_column()
+
+
+class CustomerMemory(Base):
+    """Memory between tickets (ai-pipeline §9, ADR-0012, P6-05): one short summary per closed
+    ticket. Masked, no card data, no compliance reasons; erased with the customer's data."""
+
+    __tablename__ = "customer_memory"
+    __table_args__ = (
+        enum_check("kind", MemoryKind),
+        CheckConstraint("char_length(content) <= 400", name="content_length"),
+        Index("ix_customer_memory_customer_id_created_at", "customer_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = _id_column()
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"))
+    # One summary per ticket: `closed` is final, so a ticket is summarised once.
+    ticket_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tickets.id"), unique=True)
+    kind: Mapped[MemoryKind] = mapped_column(TextEnum(MemoryKind))
+    content: Mapped[str]
+    expires_at: Mapped[datetime] = mapped_column(
+        server_default=text("now() + interval '12 months'")
+    )
     created_at: Mapped[datetime] = _created_at_column()
 
 

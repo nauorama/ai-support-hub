@@ -27,7 +27,10 @@ SESSION_SECRET = "session-secret-for-tests-only-0123456789"  # noqa: S105 - test
 OPERATOR_PASSWORD = "operator-password-for-tests"  # noqa: S105 - test value
 # Hashed once: Argon2 takes tens of milliseconds per hash.
 OPERATOR_HASH = hash_password(OPERATOR_PASSWORD)
-TABLES = "audit_log, feedback, llm_calls, drafts, runs, messages, tickets, customers, operators"
+TABLES = (
+    "audit_log, feedback, llm_calls, drafts, runs, customer_memory, messages, tickets, customers,"
+    " operators"
+)
 
 Urls = tuple[str, str]
 """(migrator URL, app URL) of one database."""

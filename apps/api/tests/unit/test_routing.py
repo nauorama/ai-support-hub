@@ -33,10 +33,10 @@ CHUNK = KbChunk(
     url="/help/withdrawal-times#sepa-withdrawals",
     text="A SEPA withdrawal takes 1 business day.",
     visibility="external",
-    score=0.03,
+    score=0.75,
     rank=1,
 )
-EVIDENCE = Evidence(chunks=[CHUNK], top_score=0.03, score_margin=0.01)
+EVIDENCE = Evidence(chunks=[CHUNK], top_score=0.75, score_margin=0.25)
 PASSED = Verification(
     claims=[ClaimCheck(claim="1 business day", supported=True, source_id=CHUNK.chunk_id)],
     groundedness=1.0,
@@ -88,6 +88,7 @@ def _input(**changes: Any) -> DecideInput:  # noqa: ANN401 - any field value
         "auto_reply_enabled": True,
         "allowed_intents": frozenset({"withdrawal_issue"}),
         "confidence_threshold": 0.95,
+        "variant": "rag_hybrid",
     }
     return DecideInput(**(values | changes))
 
@@ -235,7 +236,7 @@ def test_row_4_does_not_apply_to_a_variant_without_verification() -> None:
 
 
 def test_row_5_degraded_research_goes_to_approval() -> None:
-    degraded = Evidence(chunks=[CHUNK], top_score=0.03, score_margin=0.01, degraded=True)
+    degraded = Evidence(chunks=[CHUNK], top_score=0.75, score_margin=0.25, degraded=True)
     assert _route(_input(evidence=degraded)) == ("approval", ["degraded"])
 
 
@@ -326,11 +327,40 @@ def test_every_row_of_the_decision_table_has_a_test() -> None:
 
 
 def test_confidence_is_the_groundedness_above_the_top_score_floor() -> None:
-    rule = ConfidenceRule(version="t", kind="rule", top_score_floor=0.02)
+    rule = ConfidenceRule(
+        version="t", kind="rule", top_score_floor=0.02, variants=frozenset({"rag_hybrid"})
+    )
     found = {"top_score": 0.03, "groundedness": 0.8333}
-    assert confidence(rule, found) == 0.833
-    assert confidence(rule, {"top_score": 0.02, "groundedness": 1.0}) == 0.0
-    assert confidence(rule, {"top_score": 0.9}) == 0.0  # null groundedness: never auto-reply
+    assert confidence(rule, found, "rag_hybrid") == 0.833
+    assert confidence(rule, {"top_score": 0.02, "groundedness": 1.0}, "rag_hybrid") == 0.0
+    # null groundedness: never auto-reply
+    assert confidence(rule, {"top_score": 0.9}, "rag_hybrid") == 0.0
+
+
+def test_the_floor_needs_both_searches_to_find_the_top_hit() -> None:
+    """P6-06: reciprocal rank fusion gives a top hit 0.5 when only one search (dense or BM25)
+    finds it; the configured floor counts that as no retrieval support."""
+    rule = load_confidence(ROOT / "config" / "confidence.json")
+    assert confidence(rule, {"top_score": 0.5, "groundedness": 1.0}, "rag_hybrid") == 0.0
+    assert confidence(rule, {"top_score": 0.5 + 1 / 21, "groundedness": 1.0}, "rag_hybrid") == 1.0
+
+
+@pytest.mark.parametrize("variant", ["rag_dense", "b0_full_kb", "unknown"])
+def test_the_floor_holds_only_for_rag_hybrid_and_other_variants_never_auto_reply(
+    variant: str,
+) -> None:
+    """Owner decision (PR #38 review): the floor was measured on fused hybrid scores; dense
+    cosine scores and B0 (no search) get confidence 0, so row 8 sends them to approval."""
+    rule = load_confidence(ROOT / "config" / "confidence.json")
+    assert rule.variants == {"rag_hybrid"}
+    assert confidence(rule, {"top_score": 1.0, "groundedness": 1.0}, variant) == 0.0
+    decision = decide(POLICY, rule, _input(variant=variant))
+    assert (decision.route, decision.reasons, decision.confidence) == (
+        "approval",
+        ["low_confidence"],
+        0.0,
+    )
+    assert decide(POLICY, rule, _input()).route == "auto_reply"
 
 
 def test_the_features_are_the_documented_inputs() -> None:
@@ -342,8 +372,8 @@ def test_the_features_are_the_documented_inputs() -> None:
         retry_count=1,
     )
     assert found == {
-        "top_score": 0.03,
-        "score_margin": 0.01,
+        "top_score": 0.75,
+        "score_margin": 0.25,
         "n_citations": 1.0,
         "n_account_facts": 0.0,
         "retry_used": 1.0,
@@ -358,7 +388,7 @@ def test_the_features_are_the_documented_inputs() -> None:
 
 def test_the_confidence_file_loads_and_a_broken_one_is_refused(tmp_path: Path) -> None:
     rule = load_confidence(ROOT / "config" / "confidence.json")
-    assert (rule.kind, rule.top_score_floor) == ("rule", 0.0)
+    assert (rule.kind, rule.top_score_floor) == ("rule", 0.5)
     with pytest.raises(ConfidenceError, match="cannot read"):
         load_confidence(tmp_path / "missing.json")
     bad = tmp_path / "bad.json"
