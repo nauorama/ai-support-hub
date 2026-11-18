@@ -6,7 +6,7 @@ Requirements: Docker, Python 3.13 with `uv`, Node.js LTS with `pnpm`, `make`.
 
 `infra/docker-compose.yml` services: `postgres`, `qdrant`, `api` (hot reload), `mcp` (support-tools server), `web` (Vite dev server). Optional profile `tracing`: self-hosted Langfuse — only if the cloud free tier is not used.
 
-Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdrant` and `api`; `mcp` comes in phase 7 and `web` in phase 10. **Until the MCP server exists (P7), `GET /ready` answers 503** with `mcp` reported as not reachable, while `postgres` and `qdrant` report `ok`; the compose healthcheck of `api` uses `/health` for this reason. Likewise `make dev` gains `migrate`, `seed` and `kb-load` as P2-02, P2-05 and P2-09 build them. **`make dev` needs `SEED_OPERATOR_PASSWORD`, `SESSION_SECRET` and `DEMO_ACCESS_CODE` in `.env`:** `.env.example` leaves them empty on purpose (no shared demo secrets in the repository). The first step of `make dev` (`hub/dev_check.py`) lists every one that is empty in a single message and stops before anything is started or written; set them in `.env` and run `make dev` again. `make seed` on its own still checks `SEED_OPERATOR_PASSWORD` and writes nothing when it is empty. Ports bind to `127.0.0.1` only. Integration tests do not use this stack: testcontainers starts Postgres and Qdrant with the image tags of the compose file.
+Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdrant` and `api`; `mcp` (the support-tools MCP server, `infra/Dockerfile.mcp`) came in P7-01, and `web` comes in phase 10. `GET /ready` reports `postgres`, `qdrant` and `mcp`; the compose healthcheck of `api` uses `/health`, so the api stays healthy while a dependency is down. The `mcp` service mounts `data/seed` read-only and keeps the Jira and Slack mock calls in a SQLite file in the container's `/tmp` (lost when the container is removed). Likewise `make dev` gains `migrate`, `seed` and `kb-load` as P2-02, P2-05 and P2-09 build them. **`make dev` needs `SEED_OPERATOR_PASSWORD`, `SESSION_SECRET`, `DEMO_ACCESS_CODE` and `MCP_SERVER_TOKEN` in `.env`:** `.env.example` leaves them empty on purpose (no shared demo secrets in the repository). The first step of `make dev` (`hub/dev_check.py`) lists every one that is empty in a single message and stops before anything is started or written; set them in `.env` and run `make dev` again. `make seed` on its own still checks `SEED_OPERATOR_PASSWORD` and writes nothing when it is empty. Ports bind to `127.0.0.1` only. Integration tests do not use this stack: testcontainers starts Postgres and Qdrant with the image tags of the compose file.
 
 | Command | Does |
 |---|---|
@@ -17,6 +17,8 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make seed` | load demo customers, operators, settings (idempotent: customers are upserted by `external_ref`, except anonymised ones; operators and settings are inserted only when missing) |
 | `make kb-load` | load `data/kb` into Postgres (only changed documents), then sync the Qdrant index with Postgres: only chunks whose text changed are embedded again (`hub/kb/service.py`, P5-01). `FULL=1` also re-chunks unchanged files (writes only those whose chunks differ), builds a new collection and moves the alias `kb_chunks` to it |
 | `make dev` | `models` + `up` + `migrate` + `seed` + `kb-load` |
+| `make mcp` | run the support-tools MCP server over stdio (what Claude Code starts; see the README) |
+| `make mcp-smoke` | start the MCP server over streamable HTTP (random bearer token) and over stdio, list the tools and call `core_get_transaction` on each with the official MCP client; also checks that a request without the token gets 401 |
 | `make test` | unit tests (no network, no containers) |
 | `make test-int` | integration tests with testcontainers (Postgres, Qdrant) and recorded model responses |
 | `make test-e2e` | Playwright against the compose stack with the fake model provider |
@@ -37,7 +39,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 
 ## 2. Configuration
 
-All settings are environment variables read by one Pydantic `Settings` class (`hub/config.py`). `.env.example` lists every variable with a comment. No setting is read anywhere else.
+All settings are environment variables read by one Pydantic `Settings` class (`hub/config.py`). `.env.example` lists every variable with a comment. No setting is read anywhere else in the Hub. The MCP server is a separate app and reads its own few variables from the environment (`support_tools/server.py`, `ServerSettings`): `MCP_SERVER_TOKEN` and `CORE_ANCHOR_DATE` (the same values as the Hub's), `MCP_MOCK_DB` (SQLite file of the Jira and Slack mocks; default `.cache/mcp-mock.sqlite`, `/tmp/mcp-mock.sqlite` in the image) and `SEED_DIR` (default `data/seed`). The last two are not in `.env.example`: the Hub refuses unknown variables in `.env`.
 
 | Variable | Example | Note |
 |---|---|---|
@@ -56,8 +58,8 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `PROMPTS_DIR` | `prompts` | prompt files; the active versions are in `MODELS_CONFIG` |
 | `POLICY_CONFIG` | `config/policy.yaml` | routing rules, notice texts, support hours ([AI pipeline](ai-pipeline.md) §6); a broken file stops the start |
 | `CONFIDENCE_CONFIG` | `config/confidence.json` | rule version of confidence (AI pipeline §6) |
-| `MCP_SERVER_URL`, `MCP_SERVER_TOKEN` | `http://mcp:8001/mcp` | |
-| `JIRA_MODE`, `SLACK_MODE` | `mock` | only `mock` ([ADR-0019](adr/0019-scope-cuts.md)). The settings still accept `real` together with `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`; P7-02 removes them |
+| `MCP_SERVER_URL`, `MCP_SERVER_TOKEN` | `http://mcp:8001/mcp` | the token is required: the server's HTTP transport refuses to start without one, and refuses every request without it (401) |
+| `JIRA_MODE`, `SLACK_MODE` | `mock` | only `mock` ([ADR-0019](adr/0019-scope-cuts.md)); the real-mode settings were removed in P7-02, and an old `.env` line such as `JIRA_API_TOKEN=` now stops the start (unknown variable) |
 | `SESSION_SECRET` | random 32 bytes | |
 | `DEMO_ACCESS_CODE` | | for the public chat |
 | `SEED_OPERATOR_PASSWORD` | | used by `make seed` |

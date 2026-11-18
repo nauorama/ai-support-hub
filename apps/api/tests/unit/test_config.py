@@ -88,7 +88,11 @@ def test_app_starts_with_a_valid_env_file(tmp_path: Path, monkeypatch: pytest.Mo
     [
         ("APP_ENV=prod", "app_env"),
         ("LLM_MODE=maybe", "llm_mode"),
-        ("JIRA_MODE=live", "jira_mode"),
+        ("JIRA_MODE=real", "jira_mode"),
+        ("SLACK_MODE=real", "slack_mode"),
+        # The real-mode settings are gone (P7-02); an old .env line is refused, not ignored.
+        ("JIRA_API_TOKEN=x", "jira_api_token"),
+        ("SLACK_BOT_TOKEN=x", "slack_bot_token"),
         ("EVAL_TRACE_SAMPLE=1.5", "eval_trace_sample"),
         ("DAILY_BUDGET_USD=-1", "daily_budget_usd"),
         ("CORE_ANCHOR_DATE=yesterday", "core_anchor_date"),

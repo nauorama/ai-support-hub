@@ -66,14 +66,9 @@ class Settings(BaseSettings):
     mcp_server_url: str = "http://localhost:8001/mcp"
     mcp_server_token: SecretStr = SecretStr("")
 
-    jira_mode: Literal["mock", "real"] = "mock"
-    jira_base_url: str = ""
-    jira_email: str = ""
-    jira_api_token: SecretStr = SecretStr("")
-    jira_project_key: str = ""
-    slack_mode: Literal["mock", "real"] = "mock"
-    slack_bot_token: SecretStr = SecretStr("")
-    slack_channel_id: str = ""
+    # Jira and Slack are mocks inside the MCP server; there is no real mode (ADR-0019, P7-02).
+    jira_mode: Literal["mock"] = "mock"
+    slack_mode: Literal["mock"] = "mock"
 
     session_secret: SecretStr = SecretStr("")
     demo_access_code: SecretStr = SecretStr("")
