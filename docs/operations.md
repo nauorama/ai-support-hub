@@ -18,6 +18,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make kb-load` | load `data/kb` into Postgres (only changed documents), then sync the Qdrant index with Postgres: only chunks whose text changed are embedded again (`hub/kb/service.py`, P5-01). `FULL=1` also re-chunks unchanged files (writes only those whose chunks differ), builds a new collection and moves the alias `kb_chunks` to it |
 | `make dev` | `models` + `up` + `migrate` + `seed` + `kb-load` |
 | `make mcp` | run the support-tools MCP server over stdio (what Claude Code starts; see the README) |
+| `make mcp-smoke` | start the MCP server over streamable HTTP (random bearer token) and over stdio, list the tools and call `core_get_transaction` on each with the official MCP client; also checks that a request without the token gets 401 |
 | `make test` | unit tests (no network, no containers) |
 | `make test-int` | integration tests with testcontainers (Postgres, Qdrant) and recorded model responses |
 | `make test-e2e` | Playwright against the compose stack with the fake model provider |

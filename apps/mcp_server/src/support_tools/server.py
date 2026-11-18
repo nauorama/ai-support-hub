@@ -15,20 +15,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
-from pydantic import Field
+from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from mcp.types import CallToolResult, InputRequiredResult, ToolAnnotations
+from pydantic import Field, ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from support_tools.adapters.core import (
     MAX_TRANSACTIONS,
     CardList,
     CoreAdapter,
+    CoreRequestError,
     CustomerProfile,
-    NotFoundError,
     TransactionDetail,
     TransactionList,
 )
@@ -123,7 +124,7 @@ def build_server(
     store = store or MockStore(settings.mock_db)
     jira = JiraMock(store, now)
     slack = SlackMock(store, now)
-    server = MCPServer(
+    server = SupportToolsServer(
         "support-tools",
         instructions=(
             "Tallybridge support tools (fictional company, mock data). Core tools read one "
@@ -134,7 +135,9 @@ def build_server(
     @server.tool(annotations=_READ)
     def core_get_customer(customer_ref: CustomerRefArg) -> CustomerProfile:
         """Tier, country, verification status, restriction flag (never a reason), limits and
-        how much of each is used."""
+        how much of each is used, per currency. Daily limits count only transactions dated
+        today (CET) and monthly limits this calendar month; an empty `used` means no such
+        transaction is recorded in that period, not that a payment cannot be pending elsewhere."""
         return _safe(lambda: core.get_customer(customer_ref))
 
     @server.tool(annotations=_READ)
@@ -168,12 +171,15 @@ def build_server(
         ticket_id: TicketIdArg,
         idempotency_key: IdempotencyKeyArg,
     ) -> JiraIssue:
-        """Create a Jira issue (mock). At most one issue per ticket."""
-        return _safe(
-            lambda: jira.create_issue(
+        """Create a Jira issue (mock) for a known customer. At most one issue per ticket."""
+
+        def create() -> JiraIssue:
+            core.require_customer(customer_ref)
+            return jira.create_issue(
                 issue_type, summary, description, customer_ref, ticket_id, idempotency_key
             )
-        )
+
+        return _safe(create)
 
     @server.tool(annotations=_READ)
     def jira_get_issue(key: JiraKeyArg) -> JiraIssueStatus:
@@ -194,42 +200,81 @@ def build_server(
 
 
 def _safe[T](call: Callable[[], T]) -> T:
-    """Anticipated failures become tool errors with their own short, data-free message."""
+    """Anticipated failures become tool errors with their own fixed, data-free message.
+
+    Only the adapters' own errors are caught: their messages are constants. Anything else,
+    including a pydantic `ValidationError` (a `ValueError` whose text holds the values), is left
+    to the SDK, which answers only "Error executing tool <name>".
+    """
     try:
         return call()
-    except (NotFoundError, MockRefusedError, ValueError) as exc:
+    except (CoreRequestError, MockRefusedError) as exc:
         raise ToolError(str(exc)) from exc
 
 
-class BearerAuth:
-    """Pure ASGI check of `Authorization: Bearer <MCP_SERVER_TOKEN>` on every HTTP request.
+class SupportToolsServer(MCPServer):
+    """`MCPServer` whose argument errors name the fields, never the values.
 
-    Constant-time comparison. Lifespan events pass through, so the session manager starts.
-    In production Cloud Run's own authentication is the first check (security §4).
+    The SDK reports arguments that fail the input schema with pydantic's text, which repeats the
+    rejected value (`input_value=...`). A caller may have put card data or customer text there,
+    and a tool error goes back to the model and into logs, so only the field names are kept.
+    """
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context[Any, Any] | None = None
+    ) -> CallToolResult | InputRequiredResult:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as exc:
+            cause = exc.__cause__
+            if isinstance(exc, UnexpectedToolError) or not isinstance(cause, ValidationError):
+                raise
+            fields = sorted(
+                {".".join(str(p) for p in e["loc"]) or "arguments" for e in cause.errors()}
+            )
+            raise ToolError(
+                f"Error executing tool {name}: invalid arguments: {', '.join(fields)}"
+            ) from cause
+
+
+class BearerAuth:
+    """Pure ASGI check of `Authorization: Bearer <MCP_SERVER_TOKEN>` on every request.
+
+    The scheme is case-insensitive (RFC 9110 §11.1), the token is compared in constant time.
+    Lifespan events pass through, so the session manager starts; a websocket (no route uses one)
+    is closed. In production Cloud Run's own authentication is the first check (security §4).
     """
 
     def __init__(self, app: ASGIApp, token: str) -> None:
         if not token:
             raise ValueError("MCP_SERVER_TOKEN is empty: the HTTP transport needs a token")
         self._app = app
-        self._expected = f"Bearer {token}".encode()
+        self._token = token.encode()
+
+    def _authorized(self, scope: Scope) -> bool:
+        header: bytes = dict(scope["headers"]).get(b"authorization", b"")
+        scheme, _, given = header.partition(b" ")
+        # compare_digest always runs, so a wrong scheme costs the same time as a wrong token.
+        same_token = hmac.compare_digest(given.strip(), self._token)
+        return scheme.lower() == b"bearer" and same_token
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            given = dict(scope["headers"]).get(b"authorization", b"")
-            if not hmac.compare_digest(given, self._expected):
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 401,
-                        "headers": [
-                            (b"content-type", b"application/json"),
-                            (b"www-authenticate", b"Bearer"),
-                        ],
-                    }
-                )
-                await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
-                return
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        if scope["type"] == "http" and not self._authorized(scope):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
+            return
         await self._app(scope, receive, send)
 
 

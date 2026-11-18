@@ -97,7 +97,7 @@ Leave out `--env CORE_ANCHOR_DATE=…` to use today's date. Keep `--transport st
 claude mcp add --transport http support-tools http://127.0.0.1:8001/mcp --header "Authorization: Bearer $MCP_SERVER_TOKEN"
 ```
 
-Check with `claude mcp list`, or `/mcp` inside a session, then ask for example "Use core_get_transaction for CUS-0001, TX-000900". Without `--scope` the server is added for this project on your machine only (`local`). The MCP Inspector works the same way: `npx @modelcontextprotocol/inspector@2.13.0 uv run python -m support_tools`.
+Check with `claude mcp list`, or `/mcp` inside a session, then ask for example "Use core_get_transaction for CUS-0001, TX-000900". Without `--scope` the server is added for this project on your machine only (`local`). `make mcp-smoke` checks both transports with the official MCP client (list the tools, call `core_get_transaction`). The MCP Inspector works the same way: `npx @modelcontextprotocol/inspector@2.13.0 uv run python -m support_tools`.
 
 ## How this project is built
 

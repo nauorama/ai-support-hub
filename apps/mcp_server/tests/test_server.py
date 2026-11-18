@@ -1,5 +1,6 @@
 """The MCP server through real MCP clients: in process, over stdio, and over streamable HTTP."""
 
+import logging
 import os
 import socket
 import sys
@@ -19,6 +20,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 from pydantic import BaseModel
 from starlette.types import Receive, Scope, Send
 
+from support_tools import smoke
 from support_tools.adapters.core import (
     CardList,
     CustomerProfile,
@@ -34,6 +36,7 @@ from support_tools.server import (
     DEFAULT_SEED_DIR,
     BearerAuth,
     ServerSettings,
+    _safe,
     http_app,
 )
 
@@ -290,4 +293,130 @@ async def test_tools_can_be_called_over_stdio(tmp_path: Path) -> None:
             "core_get_transaction", {"customer_ref": "CUS-0001", "reference": "TX-000900"}
         )
     assert result.structured_content is not None
-    assert result.structured_content["expected_by"] == "2026-11-13"
+    assert result.structured_content["reference"] == "TX-000900"
+    assert result.structured_content["as_of"] == ANCHOR.isoformat()
+
+
+# --- error text never repeats an argument (PR #39 review) -------------------------------------
+
+# A public test card number (Visa test range); never a real one (AGENTS.md).
+TEST_CARD = "4111111111111111"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "fields"),
+    [
+        ("core_get_customer", {"customer_ref": TEST_CARD}, "customer_ref"),
+        (
+            "jira_create_issue",
+            {**CALLS["jira_create_issue"], "summary": f"card {TEST_CARD} " * 20},
+            "summary",
+        ),
+        (
+            "slack_post_escalation",
+            {**CALLS["slack_post_escalation"], "idempotency_key": f"{TEST_CARD} x"},
+            "idempotency_key",
+        ),
+        ("core_list_transactions", {"customer_ref": "CUS-0001", "status": TEST_CARD}, "status"),
+    ],
+)
+async def test_an_invalid_argument_error_names_the_field_never_the_value(
+    server: MCPServer,
+    name: str,
+    arguments: dict[str, Any],
+    fields: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with Client(server) as client:
+        result = await client.call_tool(name, arguments)
+    assert result.is_error
+    assert result.content[0].type == "text"
+    text = result.content[0].text
+    assert text == f"Error executing tool {name}: invalid arguments: {fields}"
+    assert TEST_CARD not in text
+    assert TEST_CARD not in caplog.text
+
+
+def test_safe_lets_other_errors_through_to_the_generic_sdk_message() -> None:
+    def broken() -> None:
+        raise ValueError(f"value {TEST_CARD}")
+
+    with pytest.raises(ValueError, match="value"):
+        _safe(broken)
+
+
+async def test_an_unexpected_failure_in_a_tool_is_generic(server: MCPServer) -> None:
+    @server.tool()
+    def leaky() -> str:
+        raise ValueError(f"value {TEST_CARD}")
+
+    async with Client(server) as client:
+        result = await client.call_tool("leaky", {})
+    assert result.is_error
+    assert result.content[0].type == "text"
+    assert result.content[0].text == "Error executing tool leaky"
+
+
+async def test_a_jira_issue_needs_a_known_customer(server: MCPServer) -> None:
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "jira_create_issue", {**CALLS["jira_create_issue"], "customer_ref": "CUS-0999"}
+        )
+    assert result.is_error
+    assert result.content[0].type == "text"
+    assert result.content[0].text.endswith("customer not found")
+
+
+# --- bearer check -----------------------------------------------------------------------------
+
+
+async def _call_auth(scope_type: str, header: bytes | None) -> list[dict[str, Any]]:
+    reached: list[str] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        reached.append(scope["type"])
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: Any) -> None:  # noqa: ANN401 - ASGI message
+        sent.append(message)
+
+    async def receive() -> Any:  # noqa: ANN401 - ASGI message
+        return {}
+
+    headers = [] if header is None else [(b"authorization", header)]
+    await BearerAuth(app, "secret-token")({"type": scope_type, "headers": headers}, receive, send)
+    if reached:
+        sent.append({"type": "reached"})
+    return sent
+
+
+@pytest.mark.parametrize(
+    "header", [b"Bearer secret-token", b"bearer secret-token", b"BEARER secret-token"]
+)
+async def test_the_bearer_scheme_is_case_insensitive(header: bytes) -> None:
+    assert await _call_auth("http", header) == [{"type": "reached"}]
+
+
+@pytest.mark.parametrize(
+    "header", [None, b"Bearer", b"Bearer wrong", b"Basic secret-token", b"secret-token"]
+)
+async def test_a_wrong_or_missing_token_is_401(header: bytes | None) -> None:
+    sent = await _call_auth("http", header)
+    assert sent[0]["status"] == 401
+
+
+async def test_a_websocket_is_closed_and_lifespan_passes() -> None:
+    assert await _call_auth("websocket", b"Bearer secret-token") == [
+        {"type": "websocket.close", "code": 1008}
+    ]
+    assert await _call_auth("lifespan", None) == [{"type": "reached"}]
+
+
+def test_the_smoke_script_passes(capsys: pytest.CaptureFixture[str]) -> None:
+    """`make mcp-smoke` keeps working: both transports, real subprocesses."""
+    smoke.main()
+    out = capsys.readouterr().out
+    assert "[http] request without a token: HTTP 401" in out
+    assert out.strip().endswith("mcp smoke: ok")

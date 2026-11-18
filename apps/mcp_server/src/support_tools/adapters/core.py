@@ -36,7 +36,11 @@ from support_tools.seed import (
 MAX_TRANSACTIONS = 20
 
 
-class NotFoundError(Exception):
+class CoreRequestError(Exception):
+    """A request the core mock refuses. The message is a constant: it never holds a value."""
+
+
+class NotFoundError(CoreRequestError):
     """The customer or transaction does not exist for this customer (one message for both)."""
 
 
@@ -206,9 +210,10 @@ ARRIVAL_DAYS = {
     TransactionType.INCOMING_FPS: 0,
 }
 CARD_FUNDS_DAYS = 3
-# New accounts: the first 3 card payment requests take 7 calendar days instead.
-FIRST_CARD_REQUESTS = 3
-FIRST_CARD_REQUESTS_CALENDAR_DAYS = 7
+# New accounts wait 7 calendar days for their first 3 card payments. The world file does not
+# define a "new account", so the mock does not decide it: `expected_by` is the later of the two
+# dates, the latest the funds can be due either way (owner decision, PR #39).
+NEW_ACCOUNT_CARD_FUNDS_CALENDAR_DAYS = 7
 REVIEW_DAYS = 3
 RETURN_DAYS = 7
 # Physical card delivery, latest business day (world file §5).
@@ -237,6 +242,10 @@ class CoreAdapter:
         for tx in seed.transactions:
             self._transactions.setdefault(tx.customer_ref, []).append(tx)
         self._today = today
+
+    def require_customer(self, customer_ref: str) -> None:
+        """Raise `NotFoundError` unless the customer exists (the Jira mock checks this)."""
+        self._customer(customer_ref)
 
     def _customer(self, customer_ref: str) -> SeedCustomer:
         customer = self._customers.get(customer_ref)
@@ -279,7 +288,7 @@ class CoreAdapter:
     ) -> TransactionList:
         self._customer(customer_ref)
         if not 1 <= limit <= MAX_TRANSACTIONS:
-            raise ValueError(f"limit must be 1-{MAX_TRANSACTIONS}")
+            raise CoreRequestError(f"limit must be 1-{MAX_TRANSACTIONS}")
         anchor = self._today()
         txs = [
             tx
@@ -301,7 +310,7 @@ class CoreAdapter:
             # The same message whether the reference is unknown or another customer's.
             raise NotFoundError("transaction not found")
         anchor = self._today()
-        event, expected = _expected(tx, txs, anchor)
+        event, expected = _expected(tx, anchor)
         return TransactionDetail(
             **_summary(tx, anchor).model_dump(),
             counterparty=tx.counterparty,
@@ -376,9 +385,7 @@ def _last_change(tx: SeedTransaction, status: TransactionStatus, anchor: date) -
     return resolve_offset(at, anchor)
 
 
-def _expected(
-    tx: SeedTransaction, customer_txs: list[SeedTransaction], anchor: date
-) -> tuple[ExpectedEvent | None, date | None]:
+def _expected(tx: SeedTransaction, anchor: date) -> tuple[ExpectedEvent | None, date | None]:
     """The next event of an open transaction and the latest CET date it is due (world file §5)."""
     requested = resolve_offset(tx.requested_at, anchor)
     start = cet_date(requested)
@@ -391,30 +398,20 @@ def _expected(
     if tx.status is not TransactionStatus.PENDING:
         return None, None
     if tx.type is TransactionType.WITHDRAWAL_SEPA:
+        # World file §5 gives a time only for a request before 15:00 CET on a business day;
+        # after the cut-off or on a closing day the mock states no date (owner decision, PR #39).
         local = requested.astimezone(CET)
-        before_cutoff = is_business_day(start) and local.time() < SEPA_CUTOFF_CET
-        # After the cut-off (or on a closing day) processing starts the next business day.
-        first = start if before_cutoff else add_business_days(start, 1)
-        return ExpectedEvent.ARRIVAL, add_business_days(first, 1)
+        if not (is_business_day(start) and local.time() < SEPA_CUTOFF_CET):
+            return None, None
+        return ExpectedEvent.ARRIVAL, add_business_days(start, 1)
     if tx.type in ARRIVAL_DAYS:
-        days = ARRIVAL_DAYS[tx.type]
-        due = add_business_days(start, days) if days else _same_or_next_business_day(start)
-        return ExpectedEvent.ARRIVAL, due
+        # Faster Payments: "same day", the calendar day of the request.
+        return ExpectedEvent.ARRIVAL, add_business_days(start, ARRIVAL_DAYS[tx.type])
     if tx.type is TransactionType.PAYMENT_REQUEST_CARD:
-        card_requests = sorted(
-            (t for t in customer_txs if t.type is TransactionType.PAYMENT_REQUEST_CARD),
-            key=lambda t: (resolve_offset(t.requested_at, anchor), t.reference),
-        )
-        if tx in card_requests[:FIRST_CARD_REQUESTS]:
-            return ExpectedEvent.FUNDS_AVAILABLE, start + timedelta(
-                days=FIRST_CARD_REQUESTS_CALENDAR_DAYS
-            )
-        return ExpectedEvent.FUNDS_AVAILABLE, add_business_days(start, CARD_FUNDS_DAYS)
+        business = add_business_days(start, CARD_FUNDS_DAYS)
+        calendar = start + timedelta(days=NEW_ACCOUNT_CARD_FUNDS_CALENDAR_DAYS)
+        return ExpectedEvent.FUNDS_AVAILABLE, max(business, calendar)
     return None, None
-
-
-def _same_or_next_business_day(day: date) -> date:
-    return day if is_business_day(day) else add_business_days(day, 1)
 
 
 def _delivery_by(card: SeedCard, country: str, anchor: date) -> date | None:

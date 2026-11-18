@@ -9,6 +9,7 @@ import pytest
 
 from support_tools.adapters.core import (
     CoreAdapter,
+    CoreRequestError,
     ExpectedEvent,
     LimitName,
     NotFoundError,
@@ -86,18 +87,18 @@ def test_a_sepa_withdrawal_before_the_cut_off_arrives_the_next_business_day() ->
     assert _expected(adapter, "TX-000001") == (ExpectedEvent.ARRIVAL, date(2026, 11, 12))
 
 
-def test_a_sepa_withdrawal_after_the_cut_off_arrives_a_day_later() -> None:
-    # Wed 11 Nov 14:20 UTC = 15:20 CET: processing starts Thursday, arrival Friday.
-    adapter = _adapter([_tx("TX-000001", "withdrawal_sepa", "pending", "-1d 14:20")])
-    assert _expected(adapter, "TX-000001") == (ExpectedEvent.ARRIVAL, date(2026, 11, 13))
-
-
-def test_a_sepa_withdrawal_on_a_weekend_starts_on_monday() -> None:
-    # Sat 7 Nov: processing starts Mon 9, arrival Tue 10 (overdue by the anchor).
-    adapter = _adapter([_tx("TX-000001", "withdrawal_sepa", "pending", "-5d 09:00")])
+@pytest.mark.parametrize(
+    "offset",
+    [
+        "-1d 14:20",  # Wed 11 Nov 15:20 CET: after the cut-off
+        "-5d 09:00",  # Sat 7 Nov: not a business day
+    ],
+)
+def test_a_sepa_withdrawal_outside_the_stated_rule_gets_no_date(offset: str) -> None:
+    # World file §5 states only "before 15:00 CET"; the mock invents nothing else (PR #39).
+    adapter = _adapter([_tx("TX-000001", "withdrawal_sepa", "pending", offset)])
     detail = adapter.get_transaction("CUS-0001", "TX-000001")
-    assert detail.expected_by == date(2026, 11, 10)
-    assert detail.overdue is True
+    assert (detail.expected_event, detail.expected_by, detail.overdue) == (None, None, False)
 
 
 @pytest.mark.parametrize(
@@ -107,7 +108,7 @@ def test_a_sepa_withdrawal_on_a_weekend_starts_on_monday() -> None:
         ("incoming_sepa", "-1d 09:00", date(2026, 11, 12)),
         ("incoming_ach", "-1d 09:00", date(2026, 11, 16)),
         ("incoming_fps", "-1d 09:00", date(2026, 11, 11)),
-        ("incoming_fps", "-5d 09:00", date(2026, 11, 9)),  # Saturday → Monday
+        ("incoming_fps", "-5d 09:00", date(2026, 11, 7)),  # "same day", also on a Saturday
     ],
 )
 def test_pending_transfers_have_an_arrival_date(type: str, offset: str, due: date) -> None:
@@ -121,16 +122,18 @@ def test_a_late_swift_withdrawal_is_overdue() -> None:
     assert adapter.get_transaction("CUS-0001", "TX-000001").overdue is True
 
 
-def test_the_first_three_card_payment_requests_take_seven_calendar_days() -> None:
-    txs = [
-        _tx(f"TX-00000{n}", "payment_request_card", "pending", f"-{10 - n}d 10:00")
-        for n in range(1, 5)
-    ]
-    adapter = _adapter(txs)
-    # TX-000001 is requested Tue 3 Nov: + 7 calendar days.
-    assert _expected(adapter, "TX-000001") == (ExpectedEvent.FUNDS_AVAILABLE, date(2026, 11, 10))
-    # TX-000004 (Fri 6 Nov) is the fourth: 3 business days.
-    assert _expected(adapter, "TX-000004") == (ExpectedEvent.FUNDS_AVAILABLE, date(2026, 11, 11))
+@pytest.mark.parametrize(
+    ("offset", "due"),
+    [
+        ("-9d 10:00", date(2026, 11, 10)),  # Tue 3 Nov: 3 business days Fri 6, 7 days Tue 10
+        ("-6d 10:00", date(2026, 11, 13)),  # Fri 6 Nov: Wed 11 against Fri 13
+        ("-324d 10:00", date(2025, 12, 30)),  # Tue 23 Dec 2025, over Christmas: both Tue 30
+    ],
+)
+def test_card_payment_funds_are_due_by_the_later_of_both_rules(offset: str, due: date) -> None:
+    # No "new account" rule (not defined in the world file): the latest date either way.
+    adapter = _adapter([_tx("TX-000001", "payment_request_card", "pending", offset)])
+    assert _expected(adapter, "TX-000001") == (ExpectedEvent.FUNDS_AVAILABLE, due)
 
 
 def test_a_payment_held_for_review_is_decided_within_three_business_days() -> None:
@@ -280,7 +283,7 @@ def test_transactions_are_newest_first_filtered_and_limited() -> None:
     )
     assert [t.reference for t in filtered.transactions] == ["TX-000001"]
     assert len(adapter.list_transactions("CUS-0001", limit=1).transactions) == 1
-    with pytest.raises(ValueError, match="limit"):
+    with pytest.raises(CoreRequestError, match="limit"):
         adapter.list_transactions("CUS-0001", limit=21)
 
 
