@@ -262,8 +262,10 @@ def hard_rules(policy: Policy, given: GateInput) -> list[RuleMatch]:
     rules = policy.always_handoff
     triage = given.triage
     matches: list[RuleMatch] = []
-    if triage.intent in rules.intents:
-        matches.append(RuleMatch(triage.intent, RouteReason.POLICY_INTENT))
+    # The secondary intent counts too (the safe side; owner decision, PR #36 review).
+    for intent in (triage.intent, triage.secondary_intent):
+        if intent is not None and intent in rules.intents:
+            matches.append(RuleMatch(intent, RouteReason.POLICY_INTENT))
     matches += [
         RuleMatch(flag, FLAG_REASONS[flag]) for flag in rules.flags if getattr(triage, flag)
     ]

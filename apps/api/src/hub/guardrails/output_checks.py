@@ -197,6 +197,12 @@ def looks_english(text: str) -> bool:
     return other == 0 or sum(t in _ENGLISH for t in tokens) > other
 
 
+def has_other_language_words(text: str) -> bool:
+    """A common function word of another European language (German, Spanish, French, Italian,
+    Portuguese, Dutch, Polish) is in the text."""
+    return any(token in _OTHER for token in words(text))
+
+
 def has_card_data(text: str) -> bool:
     result = mask(text)
     if result.failed:

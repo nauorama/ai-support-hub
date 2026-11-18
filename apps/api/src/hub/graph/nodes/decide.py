@@ -57,7 +57,9 @@ def mask_failed(state: TicketState) -> bool:
 
 
 def threshold(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    """The `confidence_threshold` setting; anything but a number in (0, 1] never allows an
+    auto-reply (a threshold of 0 would let a confidence of 0 through, PR #36 review)."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < value <= 1:
         return NEVER
     return float(value)
 

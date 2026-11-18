@@ -105,7 +105,8 @@ handoff_notices:
   masking_failed: "I could not prepare an answer, so I have passed your message to a support specialist."
 
 # The last sentence of the notice. {minutes}, {hours}, {opens} are filled in by code; {opens} is
-# "today at 10:00 CET", "tomorrow at 08:00 CET" or "on Monday at 08:00 CET".
+# "today at 10:00 CET", "tomorrow at 08:00 CET" or "on Monday at 08:00 CEST": local time of
+# Europe/Bratislava, CET in winter and CEST in summer.
 response_time:
   urgent: "A support specialist will reply here within {minutes} minutes."
   standard: "A support specialist will reply here within {hours} business hours."

@@ -291,6 +291,18 @@ def test_row_8_low_confidence_goes_to_approval() -> None:
     )
 
 
+def test_row_8_a_confidence_of_zero_never_auto_replies_whatever_the_threshold() -> None:
+    """PR #36 review: a top score at the floor gives confidence 0; even a threshold of 0 (a
+    broken setting `decide` would refuse anyway) does not let it through."""
+    at_floor = Evidence(chunks=[CHUNK], top_score=0.0, score_margin=0.0)
+    decision = decide(POLICY, CONFIDENCE_RULE, _input(evidence=at_floor, confidence_threshold=0.0))
+    assert (decision.route, decision.reasons, decision.confidence) == (
+        "approval",
+        ["low_confidence"],
+        0.0,
+    )
+
+
 def test_row_9_otherwise_auto_reply() -> None:
     decision = decide(POLICY, CONFIDENCE_RULE, _input())
     assert (decision.route, decision.reasons, decision.confidence) == ("auto_reply", [], 1.0)

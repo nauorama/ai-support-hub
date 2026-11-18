@@ -673,7 +673,16 @@ async def test_decide_hands_off_when_masking_model_text_failed(
 
 
 @pytest.mark.parametrize(
-    ("value", "expected"), [(0.8, 0.8), (1, 1.0), (True, decide.NEVER), ("x", decide.NEVER)]
+    ("value", "expected"),
+    [
+        (0.8, 0.8),
+        (1, 1.0),
+        (True, decide.NEVER),
+        ("x", decide.NEVER),
+        (0, decide.NEVER),
+        (-0.5, decide.NEVER),
+        (1.5, decide.NEVER),
+    ],
 )
 def test_a_broken_threshold_setting_never_allows_an_auto_reply(
     value: object, expected: float

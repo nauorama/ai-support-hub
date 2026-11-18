@@ -11,10 +11,11 @@ The graph node (`run`, P6-01) reads the trigger message and the ticket's earlier
 `messages` and writes `intake.done` (entity the run: injection score, pattern group names and
 placeholder counts, never text).
 
-Language (P6-02): the English heuristic of the output checks (`looks_english`, no dependency)
-gives `en` or None; None counts as not English and hands the ticket off (reason `language`,
-owner decision). `tickets.language` gets the same value. `pan_found`: G1 masked a card number in
-the message (row 1, `pan_in_message_with_fraud_words`).
+Language (P6-02): the English heuristic of the output checks (`looks_english`, no dependency),
+stricter for short messages (`language`), gives `en` or None; None counts as not English and
+hands the ticket off (reason `language`, owner decision). `tickets.language` gets the same
+value. `pan_found`: G1 masked a card number in the message (row 1,
+`pan_in_message_with_fraud_words`).
 
 Not built yet: the customer profile (`core_get_customer`, phase 7), memory items and other open
 tickets (P6-05).
@@ -33,7 +34,12 @@ from hub.graph.context import GraphContext, ids
 from hub.graph.state import InputFlags, TicketState
 from hub.graph.store import ticket
 from hub.guardrails.injection import InjectionResult, score_injection
-from hub.guardrails.output_checks import looks_english
+from hub.guardrails.output_checks import (
+    MIN_WORDS_FOR_LANGUAGE,
+    has_other_language_words,
+    looks_english,
+    words,
+)
 from hub.guardrails.placeholders import replace_pii, restore_pii
 
 HISTORY_TURNS = 10  # ai-pipeline §2: the last 10 turns of the ticket
@@ -43,8 +49,16 @@ _MASKED_CARD = re.compile(r"\[CARD \*{4}")
 
 
 def language(message_masked: str) -> str | None:
-    """`en` when the message looks English, None when it does not (unknown)."""
-    return ENGLISH if looks_english(message_masked) else None
+    """`en` when the message looks English, None when it does not (unknown). Stricter than the
+    verify step's `looks_english` for short messages (under `MIN_WORDS_FOR_LANGUAGE` words, which
+    `looks_english` passes): one function word of another language makes them unknown, so
+    "Hola, mi tarjeta no funciona" is handed off (owner decision, PR #36 review)."""
+    if not looks_english(message_masked):
+        return None
+    short = len(words(message_masked)) < MIN_WORDS_FOR_LANGUAGE
+    if short and has_other_language_words(message_masked):
+        return None
+    return ENGLISH
 
 
 def pan_found(message: Message) -> bool:

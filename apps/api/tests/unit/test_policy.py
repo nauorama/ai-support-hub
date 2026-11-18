@@ -11,8 +11,8 @@ import yaml
 
 from hub.domain.enums import RouteReason
 from hub.domain.triage import TriageResult
+from hub.graph.nodes.intake import language
 from hub.guardrails import policy as pol
-from hub.guardrails.output_checks import looks_english
 from hub.guardrails.policy import (
     GateInput,
     Policy,
@@ -169,6 +169,26 @@ def test_a_high_injection_score_alone_hands_off() -> None:
 # --- row 1: the order ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("intent", ["account_restricted", "card_lost_stolen", "other"])
+def test_a_handoff_intent_as_the_secondary_intent_hands_off_too(intent: str) -> None:
+    """Owner decision (PR #36 review): the safe side, both intents count."""
+    triage = _triage(intent="fees_fx", secondary_intent=intent)
+    matches = hard_rules(POLICY, _gate(triage=triage))
+    assert matches == [RuleMatch(intent, RouteReason.POLICY_INTENT)]
+
+
+def test_a_lost_card_as_the_secondary_intent_still_gets_the_freeze_step() -> None:
+    triage = _triage(intent="fees_fx", secondary_intent="card_lost_stolen")
+    matches = hard_rules(POLICY, _gate(triage=triage))
+    assert safe_first_steps(POLICY, matches) == [FREEZE]
+    assert is_urgent(POLICY, matches, triage.urgency, triage.intent)
+
+
+def test_both_intents_matching_give_one_reason() -> None:
+    triage = _triage(intent="other", secondary_intent="card_lost_stolen")
+    assert _reasons(_gate(triage=triage)) == ["policy_intent"]
+
+
 def test_the_policy_topic_comes_before_a_restricted_account() -> None:
     """P4-02 review, owner decision: T-0014 (account blocked, restricted customer) is labelled
     `policy_intent`, not `restricted_account`."""
@@ -229,7 +249,7 @@ def test_only_the_dev_ticket_labelled_language_is_not_english() -> None:
         json.loads(line) for line in (ROOT / "data/eval/tickets.dev.jsonl").read_text().splitlines()
     ]
     assert len(rows) == 20
-    not_english = [row["id"] for row in rows if not looks_english(row["message"])]
+    not_english = [row["id"] for row in rows if language(row["message"]) is None]
     labelled = [row["id"] for row in rows if row["expected_reason"] == "language"]
     assert not_english == labelled == ["T-0004"]
 

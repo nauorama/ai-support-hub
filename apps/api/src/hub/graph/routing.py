@@ -136,6 +136,8 @@ def decide(policy: Policy, rule: ConfidenceRule, given: DecideInput) -> Decision
         return _one("approval", RouteReason.POLICY_REVIEW, found, score)
     if not given.auto_reply_enabled or triage.intent not in given.allowed_intents:
         return _one("approval", RouteReason.AUTO_REPLY_OFF, found, score)
-    if score < given.confidence_threshold:
+    # A confidence of 0 (null groundedness, or a top score at or below the floor) is never
+    # auto-replied, whatever the threshold says.
+    if score <= 0 or score < given.confidence_threshold:
         return _one("approval", RouteReason.LOW_CONFIDENCE, found, score)
     return Decision("auto_reply", [], score, found)
