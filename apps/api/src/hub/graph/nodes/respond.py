@@ -6,9 +6,12 @@ answer is saved as an `assistant` message (AI-generated, no reviewer), the ticke
 The message reaches the stream after the commit (`message` event with its id). When an operator
 claimed the ticket while the run worked, the draft is stored as `superseded` and nothing is sent.
 
+After a pause (P6-03): the operator's decision (`review`) was written by the console before the
+run was resumed (the message, the draft, the ticket, the audit records; owner decision), so the
+run only takes the decision's message as its final message.
+
 Every run: the run row gets its outcome (status, route, reasons, confidence, features, models,
-totals from `llm_calls`): `failed` when a node failed, `completed` otherwise. The message after
-the operator's decision comes with P6-03.
+totals from `llm_calls`): `failed` when a node failed, `completed` otherwise.
 """
 
 import uuid
@@ -25,11 +28,10 @@ from hub.domain.enums import (
     RunStatus,
     TicketStatus,
 )
-from hub.graph.context import GraphContext, error_class, ids
-from hub.graph.nodes.handoff_prep import reasons
-from hub.graph.nodes.human_review import store_draft
+from hub.graph.context import GraphContext, ids
+from hub.graph.nodes.human_review import record_outcome, store_draft
 from hub.graph.state import TicketState
-from hub.graph.store import audit_route, finish_run, ticket, to_decimal
+from hub.graph.store import audit_route, ticket, to_decimal
 
 
 async def auto_reply(state: TicketState, ctx: GraphContext) -> TicketState:
@@ -90,22 +92,14 @@ async def auto_reply(state: TicketState, ctx: GraphContext) -> TicketState:
 
 
 async def run(state: TicketState, ctx: GraphContext) -> TicketState:
-    _, run_id = ids(state)
     errors = state.get("errors", [])
     route = state.get("route") or "handoff"
     update = TicketState()
+    review = state.get("review")
     if route == "auto_reply" and not errors and state.get("draft") is not None:
         update = await auto_reply(state, ctx)
+    elif review is not None:
+        update = TicketState(final_message_id=review.message_id)
     async with ctx.pipeline.database.sessions.begin() as session:
-        await finish_run(
-            session,
-            run_id,
-            status=RunStatus.FAILED if errors else RunStatus.COMPLETED,
-            route=Route(route),
-            reasons=reasons(state) if route == "handoff" else list(state.get("route_reasons", [])),
-            models=dict(state.get("models", {})),
-            error=error_class(errors),
-            confidence=state.get("confidence"),
-            features=state.get("features"),
-        )
+        await record_outcome(session, state, RunStatus.FAILED if errors else RunStatus.COMPLETED)
     return update

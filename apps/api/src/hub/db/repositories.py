@@ -17,6 +17,7 @@ from typing import Any, Literal
 from sqlalchemy import ColumnElement, case, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm.exc import StaleDataError
 
 from hub.db.models import (
@@ -311,6 +312,8 @@ class MessageRepository:
         idempotency_key: str | None = None,
     ) -> Message:
         await self.lock_ticket(ticket_id)
+        if role == MessageRole.CUSTOMER:
+            await self._touch_ticket(ticket_id)
         message = Message(
             ticket_id=ticket_id,
             role=role,
@@ -346,6 +349,22 @@ class MessageRepository:
         await self._session.execute(
             select(Ticket.id).where(Ticket.id == ticket_id).with_for_update()
         )
+
+    async def _touch_ticket(self, ticket_id: uuid.UUID) -> None:
+        """A customer message changes the ticket's `version` (P6-03, from P2-07), also when the
+        status stays the same (a message on a `handed_off` or `pending_approval` ticket): an
+        operator's approve, edit, reject or reply loaded before it then answers
+        `409 stale_draft` (api.md §3, "the customer wrote again"). Under the row lock taken
+        just before, in the message's transaction. `flag_modified` makes the unit of work write
+        the row although no value changed; the version column moves on with that UPDATE."""
+        ticket = await self._session.get(Ticket, ticket_id)
+        if ticket is None:  # pragma: no cover - the message's ticket exists (foreign key)
+            return
+        flag_modified(ticket, "route_reasons")
+        try:
+            await self._session.flush()
+        except StaleDataError as exc:
+            raise ConcurrentUpdateError(f"ticket {ticket_id} was changed by someone else") from exc
 
     async def get_by_idempotency_key(self, key: str) -> Message | None:
         result = await self._session.execute(select(Message).where(Message.idempotency_key == key))

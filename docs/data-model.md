@@ -68,7 +68,7 @@ Mirror of the demo customers from the core mock. Only what the Hub needs.
 | ai_disclosed_at | timestamptz | when the AI notice was shown |
 | first_response_at, resolved_at | timestamptz null | |
 | resolution | text null | `ai` \| `ai_approved` \| `ai_edited` \| `human` |
-| version | int | optimistic lock, incremented on every change |
+| version | int | optimistic lock, incremented on every change and on every customer message (also when the status stays the same, P6-03), so an operator's decision loaded before the message is stale |
 
 Indexes: `(status, urgency, created_at)`, `(customer_id, created_at)`, `(assigned_operator_id, status)`.
 
@@ -123,7 +123,7 @@ One execution of the workflow for one customer message.
 | id | uuid PK | |
 | ticket_id | uuid FK | |
 | trigger_message_id | uuid FK null | `ON DELETE SET NULL`: erasure deletes messages but keeps runs |
-| status | text | `running` \| `interrupted` \| `completed` \| `failed` |
+| status | text | `running` \| `interrupted` \| `completed` \| `failed`. `interrupted`: paused in `human_review` for the operator (P6-03), with the outcome so far (route, reasons, confidence, models, totals) and no `finished_at`; the operator's decision resumes it to `completed` (or `failed`) |
 | route | text null | |
 | route_reasons | jsonb | |
 | confidence | numeric(4,3) null | |

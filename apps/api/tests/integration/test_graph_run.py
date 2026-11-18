@@ -294,14 +294,15 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     assert 0 < confidence < 1
     assert features["top_score"] > 0
     assert features["n_citations"] >= 1
-    assert (run_status, run_route, graph) == ("completed", "approval", GRAPH_VERSION)
+    # P6-03: the run waits for the operator with its outcome so far, not finished.
+    assert (run_status, run_route, graph) == ("interrupted", "approval", GRAPH_VERSION)
     assert versions == {"triage": "v1", "write": "v2", "verify": "v1"}
     assert models == {
         "triage": "anthropic/claude-haiku-5-5",
         "write": "anthropic/claude-haiku-5-5",
         "verify": "anthropic/claude-haiku-5-5",
     }
-    assert finished is not None
+    assert finished is None
 
     calls = run_sql(
         run_db,
@@ -1011,7 +1012,8 @@ async def test_the_run_checkpoints_its_state_in_postgres_under_the_ticket(
     finally:
         await store.close()
     state = snapshot.values
-    assert snapshot.next == ()  # the run ended (no pause before P6-03)
+    assert snapshot.next == ("human_review",)  # paused for the operator (P6-03)
+    assert len(snapshot.interrupts) == 1
     assert (state["run_id"], state["route"]) == (str(outcome.run_id), "approval")
     assert state["draft"] is not None
     assert state["draft"].can_answer
@@ -1069,7 +1071,7 @@ def _new_run(urls: Urls, ticket_id: uuid.UUID, message_id: uuid.UUID) -> uuid.UU
     run_sql(
         urls,
         "INSERT INTO runs (id, ticket_id, trigger_message_id, status, graph_version)"
-        " VALUES (%s, %s, %s, 'running', 'graph-v1')",
+        " VALUES (%s, %s, %s, 'running', 'graph-v2')",
         run_id,
         ticket_id,
         message_id,
@@ -1141,7 +1143,7 @@ async def test_handoff_prep_alone_hands_the_ticket_to_a_human(run_db: Urls, qdra
         run_db, "SELECT status, last_route, route_reasons FROM tickets WHERE id = %s", ticket_id
     ) == ("handed_off", "handoff", ["budget_exceeded"])
     details = _one(run_db, "SELECT details FROM audit_log WHERE action = 'route.decided'")[0]
-    assert (details["route"], details["graph_version"]) == ("handoff", "graph-v1")
+    assert (details["route"], details["graph_version"]) == ("handoff", GRAPH_VERSION)
 
 
 @pytest.mark.parametrize(
@@ -1187,16 +1189,23 @@ async def test_human_review_alone_stores_the_draft_for_the_operator(
         )
     )
     try:
-        update = await human_review_node.run(state, ctx)
-        no_draft = state.copy()
-        no_draft["draft"] = None
-        skipped = await human_review_node.run(no_draft, ctx)
+        update = await human_review_node.prepare(state, ctx)
+        # Safe to run again (ADR-0008: a recovered run may repeat it): one draft, one route.
+        again = await human_review_node.prepare(state, ctx)
     finally:
         await database.dispose()
-    assert update == {"ticket_status": "pending_approval" if status == "processing" else status}
-    assert skipped == {}
+    expected = TicketStatus.PENDING_APPROVAL if status == "processing" else TicketStatus(status)
+    assert update == again == (expected, True)
     assert _one(run_db, "SELECT status FROM drafts WHERE ticket_id = %s", ticket_id) == (
         draft_status,
+    )
+    [(routes,)] = run_sql(run_db, "SELECT count(*) FROM audit_log WHERE action = 'route.decided'")
+    assert routes == (1 if status == "processing" else 0)
+    # P6-03: the run waits for the operator, with its outcome so far.
+    assert _one(run_db, "SELECT status, route, finished_at FROM runs WHERE id = %s", run_id) == (
+        "interrupted",
+        "approval",
+        None,
     )
     verified = _one(run_db, "SELECT details FROM audit_log WHERE action = 'verify.done'")[0]
     assert (verified["llm_check"], verified["error"]) == (False, "StructuredOutputError")
@@ -1226,24 +1235,3 @@ async def test_respond_alone_records_the_runs_outcome(
     assert (status, error) == expected
     assert models == {"write": "w"}
     assert finished is not None
-
-
-async def test_a_failure_after_the_draft_was_stored_keeps_run_and_ticket_in_agreement(
-    run_db: Urls, qdrant: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review round: `respond` fails after `human_review` stored the draft. The ticket waits
-    for approval as it should, and the failed run's route says so too, not `handoff`."""
-    ticket_id, message_id = _ticket_with_message(run_db, SEPA)
-
-    async def broken(*_args: object, **_kwargs: object) -> None:
-        raise ConnectionError
-
-    monkeypatch.setattr(respond_node, "finish_run", broken)
-    outcome, emitted = await _run(run_db, qdrant, ticket_id, message_id)
-
-    assert (outcome.failed, outcome.ticket_status) == (True, TicketStatus.PENDING_APPROVAL)
-    assert emitted[-1] == ("ticket.status", {"status": "pending_approval"})
-    assert _one(
-        run_db, "SELECT status, route, route_reasons, error FROM runs WHERE id = %s", outcome.run_id
-    ) == ("failed", "approval", ["unsupported_claims"], "ConnectionError")
-    assert _one(run_db, "SELECT status FROM drafts WHERE ticket_id = %s", ticket_id) == ("pending",)

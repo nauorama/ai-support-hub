@@ -23,6 +23,7 @@ from typing import Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict
 
 from hub.domain.draft import Citation, DraftAnswer, ProposedAction
+from hub.domain.review import ReviewDecision
 from hub.domain.triage import TriageResult
 from hub.domain.verification import ClaimCheck, Verification
 from hub.guardrails.injection import InjectionResult
@@ -82,7 +83,7 @@ class TicketState(TypedDict, total=False):
     # The rule version of confidence and its inputs (`decide`, P6-02); None before `decide`.
     confidence: float | None
     features: dict[str, float]
-    review: dict[str, Any] | None  # ReviewDecision, set on resume (P6-03)
+    review: ReviewDecision | None  # set on resume (P6-03)
     final_message_id: str | None
     # `<node>:<error class>` for every node that failed; any entry hands the ticket off.
     errors: list[str]
@@ -105,6 +106,7 @@ STATE_TYPES: tuple[type[Any], ...] = (
     ProposedAction,
     Verification,
     ClaimCheck,
+    ReviewDecision,
 )
 
 

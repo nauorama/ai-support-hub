@@ -236,7 +236,7 @@ Module rules (enforced by import-linter in CI):
 | Structured output does not match the schema | One repair retry with the validation error, then handoff. |
 | Qdrant or MCP server not reachable | Research continues without that source; route cannot be auto-reply; reason `degraded`. |
 | Daily budget reached | New runs skip all model calls and hand off with reason `budget_exceeded`. |
-| Client disconnects during a run | State is checkpointed after every node. A ticket in `processing` for more than 90 s is resumed on the next read of the ticket or by `POST /admin/runs/recover`. |
+| Client disconnects during a run | The run is a task of its own and goes on. State is checkpointed after every node. A run stuck in `running` (its process stopped) is resumed on the next read of the ticket or by `POST /admin/runs/recover`, once it started longer ago than any run can take (the sum of the node timeouts plus 60 s, about 10 minutes; owner decision P6-03, was 90 s: a slow run on the other instance must not run twice). |
 | Operator approves a stale draft (customer wrote again) | The API returns 409; the console reloads the ticket. |
 | Duplicate request (retry from the browser) | `Idempotency-Key` header on message and action endpoints. |
 

@@ -6,11 +6,16 @@ Every route declares its role with `RequireRole` (a test walks all `/console` an
 routes); state-changing routes also need the CSRF token, which `RequireRole` checks. Every
 action writes an audit record in the same transaction as the change.
 
-A ticket in `processing` has no run in phase 2 (the workflow comes in phase 6), so it reaches
-the operators through the queue: claiming it hands it off first (`processing → handed_off`,
-reason `operator_takeover`, ai-pipeline §6), and then the operator owns it like any handoff.
-There is no direct operator reply on a `processing` ticket: from phase 6 that would let an
-operator and the AI answer the same ticket.
+A ticket in `processing` reaches the operators through the queue while its run works (or when
+no run started): claiming it hands it off first (`processing → handed_off`, reason
+`operator_takeover`, ai-pipeline §6), and then the operator owns it like any handoff. There is
+no direct operator reply on a `processing` ticket: that would let an operator and the AI answer
+the same ticket.
+
+Paused runs (P6-03, ai-pipeline §1): the first reply on a `handed_off` ticket resumes the
+ticket's paused run (`kind = reply`), a close resumes it with `kind = close`; both after the
+commit (`hub.api.resume`). Later replies are plain messages. Reading a ticket in `processing`
+starts the recovery of a stuck run.
 """
 
 import base64
@@ -35,9 +40,10 @@ from hub.api.console_schemas import (
     RunOut,
     TicketVersionIn,
 )
-from hub.api.dependencies import RequireRole, SessionDep
+from hub.api.dependencies import ContainerDep, RequireRole, SessionDep
 from hub.api.errors import ProblemError
 from hub.api.message_helpers import audit_masking, author_label, masked_entities
+from hub.api.resume import latest_paused_run, recover_on_read, resume_after_commit
 from hub.api.schemas import Page
 from hub.audit import record
 from hub.auth.roles import OPERATOR, TICKET_READER, can_override_claim
@@ -63,6 +69,7 @@ from hub.domain.enums import (
     TicketStatus,
     Urgency,
 )
+from hub.domain.review import ReviewDecision
 from hub.guardrails.masking import mask
 
 router = APIRouter(prefix="/api/v1/console", tags=["console"])
@@ -258,12 +265,13 @@ async def list_tickets(
 
 @router.get("/tickets/{ticket_id}")
 async def get_ticket(
-    ticket_id: uuid.UUID, _operator: Reader, session: SessionDep
+    ticket_id: uuid.UUID, _operator: Reader, session: SessionDep, container: ContainerDep
 ) -> ConsoleTicketOut:
     row = await QueueRepository(session).get(ticket_id)
     if row is None:
         raise ProblemError(404, "not_found", "Ticket not found.")
     ticket = row.ticket
+    await recover_on_read(container, session, ticket)
     messages = await MessageRepository(session).list_for_ticket(ticket.id)
     run = await RunRepository(session).latest_for_ticket(ticket.id)
     draft = None if run is None else await DraftRepository(session).for_run(run.id)
@@ -354,10 +362,11 @@ async def reply(
     idempotency_key: IdempotencyKey,
     operator: Writer,
     session: SessionDep,
+    container: ContainerDep,
 ) -> ConsoleMessageOut:
     """Free reply on a handed-off or answered ticket. The text is masked (G1) like a customer
-    message; the customer reads it through `GET /tickets/{id}/messages`. In phase 2 there is no
-    paused run to resume (ai-pipeline §1; phase 6) and no actions (phase 7)."""
+    message; the customer reads it through `GET /tickets/{id}/messages`. The first reply on a
+    handed-off ticket resumes its paused run (module docstring); actions come in phase 7."""
     ticket = await _ticket_or_404(session, ticket_id)
     masked = mask(body.body)
     # Scoped to the operator: another operator's key never returns this message.
@@ -383,7 +392,10 @@ async def reply(
     _check_not_claimed_by_other(ticket, operator)
 
     ticket_key = ticket.id
+    run_id = None
     try:
+        if ticket.status == TicketStatus.HANDED_OFF:
+            run_id = await latest_paused_run(session, ticket.id)
         message = await messages.add(
             ticket_id=ticket.id,
             role=MessageRole.OPERATOR,
@@ -402,6 +414,12 @@ async def reply(
             await _save(session, ticket)
         await _audit(session, operator, "message.sent", ticket.id, {"message_id": message.id})
         await audit_masking(session, masked, entity_type="message", entity_id=message.id)
+        decision = ReviewDecision(
+            kind="reply",
+            operator_id=str(operator.id),
+            body=masked.text,
+            message_id=str(message.id),
+        )
         await session.commit()
     except IntegrityError:
         # A concurrent request with the same key saved first.
@@ -410,6 +428,7 @@ async def reply(
         if stored is None:
             raise
         return await _replay(session, stored, ticket_id=ticket_key, masked_body=masked.text)
+    await resume_after_commit(container, ticket_key, run_id, decision)
     return await _message_out(session, message)
 
 
@@ -428,10 +447,15 @@ async def _replay(
 
 @router.post("/tickets/{ticket_id}/close")
 async def close_ticket(
-    ticket_id: uuid.UUID, body: TicketVersionIn, operator: Writer, session: SessionDep
+    ticket_id: uuid.UUID,
+    body: TicketVersionIn,
+    operator: Writer,
+    session: SessionDep,
+    container: ContainerDep,
 ) -> QueueTicketOut:
-    """Close an answered or handed-off ticket (state diagram). The memory summary on close comes
-    with memory (phase 6)."""
+    """Close an answered or handed-off ticket (state diagram). A run still paused (a handoff
+    closed without an answer) is resumed with `kind = close` and ends without a message. The
+    memory summary on close comes with memory (P6-05)."""
     ticket = await _ticket_or_404(session, ticket_id)
     _check_version(ticket, body.ticket_version)
     _check_not_closed(ticket)
@@ -439,9 +463,12 @@ async def close_ticket(
         raise ProblemError(409, "conflict", f"A ticket in {ticket.status} cannot be closed.")
     _check_not_claimed_by_other(ticket, operator)
     previous = ticket.status
+    run_id = await latest_paused_run(session, ticket.id)
     if ticket.resolved_at is None:
         ticket.resolved_at = datetime.now(UTC)
     await _change_status(session, ticket, TicketStatus.CLOSED)
     await _audit(session, operator, "ticket.closed", ticket.id, {"from_status": previous.value})
     await session.commit()
-    return await _row(session, ticket.id)
+    decision = ReviewDecision(kind="close", operator_id=str(operator.id))
+    await resume_after_commit(container, ticket_id, run_id, decision)
+    return await _row(session, ticket_id)
