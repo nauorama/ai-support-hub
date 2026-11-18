@@ -10,8 +10,14 @@ import sys
 
 from hub.config import Settings, SettingsError, load_settings
 
-# Needed by `make seed` (operator passwords) and by the demo chat (customer session, P2-06).
-REQUIRED_FOR_DEV = ("SEED_OPERATOR_PASSWORD", "SESSION_SECRET", "DEMO_ACCESS_CODE")
+# Needed by `make seed` (operator passwords), by the demo chat (customer session, P2-06) and by
+# the compose `mcp` service, whose HTTP transport refuses to start without a token (P7-01).
+REQUIRED_FOR_DEV = (
+    "SEED_OPERATOR_PASSWORD",
+    "SESSION_SECRET",
+    "DEMO_ACCESS_CODE",
+    "MCP_SERVER_TOKEN",
+)
 
 
 def missing_settings(settings: Settings) -> list[str]:

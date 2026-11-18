@@ -147,7 +147,7 @@ def _make_list(variable: str) -> set[str]:
 def test_document_parsing_finds_something() -> None:
     # Protects the other tests from passing on an empty set after a document edit.
     assert {"setup", "eval-attacks", "rollback"} <= _documented_commands()
-    assert {"APP_ENV", "SLACK_CHANNEL_ID", "LANGFUSE_HOST"} <= _documented_variables()
+    assert {"APP_ENV", "SLACK_MODE", "LANGFUSE_HOST"} <= _documented_variables()
 
 
 def test_every_documented_command_is_built_or_a_stub() -> None:

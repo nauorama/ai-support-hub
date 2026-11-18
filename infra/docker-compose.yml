@@ -1,6 +1,5 @@
 # Local stack (docs/operations.md §1). `make up` starts it, `make down` stops it.
-# Services that come later: `mcp` (support-tools server, phase 7; until then `/ready` reports
-# mcp as not ready and answers 503) and `web` (Vite dev server, phase 10).
+# Service that comes later: `web` (Vite dev server, phase 10).
 #
 # hub:hub and hub_api:hub_api are local defaults only, never real credentials. Every port binds to 127.0.0.1, so
 # nothing is reachable from the network. The image tags are also used by the testcontainers
@@ -88,14 +87,50 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      mcp:
+        condition: service_healthy
     healthcheck:
-      # /health, not /ready: /ready is 503 until the MCP server exists (phase 7).
+      # /health, not /ready: the api is healthy even while a dependency is down; /ready reports
+      # the dependencies (postgres, qdrant, mcp).
       test:
         - CMD
         - python
         - -c
         - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
       start_period: 60s
+      start_interval: 2s
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  # Support-tools MCP server (P7-01): core mock over data/seed, Jira and Slack mocks. Streamable
+  # HTTP at /mcp behind MCP_SERVER_TOKEN, which `make dev` requires in .env.
+  mcp:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.mcp
+    # The server reads only MCP_SERVER_TOKEN and CORE_ANCHOR_DATE from it (support_tools.server).
+    env_file:
+      - path: ../.env
+        required: false
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ../apps/mcp_server/src:/app/apps/mcp_server/src:ro
+      - ../data/seed:/app/data/seed:ro
+    healthcheck:
+      # A plain GET without a token is answered 401 once the server listens; that is enough.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.error, urllib.request
+          try:
+              urllib.request.urlopen('http://127.0.0.1:8001/mcp', timeout=2)
+          except urllib.error.HTTPError as e:
+              raise SystemExit(e.code != 401)
+      start_period: 30s
       start_interval: 2s
       interval: 30s
       timeout: 3s

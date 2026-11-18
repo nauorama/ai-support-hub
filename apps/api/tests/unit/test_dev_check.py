@@ -9,6 +9,7 @@ ALL_SET = {
     "seed_operator_password": "pw-for-tests",
     "session_secret": "secret-for-tests",
     "demo_access_code": "code-for-tests",
+    "mcp_server_token": "token-for-tests",
 }
 
 
@@ -25,6 +26,7 @@ def test_all_missing_names_are_listed_in_order() -> None:
         "SEED_OPERATOR_PASSWORD",
         "SESSION_SECRET",
         "DEMO_ACCESS_CODE",
+        "MCP_SERVER_TOKEN",
     ]
 
 
@@ -35,7 +37,7 @@ def test_main_lists_every_missing_name_and_fails(
     monkeypatch.setattr(dev_check, "load_settings", lambda: _settings(**only_password))
     assert dev_check.main() == 1
     err = capsys.readouterr().err
-    assert "SESSION_SECRET, DEMO_ACCESS_CODE" in err
+    assert "SESSION_SECRET, DEMO_ACCESS_CODE, MCP_SERVER_TOKEN" in err
     assert "SEED_OPERATOR_PASSWORD" not in err
     assert ".env" in err
     assert "Nothing was started or written." in err

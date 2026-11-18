@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+# Dev image for the `mcp` service of infra/docker-compose.yml (support-tools MCP server, P7-01).
+# Dependencies are baked in; compose mounts the source and the seed data. The production image is
+# written in phase 10 (docs/operations.md §6).
+FROM python:3.13.18-slim-trixie
+
+# Keep equal to UV_VERSION in .github/workflows/ci.yml.
+COPY --from=ghcr.io/astral-sh/uv:0.11.8 /uv /usr/local/bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH
+
+WORKDIR /app
+
+# `uv sync --locked` needs every workspace member's pyproject to check the lock file.
+COPY uv.lock pyproject.toml ./
+COPY apps/api/pyproject.toml apps/api/pyproject.toml
+COPY apps/mcp_server/pyproject.toml apps/mcp_server/pyproject.toml
+COPY evals/pyproject.toml evals/pyproject.toml
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --package support-tools --no-install-workspace
+
+COPY apps/mcp_server/src apps/mcp_server/src
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --package support-tools
+
+RUN useradd --system --uid 10001 --no-create-home tools
+USER tools
+
+EXPOSE 8001
+# The mock store lives in /tmp: the image's only writable place for the non-root user. It is
+# lost when the container is removed, which is fine for mocks.
+ENV MCP_MOCK_DB=/tmp/mcp-mock.sqlite
+CMD ["python", "-m", "support_tools", "--transport", "http", "--host", "0.0.0.0", "--port", "8001"]

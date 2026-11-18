@@ -8,7 +8,7 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm llm-requests eval models
+	record-llm llm-requests eval models mcp
 NOT_IMPLEMENTED := test-e2e \
 	eval-smoke eval-attacks eval-report web-types retention \
 	leak-scan export-review-candidates rollback
@@ -98,7 +98,11 @@ kb-load:
 dev:
 	uv run python -m hub.dev_check
 	$(MAKE) --no-print-directory models up migrate seed kb-load
-	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health; /ready is 503 until the MCP server, P7)"
+	@echo "dev: stack is up. API http://127.0.0.1:8000 (/health, /ready); MCP server http://127.0.0.1:8001/mcp"
+
+# The support-tools MCP server over stdio, the way Claude Code starts it (README, P7-01).
+mcp:
+	uv run python -m support_tools --transport stdio
 
 # Integration tests start their own Postgres and Qdrant with testcontainers (needs Docker).
 test-int:

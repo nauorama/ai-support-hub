@@ -79,6 +79,26 @@ Run `2026-11-17-rag_hybrid-4fc85cb`: the linear pipeline with one hybrid knowled
 
 Gate 5 is not met. The error analysis sorts every failure by cause. The prompts were not tuned to these numbers; changes are decided by the owner. Every ticket still goes to operator approval, and auto-reply stays off.
 
+## Connect to Claude Code
+
+The support-tools MCP server (`apps/mcp_server`, [API](docs/api.md) §7) works from any MCP client. It serves mock data only: the 40 fictional customers of `data/seed`, and Jira and Slack mocks that store calls in a local SQLite file.
+
+**Over stdio** (Claude Code starts the server itself; run from the repository root after `make setup`):
+
+```
+claude mcp add --env CORE_ANCHOR_DATE=2026-11-12 --transport stdio support-tools -- uv run --directory "$PWD" python -m support_tools --transport stdio
+```
+
+Leave out `--env CORE_ANCHOR_DATE=…` to use today's date. Keep `--transport stdio` between `--env` and the name.
+
+**Over HTTP** (the server of `make dev`, port 8001, with the token from `.env`):
+
+```
+claude mcp add --transport http support-tools http://127.0.0.1:8001/mcp --header "Authorization: Bearer $MCP_SERVER_TOKEN"
+```
+
+Check with `claude mcp list`, or `/mcp` inside a session, then ask for example "Use core_get_transaction for CUS-0001, TX-000900". Without `--scope` the server is added for this project on your machine only (`local`). The MCP Inspector works the same way: `npx @modelcontextprotocol/inspector@2.13.0 uv run python -m support_tools`.
+
 ## How this project is built
 
 The design package was written first. A coding agent builds the system phase by phase from [the build plan](docs/build-plan.md); the owner reviews each phase, checks the attack set and makes the risk decisions (whether auto-reply goes on in the demo). Each phase ends with a walkthrough for the owner, written locally to `docs/walkthrough/`. Walkthroughs are personal notes: the folder is git-ignored and they are not in this repository.
