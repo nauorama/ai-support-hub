@@ -1,0 +1,6 @@
+{
+  "version": "rule-v1",
+  "kind": "rule",
+  "top_score_floor": 0.0,
+  "note": "Rule version of confidence (ai-pipeline §6, ADR-0018): confidence = groundedness when the top retrieval score is above top_score_floor, else 0; null groundedness gives 0. The floor 0.0 is a placeholder (owner decision, P6-02): set a real value before H7 (P6-06)."
+}

@@ -60,7 +60,7 @@ Mirror of the demo customers from the core mock. Only what the Hub needs.
 | secondary_intent | text null | |
 | urgency | text null | `low` \| `normal` \| `high` |
 | language | text null | ISO 639-1 |
-| summary | text null | written by triage, shown to the operator; placeholders restored, then card data masked (G1) |
+| summary | text null | written by triage, replaced by the operator summary of `handoff_summary` on a handoff (P6-02); placeholders restored, then card data masked (G1); for operators only, never sent to the customer |
 | last_route | text null | `auto_reply` \| `approval` \| `handoff` |
 | route_reasons | jsonb | list of reason codes, see [ai-pipeline](ai-pipeline.md) §6 |
 | confidence | numeric(4,3) null | |
@@ -92,7 +92,7 @@ stateDiagram-v2
 
 Ownership rule: after the first handoff or approval in a ticket, a human owns the ticket. New customer messages do not start a new AI run; they appear in the operator queue.
 
-`processing → answered` is the AI's auto-reply only; an operator never takes it. From P3-05 a new ticket gets a run of the workflow (the LangGraph graph from P6-01), which until P6-02 ends in `pending_approval` (or `handed_off` on an error); while it runs, or if no run started, it reaches the operators through the queue, and a claim hands it off first (`processing → handed_off`, reason `operator_takeover`, [ai-pipeline](ai-pipeline.md) §6). Then the operator replies (`handed_off → answered`).
+`processing → answered` is the AI's auto-reply only; an operator never takes it. From P3-05 a new ticket gets a run of the workflow (the LangGraph graph from P6-01), which ends in `pending_approval`, `handed_off` or (auto-reply, P6-02, only when turned on) `answered`; while it runs, or if no run started, it reaches the operators through the queue, and a claim hands it off first (`processing → handed_off`, reason `operator_takeover`, [ai-pipeline](ai-pipeline.md) §6). Then the operator replies (`handed_off → answered`).
 
 The status changes only through `TicketRepository.change_status`, which checks this diagram. A status set any other way is refused when the session flushes, and every `INSERT`, `UPDATE` or `DELETE` statement on `tickets` run with `Session.execute` (a bulk statement, which the flush checks never see) is refused too. Many tickets, such as the `close-stale` job, are changed one by one.
 
@@ -153,7 +153,7 @@ One execution of the workflow for one customer message.
 | proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
 | groundedness | numeric(4,3) null | from the verify step (P5-04): supported claims / all claims; null when a code check failed (the LLM check did not run) and in B0 (no verify step) |
 | unsupported_claims | jsonb | from the verify step: `[{"claim", "source_id"}]`, the claims the verifier found unsupported, model-written so card masked (G1); empty when none or when the LLM check did not run |
-| status | text | `pending` \| `approved` \| `edited` \| `rejected` \| `superseded` (the operator answered with a free reply or closed the ticket without using the draft) |
+| status | text | `pending` \| `approved` (also an auto-reply, with no reviewer) \| `edited` \| `rejected` \| `superseded` (the operator answered with a free reply or closed the ticket without using the draft; also a draft of a run that handed the ticket off, kept for the operator, P6-02) |
 | reviewed_by | uuid FK null | |
 | reviewed_at | timestamptz null | |
 | final_body | text null | what was sent; card data masked (G1): an operator's text is masked before it is stored, an approved draft was masked when it was written |

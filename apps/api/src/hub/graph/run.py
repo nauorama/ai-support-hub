@@ -12,9 +12,9 @@ with `context = eval`, the evaluation database and its own cost limit as `budget
 3. The stream ends with `ticket.status` (the status the last node that changed the ticket left
    it in), with `error` before it when a node failed and the ticket was handed off.
 
-Until P6-02 and P6-03 every run that works ends with the ticket in `pending_approval` (route
-`approval`, reason `auto_reply_off`), the draft waiting for an operator; a run where a node failed
-ends `handed_off` (`system_error`, or `budget_exceeded` after a G8 budget stop).
+The route decides how the run ends (ai-pipeline §6, P6-02): `pending_approval` with a draft,
+`handed_off` with a notice (also after a failed node: `system_error`, or `budget_exceeded` after a
+G8 budget stop), or `answered` with an auto-reply when a lead turned it on.
 
 **Last resort.** When the graph itself fails (a node that does not fail into a handoff, the
 checkpointer, the database), the run is `failed` and the ticket goes to a human with

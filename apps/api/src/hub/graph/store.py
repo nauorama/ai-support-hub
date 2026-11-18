@@ -72,6 +72,8 @@ async def finish_run(
     reasons: list[str],
     models: dict[str, str],
     error: str | None = None,
+    confidence: float | None = None,
+    features: dict[str, float] | None = None,
 ) -> None:
     run = await session.get(Run, run_id)
     if run is None:  # pragma: no cover - the row was committed in `start_run`
@@ -82,7 +84,14 @@ async def finish_run(
     run.route_reasons = reasons
     run.models = models
     run.error = error
+    run.confidence = to_decimal(confidence)
+    run.features = dict(features or {})
     run.finished_at = datetime.now(UTC)
+
+
+def to_decimal(value: float | None) -> Decimal | None:
+    """A confidence for a `numeric(4,3)` column."""
+    return None if value is None else Decimal(str(round(value, 3)))
 
 
 async def audit_route(
@@ -92,9 +101,11 @@ async def audit_route(
     run_id: uuid.UUID | None,
     route: Route,
     reasons: list[str],
+    confidence: float | None = None,
+    features: dict[str, float] | None = None,
 ) -> None:
-    """`route.decided` with the reasons and the versions (security §5). No confidence or
-    features yet: they come with the rule version of `decide` (P6-02)."""
+    """`route.decided` with the reasons, the confidence and its features (set by `decide`; none
+    for a route of `policy_gate` or a failure), and the versions (security §5)."""
     await record(
         session,
         actor_type=ActorType.SYSTEM,
@@ -106,6 +117,8 @@ async def audit_route(
             "run_id": run_id,
             "route": route.value,
             "reasons": reasons,
+            "confidence": confidence,
+            "features": dict(features or {}),
             "graph_version": GRAPH_VERSION,
             "prompt_versions": pipeline.prompt_versions,
         },
@@ -118,6 +131,8 @@ async def hand_off(
     ticket_id: uuid.UUID,
     run_id: uuid.UUID | None,
     reasons: list[str],
+    confidence: float | None = None,
+    features: dict[str, float] | None = None,
 ) -> TicketStatus:
     """The ticket goes to a human with `reasons`, unless a human already has it (an operator
     claimed it while the run worked). Returns the ticket's status."""
@@ -126,8 +141,11 @@ async def hand_off(
     if found.status == TicketStatus.PROCESSING:
         found.last_route = Route.HANDOFF
         found.route_reasons = reasons
+        found.confidence = to_decimal(confidence)
         await repository.change_status(found, TicketStatus.HANDED_OFF)
-        await audit_route(session, pipeline, ticket_id, run_id, Route.HANDOFF, reasons)
+        await audit_route(
+            session, pipeline, ticket_id, run_id, Route.HANDOFF, reasons, confidence, features
+        )
     return found.status
 
 

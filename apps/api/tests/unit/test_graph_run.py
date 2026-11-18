@@ -30,7 +30,7 @@ from hub.kb.full_text import KbSource
 from hub.kb.retriever import KbChunk
 from hub.llm.gateway import FIXTURES_DIR
 
-from ._llm import ROOT, real_models
+from ._llm import CONFIDENCE_RULE, POLICY, ROOT, real_models
 from ._run_requests import GENERATED, load_tickets, render, request_specs
 
 SOURCES = b0_evidence(
@@ -209,6 +209,8 @@ def test_a_pipeline_refuses_a_write_prompt_of_the_other_shape(variant: str, vers
             budget=cast(Any, None),
             triage_prompt=prompt,
             write_prompt=prompt,
+            policy=POLICY,
+            confidence_rule=CONFIDENCE_RULE,
             variant=variant,
         )
 
@@ -394,6 +396,8 @@ def _pipeline(variant: str, *, verify: bool) -> Pipeline:
         budget=cast(Any, None),
         triage_prompt=active_prompt(prompts, models, "triage"),
         write_prompt=write_prompt_for(prompts, models, variant),
+        policy=POLICY,
+        confidence_rule=CONFIDENCE_RULE,
         verify_prompt=active_prompt(prompts, models, "verify") if verify else None,
         variant=variant,
     )

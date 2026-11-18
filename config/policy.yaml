@@ -1,0 +1,113 @@
+# Routing policy (docs/ai-pipeline.md §6; ADR-0009 layer 1). Read by hub/guardrails/policy.py at
+# start; a broken file stops the app. Changing a rule here is a policy change: owner decision,
+# test and an eval run (AGENTS.md "When to stop and ask").
+#
+# Customer texts (safe_first_step, handoff_notices, response_time) may only state facts from
+# docs/tallybridge-world.md. They are fixed texts: no model writes or changes them.
+
+# Row 1 of the decision table: checked in `policy_gate`, before research. Every matching rule
+# adds its reason code; the order of the codes is fixed in code (`RouteReason`, row-1 order:
+# policy_intent, fraud_report, injection, complaint, customer_request, action_request,
+# restricted_account, language), and the first one decides (owner decision, P4-02 review).
+always_handoff:
+  intents: [account_restricted, card_lost_stolen, other]
+  flags: [wants_human, reports_unauthorised_activity, is_complaint_or_legal, injection_suspected]
+  actions: [refund, limit_increase, unfreeze]     # the customer asks us to DO it, not how it works
+  # `customer_restricted` needs the customer profile (core_get_customer, P7-04); until then it
+  # never matches.
+  conditions: [language_not_english, customer_restricted, pan_in_message_with_fraud_words, injection_score_high]
+
+# Words that, together with a card number in the message (G1 masked it), report fraud. Matched as
+# whole words or phrases on the G4 folded view (look-alike letters mapped, invisible characters
+# dropped, case-folded). Owner decision, P6-02.
+fraud_words: [fraud, stolen, scam, hacked, unauthorised, unauthorized, "didn't make", "did not make", "not me", "someone used"]
+
+# G4 (security §3): a score at or above this value hands the ticket off (reason `injection`),
+# whether or not triage set `injection_suspected` (owner decision: OR, P3-04).
+injection:
+  high_score: 0.5
+
+# Fixed customer text added to the handoff notice, keyed by an intent, flag or condition that
+# matched, or by a route reason. The steps of every matching rule are added, not only the first
+# one's, without repeats (owner decision, P6-02): `fraud_report` covers the triage flag and a card
+# number with fraud words.
+safe_first_step:
+  card_lost_stolen:
+    - "Please freeze your card in the app now. You can freeze it at any time."
+  fraud_report:
+    - "Please freeze your card in the app now. You can freeze it at any time."
+    - "Tallybridge staff never ask for your full card number, CVV, PIN, password or 2FA code."
+
+# Row 6: the AI may draft, a human must send.
+approval_only:
+  intents: [login_security, dispute_chargeback]
+  actions: [dispute]
+  # `memory_shows_open_case` comes with memory (P6-05); until then it never matches.
+  conditions: [high_urgency, has_proposed_actions, memory_shows_open_case]
+
+# Row 7: the setting `intent_allowlist` may remove intents from this list, never add others
+# (api.md, PUT /admin/settings). `make seed` writes this list as the setting's first value.
+auto_reply_allowlist:
+  intents: [payment_pending, withdrawal_issue, card_declined, kyc_verification, fees_fx, limits, account_management]
+
+# G7 forbidden promises (ai-pipeline §5, check 5): a first-person promise or a done deed. Regular
+# expressions, matched on the G4 folded view (`output_checks.promise_text`). A first filter, not
+# a complete list; a test checks that no external KB chunk matches them. Moved here from
+# guardrails/output_checks.py in P6-02.
+forbidden_promises:
+  refund:
+    - '\b(?:we|i)(?:''ll|''ve|''re| will| have| are| am| can| shall)?(?: now| already)? (?:issue|process|send|give|approve|grant|make|arrange)d? (?:you )?(?:a |the |your )?(?:full |partial )?refund'
+    - '\b(?:we|i)(?:''ll|''ve|''re| will| have| are| am| can| shall)?(?: now| already)?(?: (?:happy|glad|pleased|going) to)? refund(?:ed)? (?:you|your|the|this|it)'
+    - '\byour refund (?:(?:has|have) been|is now|are now|is) (?:approved|confirmed|processed|issued|on its way)'
+    - '\b(?:your|the|a|this) (?:full |partial )?refund (?:will be|is being|has been|have been|was|is now) (?:approved|confirmed|processed|issued|sent|paid|credited|made|on its way)'
+  limit_increase:
+    - '\b(?:we|i)(?:''ll|''ve|''re| will| have| are| am| can| shall)?(?: now| already)? (?:increase|raise|lift|extend)d? your (?:\w+ ){0,2}limits?'
+    - '\byour (?:\w+ ){0,2}limits? (?:(?:has|have) been|is now|are now) (?:increased|raised|lifted|extended)'
+  unfreeze:
+    - '\b(?:we|i)(?:''ll|''ve|''re| will| have| are| am| can| shall)?(?: now| already)? (?:unfreeze|unfroze|unfrozen|unblock|unlock|reactivate|restore)d? your (?:account|card|balance)'
+    - '\b(?:we|i)(?:''ll|''ve|''re| will| have| are| am| can| shall)?(?: now| already)? (?:lift|lifted|remove|removed) (?:the |this |your |any )?(?:restriction|block|freeze|hold)'
+    - '\byour (?:account|card|balance) (?:(?:has|have) been|is now|are now) (?:unfrozen|unblocked|unlocked|reactivated|restored)'
+    - '\b(?:the |this )?restriction (?:(?:has|have) been|is now|are now) (?:lifted|removed)'
+  restriction_reason:
+    - '\byour account (?:is|was|has been) (?:restricted|frozen|blocked|suspended|limited|under review) (?:because|due to|as a result of|since)\b'
+    - '\byour account (?:is|was|has been) (?:restricted|frozen|blocked|suspended|limited|under review) for (?:\w+ ){0,2}(?:reasons?|activity|concerns?|purposes|compliance|fraud|security|verification|checks?)\b'
+    - '\b(?:the )?reason (?:for|of) (?:the |your |this )?(?:restriction|review|block|freeze|suspension) (?:is|was)\b'
+  legal_advice:
+    - '\byou (?:should|could|can|may want to) (?:sue|take legal action|file a lawsuit|go to court)'
+    - '\byou(?: are|''re) legally (?:entitled|required|obliged)'
+    - '\byou (?:do not |don''t )?(?:need to |have to |must |should )(?:pay|declare) (?:any |the )?(?:\w+ )?tax'
+
+# Human support hours and SLA (world file §8), for the expected response time in handoff notices.
+support_hours:
+  timezone: Europe/Bratislava
+  weekdays: "08:00-20:00"
+  saturday: "10:00-16:00"
+  sla: {standard_business_hours: 4, urgent_minutes: 30, urgent_out_of_hours_minutes: 60}
+  # Urgent (world file §8: fraud, lost card, restricted account): triage urgency `high`, or any of
+  # these reasons or intents among the matched rules.
+  urgent_reasons: [fraud_report, restricted_account]
+  urgent_intents: [card_lost_stolen, account_restricted]
+
+# The handoff notice (ai-pipeline §3, FR-11): the opening sentence of the first route reason, then
+# the safe first steps, then the expected response time. Never a restriction reason, an internal
+# process or the operator summary.
+handoff_notices:
+  default: "I have passed your message to a support specialist."
+  policy_intent: "This needs a support specialist, so I have passed your message to our team."
+  fraud_report: "Thank you for telling us. I have passed your report to a support specialist."
+  action_request: "I cannot do this myself, so I have passed your request to a support specialist."
+  customer_request: "I have passed your message to a support specialist, as you asked."
+  complaint: "I have passed your message to a support specialist, who will look into it."
+  language: "I can only answer in English, so I have passed your message to a support specialist."
+  no_kb_answer: "I could not find the answer to your question, so I have passed it to a support specialist."
+  system_error: "I could not prepare an answer, so I have passed your message to a support specialist."
+  budget_exceeded: "I could not prepare an answer, so I have passed your message to a support specialist."
+  masking_failed: "I could not prepare an answer, so I have passed your message to a support specialist."
+
+# The last sentence of the notice. {minutes}, {hours}, {opens} are filled in by code; {opens} is
+# "today at 10:00 CET", "tomorrow at 08:00 CET" or "on Monday at 08:00 CEST": local time of
+# Europe/Bratislava, CET in winter and CEST in summer.
+response_time:
+  urgent: "A support specialist will reply here within {minutes} minutes."
+  standard: "A support specialist will reply here within {hours} business hours."
+  standard_closed: "Our support team is back {opens}. A support specialist will reply here within {hours} business hours after that."

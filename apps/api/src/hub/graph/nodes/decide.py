@@ -1,19 +1,95 @@
-"""decide node (docs/ai-pipeline.md §3, §6): code.
+"""decide node (docs/ai-pipeline.md §3, §6): code, after `verify`.
 
-P6-01 applies two rows of the decision table: a failed node hands the ticket off (row 2:
-`system_error`, or `budget_exceeded` after a G8 budget stop); everything else goes to operator
-approval (row 7: `auto_reply_off`). The other rows, the rule version of confidence and the
-verification routing come with P6-02, so no run is auto-replied yet.
+Rows 2 to 9 of the decision table (`hub.graph.routing.decide`, P6-02), with the rule version of
+confidence and the console settings `auto_reply_enabled`, `confidence_threshold` and
+`intent_allowlist` (read per run, so a change counts at once). A missing or broken setting is
+the safe side: auto-reply off, nothing allowed, a threshold no confidence reaches.
+
+A failed G1 mask of any model-written string of the run (triage summary, draft, missing
+information, proposed actions, unsupported claims) hands the ticket off (`masking_failed`).
 """
 
-from hub.graph.context import GraphContext, failure_reasons
-from hub.graph.state import TicketState
+from collections.abc import Iterable
+from typing import Any
 
-APPROVAL_REASONS = ["auto_reply_off"]
+from hub.db.repositories import SettingsRepository
+from hub.domain.enums import SettingKey
+from hub.graph.context import GraphContext
+from hub.graph.draft import OutputMask
+from hub.graph.nodes.intake import intake_result
+from hub.graph.pipeline import Pipeline
+from hub.graph.routing import DecideInput, decide
+from hub.graph.state import TicketState
+from hub.guardrails.policy import auto_reply_intents
+
+# A threshold no confidence (at most 1) reaches: used when the setting is missing or broken.
+NEVER = 2.0
+
+
+async def read_settings(pipeline: Pipeline) -> dict[SettingKey, Any]:
+    async with pipeline.database.sessions() as session:
+        return await SettingsRepository(session).get_all()
+
+
+def model_texts(state: TicketState) -> Iterable[str]:
+    """Every model-written string of the run that is stored or sent."""
+    triage = state.get("triage")
+    if triage is not None:
+        yield triage.summary
+    draft = state.get("draft")
+    if draft is not None:
+        yield draft.answer
+        if draft.missing_information:
+            yield draft.missing_information
+        for action in draft.proposed_actions:
+            yield action.summary
+            yield action.description
+    verification = state.get("verification")
+    if verification is not None:
+        yield from (claim.claim for claim in verification.unsupported)
+
+
+def mask_failed(state: TicketState) -> bool:
+    clean = OutputMask(intake_result(state))
+    for text in model_texts(state):
+        clean(text)
+    return clean.counts["failed"] > 0
+
+
+def threshold(value: object) -> float:
+    """The `confidence_threshold` setting; anything but a number in (0, 1] never allows an
+    auto-reply (a threshold of 0 would let a confidence of 0 through, PR #36 review)."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 < value <= 1:
+        return NEVER
+    return float(value)
 
 
 async def run(state: TicketState, ctx: GraphContext) -> TicketState:
+    pipeline = ctx.pipeline
     errors = state.get("errors", [])
-    if errors or state.get("draft") is None:
-        return TicketState(route="handoff", route_reasons=failure_reasons(errors))
-    return TicketState(route="approval", route_reasons=list(APPROVAL_REASONS))
+    settings = await read_settings(pipeline) if not errors and state.get("draft") else {}
+    decision = decide(
+        pipeline.policy,
+        pipeline.confidence_rule,
+        DecideInput(
+            errors=errors,
+            triage=state.get("triage"),
+            evidence=state.get("evidence"),
+            draft=state.get("draft"),
+            verification=state.get("verification"),
+            retry_count=state.get("retry_count", 0),
+            verifies=pipeline.verifies,
+            mask_failed=mask_failed(state),
+            auto_reply_enabled=settings.get(SettingKey.AUTO_REPLY_ENABLED) is True,
+            allowed_intents=auto_reply_intents(
+                pipeline.policy, settings.get(SettingKey.INTENT_ALLOWLIST)
+            ),
+            confidence_threshold=threshold(settings.get(SettingKey.CONFIDENCE_THRESHOLD, NEVER)),
+        ),
+    )
+    return TicketState(
+        route=decision.route,
+        route_reasons=decision.reasons,
+        confidence=decision.confidence,
+        features=decision.features,
+    )

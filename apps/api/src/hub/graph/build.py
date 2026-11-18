@@ -107,7 +107,8 @@ NODES = (
     NodeSpec("write", write.run, 150, STEP_WRITING),
     NodeSpec("verify", verify.run, 110, STEP_CHECKING, on_timeout=verify_timed_out),
     NodeSpec("decide", decide.run, 10, skipped_after_error=False),
-    NodeSpec("handoff_prep", handoff_prep.run, 30, catches=False, skipped_after_error=False),
+    # Longer than the operator summary call (`SUMMARY_TIMEOUT_S`), so the notice still goes out.
+    NodeSpec("handoff_prep", handoff_prep.run, 45, catches=False, skipped_after_error=False),
     NodeSpec("human_review", human_review.run, 30, catches=False, skipped_after_error=False),
     NodeSpec("act", act.run, 30, catches=False, skipped_after_error=False),
     NodeSpec("respond", respond.run, 30, catches=False, skipped_after_error=False),

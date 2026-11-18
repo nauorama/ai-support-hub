@@ -11,25 +11,61 @@ The graph node (`run`, P6-01) reads the trigger message and the ticket's earlier
 `messages` and writes `intake.done` (entity the run: injection score, pattern group names and
 placeholder counts, never text).
 
-Not built yet: language detection, the customer profile (`core_get_customer`, phase 7), memory
-items and other open tickets (P6-05).
+Language (P6-02): the English heuristic of the output checks (`looks_english`, no dependency),
+stricter for short messages (`language`), gives `en` or None; None counts as not English and
+hands the ticket off (reason `language`, owner decision). `tickets.language` gets the same
+value. `pan_found`: G1 masked a card number in the message (row 1,
+`pan_in_message_with_fraud_words`).
+
+Not built yet: the customer profile (`core_get_customer`, phase 7), memory items and other open
+tickets (P6-05).
 """
 
+import re
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hub.audit import record
 from hub.db.models import Message
-from hub.db.repositories import MessageRepository
-from hub.domain.enums import ActorType
+from hub.db.repositories import MessageRepository, TicketRepository
+from hub.domain.enums import ActorType, TicketStatus
 from hub.graph.context import GraphContext, ids
 from hub.graph.state import InputFlags, TicketState
+from hub.graph.store import ticket
 from hub.guardrails.injection import InjectionResult, score_injection
+from hub.guardrails.output_checks import (
+    MIN_WORDS_FOR_LANGUAGE,
+    has_other_language_words,
+    looks_english,
+    words,
+)
 from hub.guardrails.placeholders import replace_pii, restore_pii
 
 HISTORY_TURNS = 10  # ai-pipeline §2: the last 10 turns of the ticket
 NO_HISTORY = "(no earlier messages)"
+ENGLISH = "en"
+_MASKED_CARD = re.compile(r"\[CARD \*{4}")
+
+
+def language(message_masked: str) -> str | None:
+    """`en` when the message looks English, None when it does not (unknown). Stricter than the
+    verify step's `looks_english` for short messages (under `MIN_WORDS_FOR_LANGUAGE` words, which
+    `looks_english` passes): one function word of another language makes them unknown, so
+    "Hola, mi tarjeta no funciona" is handed off (owner decision, PR #36 review)."""
+    if not looks_english(message_masked):
+        return None
+    short = len(words(message_masked)) < MIN_WORDS_FOR_LANGUAGE
+    if short and has_other_language_words(message_masked):
+        return None
+    return ENGLISH
+
+
+def pan_found(message: Message) -> bool:
+    """G1 masked a card number in the message: its counts, or the mask in the text (a failed
+    mask has no counts)."""
+    counts = message.masked_entities or {}
+    return counts.get("PAN", 0) > 0 or _MASKED_CARD.search(message.body) is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +144,12 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
         messages = await MessageRepository(session).list_for_ticket(ticket_id)
         trigger = next(message for message in messages if message.id == message_id)
         result = intake(trigger.body, history_turns(messages, message_id))
+        found_language = language(trigger.body)
+        repository = TicketRepository(session)
+        found = await repository.lock(await ticket(session, ticket_id))
+        if found.status == TicketStatus.PROCESSING:
+            found.language = found_language
+            await repository.save(found)
         await record(
             session,
             actor_type=ActorType.AI,
@@ -120,6 +162,8 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                 "injection_score": result.injection.score,
                 "injection_patterns": result.injection.patterns,
                 "pii_placeholders": result.pii_counts,
+                "language": found_language,
+                "pan_found": pan_found(trigger),
             },
         )
     return TicketState(
@@ -127,5 +171,10 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
         message_for_llm=result.message_for_llm,
         history_for_llm=result.history_for_llm,
         placeholders=dict(result.mapping),
-        input_flags=InputFlags(injection=result.injection, pii_placeholders=result.pii_counts),
+        input_flags=InputFlags(
+            injection=result.injection,
+            pii_placeholders=result.pii_counts,
+            language=found_language,
+            pan_found=pan_found(trigger),
+        ),
     )

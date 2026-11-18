@@ -164,3 +164,36 @@ class RejectReason(StrEnum):
     MISSING_INFO = "missing_info"
     POLICY = "policy"
     OTHER = "other"
+
+
+class RouteReason(StrEnum):
+    """Reason codes of a route (docs/ai-pipeline.md §6, decision table; P6-02).
+
+    Row 1 (hard rules, `policy_gate`) lists its codes in the order the rules are checked: when
+    several match, every code goes into `route_reasons` in this order and the first one decides.
+    """
+
+    # row 1: hard rules, handoff
+    POLICY_INTENT = "policy_intent"
+    FRAUD_REPORT = "fraud_report"
+    INJECTION = "injection"
+    COMPLAINT = "complaint"
+    CUSTOMER_REQUEST = "customer_request"
+    ACTION_REQUEST = "action_request"
+    RESTRICTED_ACCOUNT = "restricted_account"
+    LANGUAGE = "language"
+    # row 2: system state, handoff
+    BUDGET_EXCEEDED = "budget_exceeded"
+    SYSTEM_ERROR = "system_error"
+    MASKING_FAILED = "masking_failed"
+    # row 3, handoff
+    NO_KB_ANSWER = "no_kb_answer"
+    # rows 4-8, approval
+    POLICY_VIOLATION = "policy_violation"
+    UNSUPPORTED_CLAIMS = "unsupported_claims"
+    DEGRADED = "degraded"
+    POLICY_REVIEW = "policy_review"
+    AUTO_REPLY_OFF = "auto_reply_off"
+    LOW_CONFIDENCE = "low_confidence"
+    # outside the graph: an operator claimed a ticket that was still `processing`
+    OPERATOR_TAKEOVER = "operator_takeover"

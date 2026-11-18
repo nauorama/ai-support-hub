@@ -7,11 +7,12 @@ prompts) and the stream of the request that started the run.
 import uuid
 from dataclasses import dataclass
 
+from hub.domain.enums import RouteReason
 from hub.graph.pipeline import STEP_CHECKING, STEP_SEARCHING, Emit, Pipeline
 from hub.graph.state import TicketState
 
-ERROR_REASONS = ["system_error"]
-BUDGET_REASONS = ["budget_exceeded"]
+ERROR_REASONS = [RouteReason.SYSTEM_ERROR.value]
+BUDGET_REASONS = [RouteReason.BUDGET_EXCEEDED.value]
 
 
 @dataclass
