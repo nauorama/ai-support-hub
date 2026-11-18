@@ -110,6 +110,24 @@ def test_the_transcript_has_the_last_ten_messages_with_one_placeholder_mapping()
     assert "@" not in text
 
 
+def test_the_transcript_holds_only_what_the_customer_saw() -> None:
+    """Owner decision (PR #38 review): customer messages and the replies sent to the customer;
+    never `system` messages, enforced in code."""
+    messages = [
+        _message(MessageRole.CUSTOMER, "Why is my account blocked?"),
+        _message(MessageRole.SYSTEM, "Handed off: restricted_account (AML review)."),
+        _message(MessageRole.OPERATOR, "We are looking into your account."),
+        _message(MessageRole.ASSISTANT, "Thanks for waiting."),
+    ]
+    text = transcript(messages)
+    assert text == (
+        "customer: Why is my account blocked?\n\n"
+        "operator: We are looking into your account.\n\n"
+        "assistant: Thanks for waiting."
+    )
+    assert transcript([_message(MessageRole.SYSTEM, "Only a notice.")]) == ""
+
+
 def test_a_summary_keeps_no_placeholder_and_no_card_number() -> None:
     content, masked = clean(f"Asked about card {TEST_CARD}; reply sent to <EMAIL_1>.")
     assert content == "Asked about card [CARD ****1111]; reply sent to [REDACTED]."

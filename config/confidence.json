@@ -2,5 +2,8 @@
   "version": "rule-v2",
   "kind": "rule",
   "top_score_floor": 0.5,
-  "note": "Rule version of confidence (ai-pipeline §6, ADR-0018): confidence = groundedness when the top retrieval score is above top_score_floor, else 0; null groundedness gives 0. Floor 0.5 (P6-06), from the hybrid scores of the 20 dev tickets: reciprocal rank fusion gives the top hit 0.5 when only one of the two searches (dense, BM25) ranks it first and finds it at all, and more when the other search finds it too (top 20). So above 0.5 means both searches agree on the top hit; the scores do not separate relevant from irrelevant hits any better (dev tickets: top scores 0.5 to 1.0, gold documents found at every level)."
+  "variants": [
+    "rag_hybrid"
+  ],
+  "note": "Rule version of confidence (ai-pipeline §6, ADR-0018): confidence = groundedness when the top retrieval score is above top_score_floor, else 0; null groundedness gives 0. Floor 0.5 (P6-06), from the hybrid scores of the 20 dev tickets: reciprocal rank fusion gives the top hit 0.5 when only one of the two searches (dense, BM25) ranks it first and finds it at all, and more when the other search finds it too (top 20). So above 0.5 means both searches agree on the top hit; the scores do not separate relevant from irrelevant hits any better (dev tickets: top scores 0.5 to 1.0, gold documents found at every level). The floor holds only for the listed variants (fused hybrid scores); any other variant (rag_dense cosine scores, b0_full_kb) gets confidence 0 and is never auto-replied (owner decision, PR #38 review)."
 }

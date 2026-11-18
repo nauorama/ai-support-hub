@@ -28,6 +28,7 @@ from hub.graph.state import run_input
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider
 from hub.llm.schemas import BudgetExceededError, ProviderRequest, ProviderResponse, Usage
 from hub.main import create_app
+from hub.memory import summary as memory_summary
 from hub.memory.summary import write_summary
 
 from ._api import OPERATOR_PASSWORD, Urls, add_customer, add_operator, own_database, run_sql
@@ -343,3 +344,84 @@ def test_a_failed_summary_never_fails_the_close(fresh: Urls, qdrant_url: str) ->
     assert run_sql(fresh, "SELECT id FROM customer_memory") == []
     (details,) = _one(fresh, "SELECT details FROM audit_log WHERE action = 'memory.failed'")
     assert details == {"error": "FixtureMissingError"}
+
+
+RESTRICTION_REASON = "AML review: incoming funds from a high-risk jurisdiction"
+
+
+def test_a_restricted_customers_summary_never_sees_internal_text(
+    fresh: Urls, qdrant_url: str
+) -> None:
+    """Owner decision (PR #38 review): the memory model gets only what the customer saw. The
+    handoff notice (`system`), the operator summary (`tickets.summary`) and the draft's missing
+    information hold internal text; here they hold a restriction reason, which must not reach
+    the model."""
+    customer_id = add_customer(fresh, "CUS-0009", "Rita Restricted")
+    ticket_id = uuid.uuid4()
+    run_sql(
+        fresh,
+        "INSERT INTO tickets (id, customer_id, channel, status, intent, summary, ai_disclosed_at)"
+        " VALUES (%s, %s, 'chat', 'handed_off', 'account_restricted', %s, now())",
+        ticket_id,
+        customer_id,
+        f"Restricted: {RESTRICTION_REASON}",
+    )
+    for role, body in (
+        ("customer", "Why can I not send money any more?"),
+        ("system", f"Handed off (restricted_account). Internal: {RESTRICTION_REASON}"),
+        ("operator", "Your account is under review. We will write to you when it is done."),
+    ):
+        run_sql(
+            fresh,
+            "INSERT INTO messages (id, ticket_id, role, body) VALUES (%s, %s, %s, %s)",
+            uuid.uuid4(),
+            ticket_id,
+            role,
+            body,
+        )
+    provider = MemoryAnswers(
+        ["The customer asked why payments stopped; support said a review runs."]
+    )
+    with _web(fresh, qdrant_url, provider) as web:
+        _close(_login(web), ticket_id)
+
+    [request] = provider.seen
+    assert "Why can I not send money any more?" in request
+    assert "under review" in request
+    assert "AML" not in request
+    assert "system:" not in request
+    assert run_sql(fresh, "SELECT count(*) FROM customer_memory") == [(1,)]
+
+
+def test_a_summary_that_takes_too_long_is_recorded_and_the_close_succeeds(
+    fresh: Urls, qdrant_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner decision (PR #38 review): a timeout on the memory call; the close still succeeds
+    and the abandoned call has its `llm_calls` row."""
+
+    class Slow(MemoryAnswers):
+        async def complete(self, request: ProviderRequest) -> ProviderResponse:
+            if "memory note" in str(request.messages[0]["content"]):
+                await asyncio.sleep(5)
+            return await super().complete(request)
+
+    monkeypatch.setattr(memory_summary, "SUMMARY_TIMEOUT_S", 0.2)
+    customer_id = add_customer(fresh)
+    ticket_id = _answered_ticket(fresh, customer_id, "Where is my withdrawal?")
+    with _web(fresh, qdrant_url, Slow([SUMMARY])) as web:
+        _close(_login(web), ticket_id)
+
+    assert _one(fresh, "SELECT status FROM tickets WHERE id = %s", ticket_id) == ("closed",)
+    assert run_sql(fresh, "SELECT id FROM customer_memory") == []
+    context, node, status, error, run_id = _one(
+        fresh, "SELECT context, node, status, error, run_id FROM llm_calls"
+    )
+    assert (context, node, status, error, run_id) == (
+        "memory",
+        "memory_summary",
+        "error",
+        "CallerTimeout",
+        None,
+    )
+    (details,) = _one(fresh, "SELECT details FROM audit_log WHERE action = 'memory.failed'")
+    assert details == {"error": "TimeoutError"}

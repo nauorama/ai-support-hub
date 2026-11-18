@@ -95,6 +95,8 @@ class DecideInput:
     auto_reply_enabled: bool
     allowed_intents: frozenset[str]
     confidence_threshold: float
+    # The pipeline's variant: the confidence floor holds only for the variants it names (P6-06).
+    variant: str
     memory_shows_open_case: bool = False  # P6-05
 
 
@@ -115,7 +117,7 @@ def decide(policy: Policy, rule: ConfidenceRule, given: DecideInput) -> Decision
         verification=given.verification,
         retry_count=given.retry_count,
     )
-    score = confidence(rule, found)
+    score = confidence(rule, found, given.variant)
     if given.mask_failed:
         return _one("handoff", RouteReason.MASKING_FAILED, found, score)
     if not draft.can_answer:

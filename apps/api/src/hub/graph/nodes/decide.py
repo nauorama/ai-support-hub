@@ -96,6 +96,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             ),
             confidence_threshold=threshold(settings.get(SettingKey.CONFIDENCE_THRESHOLD, NEVER)),
             memory_shows_open_case=open_case(state, datetime.now(UTC)),
+            variant=pipeline.variant,
         ),
     )
     return TicketState(

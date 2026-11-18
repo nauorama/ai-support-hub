@@ -5,18 +5,22 @@ P8-05 will call it too). It never raises: memory is a convenience, a failure mus
 fail a close.
 
 1. Skip when the ticket already has a summary (`closed` is final; a replayed close).
-2. The ticket's last 10 messages (masked by G1) with email, phone and IBAN replaced by
-   placeholders (G3), as `role: text` lines.
+2. The ticket's last 10 customer-visible messages (customer, assistant and operator replies;
+   never `system` messages or internal notes, enforced here, not only in the prompt), masked by
+   G1, with email, phone and IBAN replaced by placeholders (G3), as `role: text` lines.
 3. The budget guard (G8) before the call: the gateway checks it only for `online` calls, and a
    close must not spend money once the day's budget is gone.
 4. One structured call (`prompts/memory_summary`, role `triage`, `llm_calls.context = memory`,
-   no run).
+   no run), at most `SUMMARY_TIMEOUT_S`; a call cut off by it gets an `error` row
+   (`Gateway.record_abandoned`), so the failure is in `llm_calls` too.
 5. The answer is cleaned: placeholders become `[REDACTED]` (no contact data in memory), then the
    card mask (G1); a failed mask stores nothing. Stored in `customer_memory` with
    `memory.written` (counts only), or `memory.failed` with the error class.
 """
 
+import asyncio
 import logging
+import time
 import uuid
 from collections import Counter
 from collections.abc import Sequence
@@ -28,7 +32,7 @@ from hub.audit import record
 from hub.db.models import Message
 from hub.db.repositories import MemoryRepository, MessageRepository, TicketRepository
 from hub.db.session import Database
-from hub.domain.enums import ActorType, LlmCallContext, LlmNode
+from hub.domain.enums import ActorType, LlmCallContext, LlmNode, MessageRole
 from hub.domain.memory import MEMORY_MAX_CHARS, MemorySummary
 from hub.guardrails.masking import mask
 from hub.guardrails.placeholders import redact_placeholders, replace_pii
@@ -40,6 +44,12 @@ from hub.llm.schemas import CallContext
 logger = logging.getLogger(__name__)
 
 TURNS = 10  # as the run's history (ai-pipeline §9)
+# Shorter than one call of the `triage` role (30 s): the close request waits for it.
+SUMMARY_TIMEOUT_S = 20.0
+# Only what the customer saw: their own messages and the replies sent to them. `system` messages
+# (handoff notices, placeholders) and anything internal never reach the memory model (owner
+# decision, PR #38 review); the Hub never stores a restriction reason at all.
+CUSTOMER_VISIBLE = frozenset({MessageRole.CUSTOMER, MessageRole.ASSISTANT, MessageRole.OPERATOR})
 REDACTED = "[REDACTED]"
 
 
@@ -48,10 +58,12 @@ class MaskFailedError(Exception):
 
 
 def transcript(messages: Sequence[Message]) -> str:
-    """The last `TURNS` messages as `role: text`, with one placeholder mapping for all."""
+    """The last `TURNS` customer-visible messages as `role: text`, with one placeholder mapping
+    for all."""
+    visible = [message for message in messages if message.role in CUSTOMER_VISIBLE]
     mapping: dict[str, str] = {}
     lines = []
-    for message in list(messages)[-TURNS:]:
+    for message in visible[-TURNS:]:
         replaced = replace_pii(message.body, mapping)
         mapping = dict(replaced.mapping)
         lines.append(f"{message.role.value}: {replaced.text}")
@@ -100,7 +112,8 @@ async def _write(
             return
         customer_id = ticket.customer_id
         messages = await MessageRepository(session).list_for_ticket(ticket_id)
-    if not messages:
+    text = transcript(messages)
+    if not text:
         return
     if budget is not None:
         await budget.check()
@@ -110,12 +123,16 @@ async def _write(
         run_id=None,
         prompt_version=prompt.version,
     )
-    result = await gateway.complete_structured(
-        prompt.front.role,
-        prompt.render({"ticket": transcript(messages)}),
-        MemorySummary,
-        call=call,
-    )
+    start = time.perf_counter()
+    try:
+        async with asyncio.timeout(SUMMARY_TIMEOUT_S):
+            result = await gateway.complete_structured(
+                prompt.front.role, prompt.render({"ticket": text}), MemorySummary, call=call
+            )
+    except TimeoutError:
+        latency_ms = round((time.perf_counter() - start) * 1000)
+        await gateway.record_abandoned(prompt.front.role, call, latency_ms=latency_ms)
+        raise
     content, masked = clean(result.value.summary)
     try:
         async with database.sessions.begin() as session:
