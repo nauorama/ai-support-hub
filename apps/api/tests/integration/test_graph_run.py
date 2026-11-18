@@ -89,6 +89,10 @@ SEPA, NO_ANSWER = TICKETS["run_01"], TICKETS["run_02"]
 NOT_RECORDED = "This exact text has no recorded model answer, so the run must fail."
 EVIDENCE = json.loads((ROOT / "apps/api/tests/fixtures/run/evidence.json").read_text())
 SEPA_SECTION = "/help/withdrawal-times#sepa-withdrawals"
+# P6-04: run_01's recorded verify answer finds an unsupported claim, so the run searches once
+# more and writes again with the merged hits; the second verdict passes every claim.
+RETRY_NEW = [c for c in EVIDENCE["run_01_retry"] if c not in EVIDENCE["run_01"]][:SEARCH_TOP_K]
+SEPA_EVIDENCE = EVIDENCE["run_01"] + RETRY_NEW
 
 
 @pytest.fixture(scope="module")
@@ -244,21 +248,16 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
 
     assert [name for name, _ in events] == [
         "ticket.created",
-        "run.status",
-        "run.status",
-        "run.status",
-        "run.status",
+        *["run.status"] * 7,
         "message",
         "ticket.status",
         "done",
     ]
     assert [data["step"] for name, data in events if name == "run.status"] == [
         "understanding",
-        "searching",
-        "writing",
-        "checking",
+        *["searching", "writing", "checking"] * 2,  # the retry (P6-04)
     ]
-    assert events[6][1] == {"status": "pending_approval"}
+    assert events[9][1] == {"status": "pending_approval"}
 
     status, intent, urgency, summary, route, reasons = _one(
         run_db,
@@ -266,12 +265,12 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         " WHERE id = %s",
         ticket_id,
     )
-    # P6-02: the recorded verify answer finds one unsupported claim (row 4).
+    # P6-04: after the retry every claim is supported; auto-reply is off (row 7).
     assert (status, intent, route, reasons) == (
         "pending_approval",
         "withdrawal_issue",
         "approval",
-        ["unsupported_claims"],
+        ["auto_reply_off"],
     )
     assert urgency in {"low", "normal"}
     assert summary
@@ -291,8 +290,9 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     )
     assert confidence == ticket_confidence
     assert confidence is not None
-    assert 0 < confidence < 1
+    assert 0 < confidence <= 1
     assert features["top_score"] > 0
+    assert features["retry_used"] == 1.0
     assert features["n_citations"] >= 1
     # P6-03: the run waits for the operator with its outcome so far, not finished.
     assert (run_status, run_route, graph) == ("interrupted", "approval", GRAPH_VERSION)
@@ -312,6 +312,8 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     )
     assert [(node, version, call) for node, version, call, _, _ in calls] == [
         ("triage", "triage/v1", "ok"),
+        ("write", "write/v2", "ok"),
+        ("verify", "verify/v1", "ok"),
         ("write", "write/v2", "ok"),
         ("verify", "verify/v1", "ok"),
     ]
@@ -346,8 +348,8 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     sepa = next(c for c in citations if c["source_id"] == "withdrawal-times#0")
     assert sepa["url"] == SEPA_SECTION
     assert evidence["variant"] == VARIANT
-    assert [chunk["chunk_id"] for chunk in evidence["chunks"]] == EVIDENCE["run_01"]
-    assert [chunk["rank"] for chunk in evidence["chunks"]] == list(range(1, 7))
+    assert [chunk["chunk_id"] for chunk in evidence["chunks"]] == SEPA_EVIDENCE
+    assert [chunk["rank"] for chunk in evidence["chunks"]] == list(range(1, len(SEPA_EVIDENCE) + 1))
 
 
 async def test_the_live_search_finds_the_recorded_hits(run_db: Urls, qdrant: str) -> None:
@@ -380,6 +382,7 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
         "ticket.created",
         "intake.done",
         "triage.done",
+        "research.retry",
         "draft.created",
         "verify.done",
         "route.decided",
@@ -395,8 +398,9 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     assert "summary" not in triage
     assert rows["draft.created"]["prompt_version"] == "write/v2"
     assert rows["draft.created"]["variant"] == VARIANT
-    assert [c["chunk_id"] for c in rows["draft.created"]["chunks"]] == EVIDENCE["run_01"]
-    assert rows["route.decided"]["reasons"] == ["unsupported_claims"]
+    assert [c["chunk_id"] for c in rows["draft.created"]["chunks"]] == SEPA_EVIDENCE
+    assert rows["research.retry"]["chunks_added"] == len(RETRY_NEW)
+    assert rows["route.decided"]["reasons"] == ["auto_reply_off"]
     assert rows["route.decided"]["confidence"] is not None
     assert "groundedness" in rows["route.decided"]["features"]
     assert (rows["intake.done"]["language"], rows["intake.done"]["pan_found"]) == ("en", False)
@@ -752,7 +756,7 @@ async def test_a_claim_through_the_console_during_the_run_needs_the_current_vers
     answers: list[tuple[int, str]] = []
 
     def claim(_name: str, data: dict[str, Any]) -> None:
-        if data.get("step") != "writing":
+        if data.get("step") != "writing" or answers:  # the first write only
             return
         url = f"/api/v1/console/tickets/{ticket_id}/claim"
         stale = operator.post(url, json={"ticket_version": before})
@@ -1017,7 +1021,7 @@ async def test_the_run_checkpoints_its_state_in_postgres_under_the_ticket(
     assert (state["run_id"], state["route"]) == (str(outcome.run_id), "approval")
     assert state["draft"] is not None
     assert state["draft"].can_answer
-    assert [chunk.chunk_id for chunk in state["evidence"].chunks] == EVIDENCE["run_01"]
+    assert [chunk.chunk_id for chunk in state["evidence"].chunks] == SEPA_EVIDENCE
 
 
 async def test_a_node_that_runs_too_long_hands_the_ticket_off(

@@ -75,6 +75,7 @@ def build_pipeline(
         write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, VARIANT),
         verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify"),
         handoff_prompt=active_prompt(settings.prompts_dir, gateway.models, "handoff_summary"),
+        memory_prompt=active_prompt(settings.prompts_dir, gateway.models, "memory_summary"),
         policy=load_policy(settings.policy_config),
         confidence_rule=load_confidence(settings.confidence_config),
         retriever=retriever,

@@ -8,10 +8,10 @@ again (ADR-0008): `human_review` stores a run's draft once, a ticket moves only 
 `processing`, and a handoff notice is sent only when the ticket was handed off by that node.
 
 **When a run counts as stuck (owner decision, P6-03).** It started longer ago than any run can
-take (`STUCK_AFTER_S`: the sum of every node's timeout plus a margin), and this process does not
-run it (`Pipeline.live`). A run on the other instance (Cloud Run, at most 2) has ended or failed
-by then, so a recovery never runs a live run a second time. design §10 named 90 s; a slow run
-(model retries and fallbacks) can take longer than that.
+take (`STUCK_AFTER_S`: the longest path at every node's timeout, the retry loop included, plus a
+margin), and this process does not run it (`Pipeline.live`). A run on the other instance (Cloud
+Run, at most 2) has ended or failed by then, so a recovery never runs a live run a second time.
+design §10 named 90 s; a slow run (model retries and fallbacks) can take longer than that.
 
 Two ways in: `POST /admin/runs/recover` (all stuck runs) and the next read of the ticket (the
 customer's ticket and messages, the console ticket), which starts the recovery as a task of its
@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hub.audit import record
 from hub.db.models import Run, Ticket
 from hub.domain.enums import ActorType, RunStatus
-from hub.graph.build import NODE_TIMEOUTS_S, compile_graph
+from hub.graph.build import LONGEST_RUN_S, compile_graph
 from hub.graph.context import GraphContext
 from hub.graph.pipeline import Pipeline
 from hub.graph.run import RunIncompleteError, ignore, outcome_status, settle_failure, thread
@@ -39,9 +39,9 @@ from hub.graph.state import TicketState, run_input
 
 logger = logging.getLogger(__name__)
 
-# Longer than any run: every node at its timeout, one after the other, and a margin for the
-# database steps between them. P6-04 (retry loop) must keep this above its longest path.
-STUCK_AFTER_S = sum(NODE_TIMEOUTS_S.values()) + 60.0
+# Longer than any run: every node at its timeout, one after the other, the retry loop's nodes
+# twice (P6-04), and a margin for the database steps between them.
+STUCK_AFTER_S = LONGEST_RUN_S + 60.0
 
 
 @dataclass(frozen=True)

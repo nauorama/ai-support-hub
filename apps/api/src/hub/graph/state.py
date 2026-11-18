@@ -14,8 +14,10 @@ What the state holds and why:
   messages it comes from: never logged, and deleted with the ticket's checkpoints (security §6);
 - chunk texts are stored once, in `evidence`.
 
-Not here yet: `customer_context` (the customer profile and memory items, P6-05 and P7),
-account facts in the evidence (P7).
+- `customer_context`: memory items and the customer's other open tickets, loaded by intake
+  (P6-05); context only, never a source of facts.
+
+Not here yet: the customer profile in `customer_context` and account facts in the evidence (P7).
 """
 
 from typing import Any, Literal, TypedDict
@@ -23,6 +25,7 @@ from typing import Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict
 
 from hub.domain.draft import Citation, DraftAnswer, ProposedAction
+from hub.domain.memory import CustomerContext, MemoryItem, OpenTicket
 from hub.domain.review import ReviewDecision
 from hub.domain.triage import TriageResult
 from hub.domain.verification import ClaimCheck, Verification
@@ -70,6 +73,7 @@ class TicketState(TypedDict, total=False):
     history_for_llm: str
     placeholders: dict[str, str]
     input_flags: InputFlags | None
+    customer_context: CustomerContext | None
     # node outputs
     triage: TriageResult | None
     evidence: Evidence | None
@@ -107,6 +111,9 @@ STATE_TYPES: tuple[type[Any], ...] = (
     Verification,
     ClaimCheck,
     ReviewDecision,
+    CustomerContext,
+    MemoryItem,
+    OpenTicket,
 )
 
 
@@ -122,6 +129,7 @@ def run_input(*, ticket_id: str, run_id: str, message_id: str, customer_ref: str
         history_for_llm="",
         placeholders={},
         input_flags=None,
+        customer_context=None,
         triage=None,
         evidence=None,
         draft=None,

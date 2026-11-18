@@ -3,7 +3,7 @@
 ```
 intake → triage → policy_gate ─┬─ handoff → handoff_prep ─────────────┐
                                └─ continue → research → write → verify │
-              verify ─┬─ retry (P6-04) → research                      │
+              verify ─┬─ retry (once) → research                       │
                       └─ decide ─┬─ auto_reply → respond               │
                                  ├─ approval → human_review ◄──────────┘
                                  └─ handoff → handoff_prep
@@ -92,6 +92,10 @@ class NodeSpec:
 
 
 def research_timed_out(state: TicketState) -> TicketState:
+    """A first pass continues degraded with empty evidence; a retry keeps the first evidence and
+    still counts as the retry, so the loop cannot run twice."""
+    if research.retry_hints(state):
+        return TicketState(retry_count=state.get("retry_count", 0) + 1)
     return TicketState(evidence=research.evidence((), degraded=True))
 
 
@@ -114,6 +118,11 @@ NODES = (
     NodeSpec("respond", respond.run, 30, catches=False, skipped_after_error=False),
 )
 NODE_TIMEOUTS_S = {spec.name: spec.timeout_s for spec in NODES}
+# The nodes the retry loop runs a second time (P6-04).
+RETRY_NODES = ("research", "write", "verify")
+# The longest path through the graph: every node at its timeout, the retry nodes twice.
+LONGEST_RUN_S = sum(NODE_TIMEOUTS_S.values()) + sum(NODE_TIMEOUTS_S[name] for name in RETRY_NODES)
+MAX_RETRIES = 1  # ai-pipeline §5: "after one retry, the result stands"
 
 
 def guarded(spec: NodeSpec) -> "GraphNode":
@@ -151,9 +160,25 @@ def after_policy_gate(state: TicketState) -> Literal["handoff_prep", "research"]
     return "handoff_prep" if state.get("route") == "handoff" else "research"
 
 
+def retry_left(state: TicketState) -> bool:
+    """The retry loop (ai-pipeline §5, P6-04): back to research when the LLM check found
+    unsupported claims and no retry was used. Not after a failed code check (a policy violation
+    is not a search problem), a failed or skipped LLM check (no claims to search for), or a
+    failure of an earlier node."""
+    verification = state.get("verification")
+    return (
+        not state.get("errors")
+        and state.get("retry_count", 0) < MAX_RETRIES
+        and verification is not None
+        and not verification.policy_violations
+        and verification.groundedness is not None
+        and not state.get("verify_error")
+        and bool(verification.unsupported)
+    )
+
+
 def after_verify(state: TicketState) -> Literal["research", "decide"]:
-    """The retry loop (P6-04) goes back to research; until then every draft goes on."""
-    return "decide"
+    return "research" if retry_left(state) else "decide"
 
 
 def after_decide(state: TicketState) -> Literal["respond", "human_review", "handoff_prep"]:

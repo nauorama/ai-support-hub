@@ -33,10 +33,10 @@ CHUNK = KbChunk(
     url="/help/withdrawal-times#sepa-withdrawals",
     text="A SEPA withdrawal takes 1 business day.",
     visibility="external",
-    score=0.03,
+    score=0.75,
     rank=1,
 )
-EVIDENCE = Evidence(chunks=[CHUNK], top_score=0.03, score_margin=0.01)
+EVIDENCE = Evidence(chunks=[CHUNK], top_score=0.75, score_margin=0.25)
 PASSED = Verification(
     claims=[ClaimCheck(claim="1 business day", supported=True, source_id=CHUNK.chunk_id)],
     groundedness=1.0,
@@ -235,7 +235,7 @@ def test_row_4_does_not_apply_to_a_variant_without_verification() -> None:
 
 
 def test_row_5_degraded_research_goes_to_approval() -> None:
-    degraded = Evidence(chunks=[CHUNK], top_score=0.03, score_margin=0.01, degraded=True)
+    degraded = Evidence(chunks=[CHUNK], top_score=0.75, score_margin=0.25, degraded=True)
     assert _route(_input(evidence=degraded)) == ("approval", ["degraded"])
 
 
@@ -333,6 +333,14 @@ def test_confidence_is_the_groundedness_above_the_top_score_floor() -> None:
     assert confidence(rule, {"top_score": 0.9}) == 0.0  # null groundedness: never auto-reply
 
 
+def test_the_floor_needs_both_searches_to_find_the_top_hit() -> None:
+    """P6-06: reciprocal rank fusion gives a top hit 0.5 when only one search (dense or BM25)
+    finds it; the configured floor counts that as no retrieval support."""
+    rule = load_confidence(ROOT / "config" / "confidence.json")
+    assert confidence(rule, {"top_score": 0.5, "groundedness": 1.0}) == 0.0
+    assert confidence(rule, {"top_score": 0.5 + 1 / 21, "groundedness": 1.0}) == 1.0
+
+
 def test_the_features_are_the_documented_inputs() -> None:
     found = features(
         triage=_triage(secondary_intent="fees_fx"),
@@ -342,8 +350,8 @@ def test_the_features_are_the_documented_inputs() -> None:
         retry_count=1,
     )
     assert found == {
-        "top_score": 0.03,
-        "score_margin": 0.01,
+        "top_score": 0.75,
+        "score_margin": 0.25,
         "n_citations": 1.0,
         "n_account_facts": 0.0,
         "retry_used": 1.0,
@@ -358,7 +366,7 @@ def test_the_features_are_the_documented_inputs() -> None:
 
 def test_the_confidence_file_loads_and_a_broken_one_is_refused(tmp_path: Path) -> None:
     rule = load_confidence(ROOT / "config" / "confidence.json")
-    assert (rule.kind, rule.top_score_floor) == ("rule", 0.0)
+    assert (rule.kind, rule.top_score_floor) == ("rule", 0.5)
     with pytest.raises(ConfidenceError, match="cannot read"):
         load_confidence(tmp_path / "missing.json")
     bad = tmp_path / "bad.json"

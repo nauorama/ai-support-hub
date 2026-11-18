@@ -142,3 +142,9 @@ def restore_pii(text: str, mapping: Mapping[str, str]) -> str:
     """Put the original values back for the placeholders in ``mapping``; anything else that
     looks like a placeholder stays as it is. One pass, so a restored value is never expanded."""
     return _PLACEHOLDER.sub(lambda match: mapping.get(match.group(0), match.group(0)), text)
+
+
+def redact_placeholders(text: str, replacement: str = "[REDACTED]") -> str:
+    """Every placeholder of ours replaced by `replacement`: for model output that is kept
+    beyond the run (memory, P6-05), where no mapping may restore contact data."""
+    return _PLACEHOLDER.sub(replacement, text)

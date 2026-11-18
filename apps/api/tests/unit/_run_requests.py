@@ -24,6 +24,14 @@ writes `evidence.json` again: it indexes `data/kb/` in Qdrant's in-memory mode w
 local models and runs the run's search. The integration test `test_linear_run.py` checks that
 the real Qdrant server returns the same ids, so a recording cannot drift from the live search.
 
+**Retry (P6-04).** When the recorded verify answer leaves unsupported claims (as the run counts
+them, `hub.graph.nodes.verify.verification`), the run searches once more with those claims
+(`research.hints`, `research.hint_query`) and writes again with the merged hits
+(`research.merged`): `run_NN_write_retry.json`, and `run_NN_verify_retry.json` once that write is
+recorded and passes the code checks. The retry search's hits are in `evidence.json` under
+`run_NN_retry`, written by `--search` from the recorded verify answer; so a new verify
+recording needs `make llm-requests` and `make record-llm` once more.
+
 Only the role's own model is recorded (no fallback recording): fake mode never falls back.
 """
 
@@ -31,6 +39,7 @@ import asyncio
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +47,12 @@ from pydantic import BaseModel, ConfigDict
 
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import LlmCallContext, LlmCallMode, LlmNode
-from hub.graph.draft import draft_to_check, rag_evidence
-from hub.graph.nodes.intake import intake
+from hub.domain.verification import ClaimsAnswer
+from hub.graph.draft import WriterEvidence, draft_to_check, rag_evidence
+from hub.graph.nodes import research
+from hub.graph.nodes.intake import IntakeResult, intake
 from hub.graph.nodes.triage import triage_messages
-from hub.graph.nodes.verify import verify_messages
+from hub.graph.nodes.verify import verification, verify_messages
 from hub.graph.nodes.write import write_messages
 from hub.graph.pipeline import SEARCH_MODES, SEARCH_TOP_K, VARIANT
 from hub.guardrails.masking import mask
@@ -52,7 +63,7 @@ from hub.kb.retriever import KbChunk
 from hub.llm.config import ModelsConfig, load_models
 from hub.llm.gateway import FIXTURES_DIR, Fixture, FixtureProvider, Gateway
 from hub.llm.pricing import load_pricing
-from hub.llm.prompts import active_prompt
+from hub.llm.prompts import Prompt, active_prompt
 from hub.llm.record import RequestSpec, spec_requests
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -62,7 +73,7 @@ EVIDENCE = FIXTURES / "run" / "evidence.json"
 REQUESTS = FIXTURES / "llm" / "requests"
 PROMISES = load_policy(ROOT / "config" / "policy.yaml").promises
 KB_DIR = ROOT / "data" / "kb"
-GENERATED = re.compile(r"run_[0-9]{2}_(triage|write|verify)\.json")
+GENERATED = re.compile(r"run_[0-9]{2}_(triage|write|verify)(_retry)?\.json")
 VERIFY_CASES = FIXTURES / "verify" / "cases.jsonl"
 GENERATED_VERIFY = re.compile(r"verify_[a-z_]+\.json")
 
@@ -81,7 +92,8 @@ def load_tickets() -> list[RunTicket]:
 
 
 def load_evidence() -> dict[str, list[str]]:
-    """Run ticket id -> chunk ids of its search, in rank order."""
+    """Run ticket id -> chunk ids of its search, in rank order; `<id>_retry` -> the chunk ids of
+    its retry search."""
     data: dict[str, list[str]] = json.loads(EVIDENCE.read_text(encoding="utf-8"))
     return data
 
@@ -122,8 +134,10 @@ def internal_text(files: list[KbFile]) -> InternalText:
     )
 
 
-def recorded_answer(models: ModelsConfig, spec: dict[str, Any]) -> DraftAnswer | None:
-    """The recorded write answer of a write request file, or None when it is not recorded."""
+def recorded_answer[T: BaseModel](
+    models: ModelsConfig, spec: dict[str, Any], schema: type[T]
+) -> T | None:
+    """The recorded answer of a request file, or None when it is not recorded."""
     gateway = Gateway(
         models=models,
         pricing=load_pricing(ROOT / "config" / "pricing.yaml"),
@@ -137,7 +151,19 @@ def recorded_answer(models: ModelsConfig, spec: dict[str, Any]) -> DraftAnswer |
     if not path.exists():
         return None
     content = Fixture.model_validate_json(path.read_bytes()).response.content
-    return DraftAnswer.model_validate_json(content) if content is not None else None
+    return schema.model_validate_json(content) if content is not None else None
+
+
+def retry_queries(
+    models: ModelsConfig, specs: dict[str, dict[str, Any]], ticket: RunTicket, kb: WriterEvidence
+) -> list[str]:
+    """The retry hints of a ticket, from its recorded verify answer; empty without one or when
+    every claim is supported."""
+    spec = specs.get(f"{ticket.id}_verify.json")
+    answer = recorded_answer(models, spec, ClaimsAnswer) if spec is not None else None
+    if answer is None:
+        return []
+    return research.hints(verification(answer, kb.citable.keys()))
 
 
 def request_specs() -> dict[str, dict[str, Any]]:
@@ -145,7 +171,6 @@ def request_specs() -> dict[str, dict[str, Any]]:
     models = load_models(ROOT / "config" / "models.yaml")
     triage_prompt = active_prompt(ROOT / "prompts", models, "triage")
     write_prompt = active_prompt(ROOT / "prompts", models, "write")
-    verify_prompt = active_prompt(ROOT / "prompts", models, "verify")
     files = read_kb(KB_DIR)
     internal = internal_text(files)
     evidence = load_evidence()
@@ -165,37 +190,67 @@ def request_specs() -> dict[str, dict[str, Any]]:
             "models": "primary",
             "messages": triage_messages(triage_prompt, result.message_for_llm),
         }
-        specs[f"{ticket.id}_write.json"] = {
-            "role": write_prompt.front.role,
-            "schema": "DraftAnswer",
-            "prompt_version": write_prompt.version,
-            "models": "primary",
-            "messages": write_messages(
-                write_prompt,
-                kb=kb,
-                ticket=result.message_for_llm,
-                history=result.history_for_llm,
-            ),
-        }
-        answer = recorded_answer(models, specs[f"{ticket.id}_write.json"])
-        if answer is None or check_draft(
-            draft_to_check(answer, writer_evidence, result), promises=PROMISES, internal=internal
-        ):
+        specs[f"{ticket.id}_write.json"] = write_spec(write_prompt, kb, result)
+        verify = Verify(models, specs, internal, result)
+        if not verify.add(f"{ticket.id}_verify.json", writer_evidence):
             continue
-        specs[f"{ticket.id}_verify.json"] = {
-            "role": verify_prompt.front.role,
+        retry = evidence.get(f"{ticket.id}_retry")
+        if retry is None or not retry_queries(models, specs, ticket, writer_evidence):
+            continue
+        first = research.evidence(hits_from_files(evidence[ticket.id], files))
+        merged = research.merged(first, hits_from_files(retry, files))
+        retry_evidence = rag_evidence(VARIANT, merged.chunks)
+        specs[f"{ticket.id}_write_retry.json"] = write_spec(write_prompt, retry_evidence.kb, result)
+        verify.add(f"{ticket.id}_verify_retry.json", retry_evidence)
+    return specs
+
+
+def write_spec(prompt: Prompt, kb: str, result: IntakeResult) -> dict[str, Any]:
+    return {
+        "role": prompt.front.role,
+        "schema": "DraftAnswer",
+        "prompt_version": prompt.version,
+        "models": "primary",
+        "messages": write_messages(
+            prompt, kb=kb, ticket=result.message_for_llm, history=result.history_for_llm
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class Verify:
+    models: ModelsConfig
+    specs: dict[str, dict[str, Any]]
+    internal: InternalText
+    result: IntakeResult
+
+    def add(self, name: str, writer_evidence: WriterEvidence) -> bool:
+        """Add the verify request of the write request it follows (`<x>_verify` after
+        `<x>_write`) when that write is recorded and passes every code check, as the run calls
+        it."""
+        models, result = self.models, self.result
+        answer = recorded_answer(models, self.specs[name.replace("_verify", "_write")], DraftAnswer)
+        if answer is None or check_draft(
+            draft_to_check(answer, writer_evidence, result),
+            promises=PROMISES,
+            internal=self.internal,
+        ):
+            return False
+        prompt = active_prompt(ROOT / "prompts", models, "verify")
+        self.specs[name] = {
+            "role": prompt.front.role,
             "schema": "ClaimsAnswer",
-            "prompt_version": verify_prompt.version,
+            "prompt_version": prompt.version,
             "models": "primary",
             "messages": verify_messages(
-                verify_prompt,
+                prompt,
                 draft=answer.answer,
-                kb=kb,
+                kb=writer_evidence.kb,
                 ticket=result.message_for_llm,
                 history=result.history_for_llm,
             ),
         }
-    return specs
+        return True
 
 
 class VerifyInput(BaseModel):
@@ -305,15 +360,25 @@ async def search_evidence() -> dict[str, list[str]]:
     try:
         await KbIndex(client, dense, sparse).rebuild(chunks)
         retriever = Retriever(client, dense, sparse)
-        return {
-            ticket.id: [
-                hit.chunk_id
-                for hit in await retriever.search(
-                    query(ticket), "external", top_k=SEARCH_TOP_K, mode=SEARCH_MODES[VARIANT]
-                )
-            ]
-            for ticket in load_tickets()
-        }
+
+        async def ids(text: str) -> list[str]:
+            hits = await retriever.search(
+                text, "external", top_k=SEARCH_TOP_K, mode=SEARCH_MODES[VARIANT]
+            )
+            return [hit.chunk_id for hit in hits]
+
+        found = {ticket.id: await ids(query(ticket)) for ticket in load_tickets()}
+        # The retry search needs the verify request, which needs the first search's hits.
+        EVIDENCE.write_text(json.dumps(found, indent=2) + "\n", encoding="utf-8")
+        models = load_models(ROOT / "config" / "models.yaml")
+        specs = request_specs()
+        files = read_kb(KB_DIR)
+        for ticket in load_tickets():
+            kb = rag_evidence(VARIANT, hits_from_files(found[ticket.id], files))
+            queries = retry_queries(models, specs, ticket, kb)
+            if queries:
+                found[f"{ticket.id}_retry"] = await ids(research.hint_query(queries))
+        return found
     finally:
         await client.close()
 

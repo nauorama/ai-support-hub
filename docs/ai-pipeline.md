@@ -52,7 +52,7 @@ class TicketState(TypedDict, total=False):
     message_masked: str            # card data removed
     message_for_llm: str           # + placeholders for email, phone, IBAN (IBAN already partly masked by G1)
     history: list[ChatTurn]        # earlier messages of this ticket, masked, max 10 turns
-    customer_context: CustomerContext   # tier, country, restricted flag, memory items
+    customer_context: CustomerContext   # memory items, other open tickets (P6-05); tier, country, restricted flag (P7-04)
     input_flags: InputFlags        # pan_found, injection_score, injection_patterns, language
     # node outputs
     triage: TriageResult
@@ -75,7 +75,7 @@ Keep the state small: chunk texts are stored once in `evidence`; nodes do not co
 
 | Node | Kind | Input → output | Fails into |
 |---|---|---|---|
-| `intake` | code | Detect language. Run the injection heuristics. Replace email, phone, IBAN with placeholders (`<EMAIL_1>`; the IBAN is already partly masked by G1, ADR-0017). Load the customer profile (tool `core_get_customer`), up to 5 memory items and the customer's other open tickets (id, intent, status). | continues with flags |
+| `intake` | code | Detect language. Run the injection heuristics. Replace email, phone, IBAN with placeholders (`<EMAIL_1>`; the IBAN is already partly masked by G1, ADR-0017). Load the customer profile (tool `core_get_customer`, P7-04), up to 5 memory items and the customer's other open tickets (id, intent, status; P6-05, at most the 10 newest). | continues with flags |
 | `triage` | LLM, role `triage` | `TriageResult` | handoff `system_error` |
 | `policy_gate` | code | Applies `config/policy.yaml` (section 6). Sets route and reasons when a hard rule matches. | — |
 | `research` | LLM tool loop, role `research` | `Evidence`. Step 0 is always a hybrid search with the ticket text (not chosen by the model). Then the model may call read tools, at most 5 calls, 20 s total. | continues with what it has, reason `degraded` |
@@ -210,9 +210,14 @@ Validation: the gateway asks the provider for JSON that matches the schema, vali
 5. No forbidden promise from `config/policy.yaml` (refund, limit increase, unfreeze, the reason of a restriction, legal advice). Checked with patterns and by the LLM verifier. The patterns are `forbidden_promises` in `config/policy.yaml` (moved from `output_checks.py` in P6-02), for a first-person promise or a done deed ("we will refund", "your refund will be issued", "your account is restricted for security reasons"). They are matched on the folded view of G4 (NFKC, then look-alike letters mapped, invisible characters and combining marks dropped, case-folded), so a zero-width space or a Cyrillic letter cannot hide a promise. They are a first filter, not a complete list; a test checks that no external chunk matches them. The verify prompt counts a promise no source makes as an unsupported claim.
 6. Length ≤ 1,200 characters; language = English (a heuristic without a dependency: most letters ASCII, and English function words outnumber those of other European languages when there are any).
 
-**LLM check** (`prompts/verify/v1.md`, role `verify`, `graph/nodes/verify.py`): the model splits the answer into atomic claims and names, for each, the source id that states it, or null. Code then drops a source id the writer was not given (stored as null, so only known chunk ids reach the draft), counts a claim marked supported without a known source id as unsupported, sets `groundedness` (3 decimals) and `passed` (every claim supported; an answer without any claim gets groundedness 0 and fails). The result is stored on the draft (`groundedness`, `unsupported_claims`) and in the `verify.done` audit record (counts and codes only). `decide` routes on the verification the run holds in memory (row 4, P6-02): `policy_violation` when a code check failed, `unsupported_claims` when the LLM check found any or did not run. The draft keeps only `groundedness` and `unsupported_claims`; a later reader takes the violation codes from the `verify.done` audit record. The retry comes with P6-04.
+**LLM check** (`prompts/verify/v1.md`, role `verify`, `graph/nodes/verify.py`): the model splits the answer into atomic claims and names, for each, the source id that states it, or null. Code then drops a source id the writer was not given (stored as null, so only known chunk ids reach the draft), counts a claim marked supported without a known source id as unsupported, sets `groundedness` (3 decimals) and `passed` (every claim supported; an answer without any claim gets groundedness 0 and fails). The result is stored on the draft (`groundedness`, `unsupported_claims`) and in the `verify.done` audit record (counts and codes only). `decide` routes on the verification the run holds in memory (row 4, P6-02): `policy_violation` when a code check failed, `unsupported_claims` when the LLM check found any or did not run. The draft keeps only `groundedness` and `unsupported_claims`; a later reader takes the violation codes from the `verify.done` audit record.
 
 If the LLM check finds unsupported claims and `retry_count == 0`, the graph goes back to `research` with the list of unsupported claims as extra search hints. After one retry, the result stands.
+
+How the retry is built (P6-04, `hub/graph/build.py` `retry_left`, `hub/graph/nodes/research.py`):
+- **When.** Only when the LLM check ran and found unsupported claims. A failed code check (a policy violation is not a search problem), a failed or timed-out LLM check (no claims to search for) and a failure of an earlier node go on to `decide`.
+- **The search.** One more search with the unsupported claims as the query (G1-masked first, joined by line breaks), `external`, top 6. The first search's hits stay first; up to 6 new hits are added after them. `top_score` and `score_margin` stay those of the ticket search. A failed retry search keeps the first evidence. `research.retry` is audited (counts only). Then `write` and `verify` run again on the merged hits; their second result stands.
+- **At most once.** `research` counts the retry (`retry_count = 1`), also when it times out (it then keeps the first evidence), and `retry_left` needs `retry_count == 0`; a test runs the whole graph with a verifier that never passes and sees one retry. `STUCK_AFTER_S` (P6-03) counts research, write and verify twice.
 
 ## 6. Routing
 
@@ -254,7 +259,7 @@ Notes on the file (P6-02, owner decisions):
 - **Injection (G4).** A score of at least `injection.high_score` (condition `injection_score_high`) or the triage flag `injection_suspected` each hand off on their own (OR).
 - **Fraud words.** `pan_in_message_with_fraud_words`: G1 masked a card number in the message and a fraud word or phrase is in it (whole words, matched on the G4 folded view).
 - **Language.** `language_not_english` matches when intake's check says not English or cannot tell (unknown counts as not English). Intake is stricter than the verify step's `looks_english` for short messages (under 8 words): one common function word of another language makes them unknown ("Hola, mi tarjeta no funciona").
-- **Not matched yet.** `customer_restricted` needs the customer profile (P7-04) and `memory_shows_open_case` needs memory (P6-05); until then they never match.
+- **Not matched yet.** `customer_restricted` needs the customer profile (P7-04); until then it never matches. `memory_shows_open_case` matches from P6-05 (section 9).
 - **Intent rules** of `always_handoff` look at `intent` and `secondary_intent` (the safe side; owner decision, PR #36 review). Row 6 looks at `intent` only.
 - **Handoff notice.** The opening of the first reason (`handoff_notices`, `default` for a reason without its own text), the safe first steps without repeats, then the expected response time: urgent cases 30 minutes in support hours and 60 minutes outside them (on-call), others 4 business hours, outside support hours with the next opening time ("Our support team is back on Monday at 08:00 CET."; local time of Europe/Bratislava, so CET in winter and CEST in summer, which the world file's "CET" means). Until P7-05 the urgent notice promises 30 minutes although nothing alerts the on-call analyst yet: the urgent Slack alert comes with P7-05. Fixed texts only, facts from the world file; never a restriction reason or the operator summary.
 
@@ -303,7 +308,7 @@ Training rules (kept for reference; they assumed the earlier 210-ticket dev set,
 - If the trained model is not better than the rule version below in cross-validation, the rule version stays. This is a valid result and is written in the experiments file.
 - Retrain after every change of prompts, models or retrieval.
 
-Rule version (used in budget mode, and in the trained design until a model is trained): `config/confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above `top_score_floor`, else 0; the floor is 0.0 for now, a placeholder to be set before H7, P6-06; a null `groundedness`, i.e. a code check failed and the LLM check did not run, gives confidence 0 and never an auto-reply, P5-04) and the default threshold is 0.95, with auto-reply **off** by default.
+Rule version (used in budget mode, and in the trained design until a model is trained): `config/confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above `top_score_floor`, else 0; the floor is 0.5 (P6-06): reciprocal rank fusion gives the top hit 0.5 when only one of the two searches finds it, so above 0.5 means dense and BM25 agree on it; the 20 dev tickets showed no better split between relevant and irrelevant hits; a null `groundedness`, i.e. a code check failed and the LLM check did not run, gives confidence 0 and never an auto-reply, P5-04) and the default threshold is 0.95, with auto-reply **off** by default.
 
 ## 7. Prompts
 
@@ -357,6 +362,13 @@ Every role has a timeout (`timeout_s`); the gateway makes 2 retries with backoff
 - **Between tickets:** `customer_memory` rows of kind `ticket_summary`, written when a ticket becomes `closed` (by the close endpoint or by the scheduled `close-stale` job; one call of the small model, recorded in `llm_calls` with `context = memory` and no run). `intake` loads the 5 newest that are not expired.
 - Use: the writer may use memory only for context ("you wrote to us about this withdrawal on 5 November"), never as a source of facts — facts need a citation. If the customer has another open ticket with the same intent, or a memory item of the last 14 days on the same intent, the route is approval (`memory_shows_open_case`): a repeated contact means the first answer did not help.
 - Erasure deletes memory with the rest of the customer's data.
+
+How it is built (P6-05, `hub/memory/summary.py`, `hub/domain/memory.py`, `prompts/memory_summary/v1.md`, ADR-0012):
+- **Writing.** The close endpoint calls `write_summary` after the commit and the resume, inside the request. It reads the ticket's last 10 messages (G1-masked, with G3 placeholders), checks the budget guard (G8; the gateway checks it only for `online` calls, and a close must not spend money once the day's budget is gone), and makes one structured call (`MemorySummary`, at most 300 characters). The answer gets every placeholder replaced by `[REDACTED]` (no contact data in memory) and the card mask (G1); a failed mask stores nothing. One summary per ticket (`customer_memory.ticket_id` is unique; `closed` is final). `memory.written` is audited with counts only; any failure (budget, model, fake mode without a recording) is logged, audited as `memory.failed` with the error class, and never fails the close.
+- **Loading.** `intake` loads the 5 newest items that have not expired (with the intent of their ticket) and the customer's other tickets that are not `closed` (at most 10) into `customer_context`; the customer is the ticket's own. `intake.done` gets their counts.
+- **Routing.** `decide` sets `memory_shows_open_case` when the triage intent equals the intent of another open ticket or of a memory item of the last 14 days (row 6, `policy_review`).
+- **Writer.** The writer does not see memory yet (owner decision, P6-05): `write/v3` adds a `<memory>` block with the account facts (P7-04).
+- **Console.** `GET /console/tickets/{id}` lists the customer's memory items that have not expired (at most 5, without the ticket's own) in `memory`.
 
 ## 10. Baselines kept in the code
 

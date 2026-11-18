@@ -96,6 +96,12 @@ class ActorType(StrEnum):
     SYSTEM = "system"
 
 
+class MemoryKind(StrEnum):
+    """`customer_memory.kind` (data model §1, ai-pipeline §9)."""
+
+    TICKET_SUMMARY = "ticket_summary"
+
+
 class LlmCallContext(StrEnum):
     """Why a model call was made (data model §1, `llm_calls.context`)."""
 

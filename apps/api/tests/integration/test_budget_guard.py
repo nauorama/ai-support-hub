@@ -223,7 +223,8 @@ def test_fake_mode_rows_never_count(
     ticket_id, _ = _post(app)
 
     assert _ticket(budget_db, ticket_id)[0] == "pending_approval"
-    assert len(spy.requests) == 3  # triage, write and verify (P5-04)
+    # triage, write and verify (P5-04), then the retry's write and verify (P6-04)
+    assert len(spy.requests) == 5
     modes = run_sql(budget_db, "SELECT DISTINCT mode FROM llm_calls WHERE run_id IS NOT NULL")
     assert modes == [("fake",)]
 

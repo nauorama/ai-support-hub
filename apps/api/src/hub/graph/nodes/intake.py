@@ -17,8 +17,11 @@ hands the ticket off (reason `language`, owner decision). `tickets.language` get
 value. `pan_found`: G1 masked a card number in the message (row 1,
 `pan_in_message_with_fraud_words`).
 
-Not built yet: the customer profile (`core_get_customer`, phase 7), memory items and other open
-tickets (P6-05).
+Customer context (P6-05, ai-pipeline §9): up to 5 memory items that have not expired and the
+customer's other open tickets (id, intent, status), for `memory_shows_open_case` in `decide`.
+The customer is the ticket's own, never one a model named. `intake.done` gets their counts.
+
+Not built yet: the customer profile (`core_get_customer`, P7-04).
 """
 
 import re
@@ -26,10 +29,19 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from hub.audit import record
 from hub.db.models import Message
-from hub.db.repositories import MessageRepository, TicketRepository
+from hub.db.repositories import MemoryRepository, MessageRepository, TicketRepository
 from hub.domain.enums import ActorType, TicketStatus
+from hub.domain.memory import (
+    MEMORY_ITEMS,
+    OPEN_TICKETS,
+    CustomerContext,
+    MemoryItem,
+    OpenTicket,
+)
 from hub.graph.context import GraphContext, ids
 from hub.graph.state import InputFlags, TicketState
 from hub.graph.store import ticket
@@ -137,6 +149,29 @@ def intake_result(state: TicketState) -> IntakeResult:
     )
 
 
+async def customer_context(
+    session: AsyncSession, customer_id: uuid.UUID, ticket_id: uuid.UUID
+) -> CustomerContext:
+    memory = MemoryRepository(session)
+    items = await memory.active_for_customer(customer_id, limit=MEMORY_ITEMS)
+    others = await memory.open_tickets(customer_id, exclude=ticket_id, limit=OPEN_TICKETS)
+    return CustomerContext(
+        memory=[
+            MemoryItem(
+                ticket_id=str(item.ticket_id),
+                intent=intent,
+                summary=item.content,
+                created_at=item.created_at,
+            )
+            for item, intent in items
+        ],
+        open_tickets=[
+            OpenTicket(ticket_id=str(other.id), intent=other.intent, status=other.status)
+            for other in others
+        ],
+    )
+
+
 async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     ticket_id, run_id = ids(state)
     message_id = uuid.UUID(state["message_id"])
@@ -150,6 +185,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
         if found.status == TicketStatus.PROCESSING:
             found.language = found_language
             await repository.save(found)
+        context = await customer_context(session, found.customer_id, ticket_id)
         await record(
             session,
             actor_type=ActorType.AI,
@@ -164,6 +200,8 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                 "pii_placeholders": result.pii_counts,
                 "language": found_language,
                 "pan_found": pan_found(trigger),
+                "memory_items": len(context.memory),
+                "open_tickets": len(context.open_tickets),
             },
         )
     return TicketState(
@@ -177,4 +215,5 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             language=found_language,
             pan_found=pan_found(trigger),
         ),
+        customer_context=context,
     )
