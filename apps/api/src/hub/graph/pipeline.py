@@ -16,6 +16,8 @@ from typing import Any, Protocol
 from hub.db.session import Database
 from hub.domain.enums import LlmCallContext, TicketStatus
 from hub.graph.checkpoint import CheckpointStore
+from hub.graph.confidence import ConfidenceRule
+from hub.guardrails.policy import Policy
 from hub.kb.retriever import DEFAULT_TOP_K, KbChunk, SearchMode, SearchVisibility
 from hub.llm.budget import BudgetCheck
 from hub.llm.config import ModelsConfig
@@ -74,6 +76,9 @@ class Pipeline:
     budget: BudgetCheck
     triage_prompt: Prompt
     write_prompt: Prompt
+    # config/policy.yaml and config/confidence.json (ai-pipeline §6, P6-02).
+    policy: Policy
+    confidence_rule: ConfidenceRule
     context: LlmCallContext = LlmCallContext.ONLINE
     variant: str = VARIANT
     # The knowledge-base search of the RAG variants. None: the research step is degraded and
@@ -81,6 +86,9 @@ class Pipeline:
     retriever: KbSearch | None = None
     # The verify step of the RAG variants (P5-04); B0 has none.
     verify_prompt: Prompt | None = None
+    # The operator summary of a handoff (`handoff_summary`, role triage). None: handoffs get the
+    # fixed notice without a summary.
+    handoff_prompt: Prompt | None = None
     # Where the graph keeps its checkpoints. The app and the evaluation runner pass the Postgres
     # store (`CheckpointStore.postgres`); the in-memory default is for unit tests, which start
     # no database.

@@ -1,6 +1,7 @@
 """Output checks of the verify step (G7, P5-04): each code check fails and passes."""
 
 from collections.abc import Sequence
+from functools import partial
 
 import pytest
 from hypothesis import given
@@ -12,14 +13,18 @@ from hub.guardrails.output_checks import (
     DraftToCheck,
     InternalText,
     Violation,
-    check_draft,
-    forbidden_promises,
     looks_english,
     operator_text_violations,
 )
+from hub.guardrails.policy import load_policy
 from hub.kb.loader import read_kb
 
 from ._llm import ROOT
+
+# The patterns live in config/policy.yaml since P6-02 (`forbidden_promises`).
+PROMISES = load_policy(ROOT / "config" / "policy.yaml").promises
+check_draft = partial(oc.check_draft, promises=PROMISES)
+forbidden_promises = partial(oc.forbidden_promises, patterns=PROMISES)
 
 FILES = read_kb(ROOT / "data" / "kb")
 EXTERNAL = [c.text for f in FILES if f.visibility == Visibility.EXTERNAL for c in f.chunks]
@@ -240,7 +245,17 @@ def test_no_external_chunk_makes_a_forbidden_promise() -> None:
 
 
 def test_the_promise_patterns_can_be_passed_in() -> None:
-    assert forbidden_promises("free coffee", {"coffee": (r"\bcoffee\b",)}) == ["coffee"]
+    assert oc.forbidden_promises("free coffee", {"coffee": (r"\bcoffee\b",)}) == ["coffee"]
+
+
+def test_the_policy_file_holds_every_promise_group() -> None:
+    assert list(PROMISES) == [
+        "refund",
+        "limit_increase",
+        "unfreeze",
+        "restriction_reason",
+        "legal_advice",
+    ]
 
 
 # --- other model-written strings (missing information, proposed actions) ----------------------

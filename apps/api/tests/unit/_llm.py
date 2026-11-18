@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hub.domain.enums import LlmCallContext, LlmCallMode, LlmCallStatus, LlmNode
+from hub.graph.confidence import load_confidence
+from hub.guardrails.policy import load_policy
 from hub.llm.budget import BudgetCheck
 from hub.llm.config import ModelsConfig, load_models
 from hub.llm.gateway import Gateway, Provider
@@ -25,6 +27,8 @@ from hub.llm.schemas import (
 ROOT = Path(__file__).resolve().parents[4]
 MODELS_YAML = ROOT / "config" / "models.yaml"
 PRICING_YAML = ROOT / "config" / "pricing.yaml"
+POLICY = load_policy(ROOT / "config" / "policy.yaml")
+CONFIDENCE_RULE = load_confidence(ROOT / "config" / "confidence.json")
 
 CALL = CallContext(context=LlmCallContext.ONLINE, node=LlmNode.TRIAGE, prompt_version="v1")
 

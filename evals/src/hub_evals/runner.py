@@ -83,6 +83,7 @@ from hub.domain.enums import (
 from hub.domain.triage import TriageResult
 from hub.domain.verification import ClaimsAnswer
 from hub.graph.checkpoint import CheckpointStore
+from hub.graph.confidence import load_confidence
 from hub.graph.draft import WriterEvidence, writer_evidence
 from hub.graph.nodes.intake import ChatTurn, intake
 from hub.graph.nodes.triage import triage_messages
@@ -99,6 +100,7 @@ from hub.graph.pipeline import VARIANT as RAG_DEFAULT
 from hub.graph.pipeline import VARIANTS as WORKFLOW_VARIANTS
 from hub.graph.run import run_ticket
 from hub.guardrails.masking import MaskResult, mask
+from hub.guardrails.policy import load_policy
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
 from hub.kb.index import KbIndex, connect_qdrant, read_chunks
@@ -902,6 +904,10 @@ def build_pipeline(
         verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify")
         if variant != B0_VARIANT
         else None,
+        # No operator summary on handoffs: the evaluation measures routing and answers, and the
+        # summary would add a paid call per handoff (ADR-0018).
+        policy=load_policy(settings.policy_config),
+        confidence_rule=load_confidence(settings.confidence_config),
         context=LlmCallContext.EVAL,
         variant=variant,
         # The graph's checkpoints go to the evaluation database too (migration 0009 runs there).

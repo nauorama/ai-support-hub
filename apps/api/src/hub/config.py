@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     models_config: Path = Path("config/models.yaml")
     # Prompt files `prompts/<node>/v<N>.md`; the active versions are named in models.yaml.
     prompts_dir: Path = Path("prompts")
+    # Routing policy and the rule version of confidence (ai-pipeline §6, P6-02).
+    policy_config: Path = Path("config/policy.yaml")
+    confidence_config: Path = Path("config/confidence.json")
 
     mcp_server_url: str = "http://localhost:8001/mcp"
     mcp_server_token: SecretStr = SecretStr("")

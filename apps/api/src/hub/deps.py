@@ -13,7 +13,9 @@ from hub.auth.operator_session import OperatorSessionSigner
 from hub.config import Settings
 from hub.db.session import Database, connect
 from hub.graph.checkpoint import CheckpointStore
+from hub.graph.confidence import load_confidence
 from hub.graph.pipeline import VARIANT, KbSearch, Pipeline, RunTasks, write_prompt_for
+from hub.guardrails.policy import load_policy
 from hub.kb.service import EMBEDDING_CALL, KbServices, build_kb_services, index_counts
 from hub.llm.budget import BudgetGuard
 from hub.llm.gateway import build_gateway, embedder
@@ -59,8 +61,9 @@ class Container:
 def build_pipeline(
     settings: Settings, database: Database, retriever: KbSearch | None = None
 ) -> Pipeline:
-    """Gateway, budget guard and active prompts, loaded once: a broken config or prompt file
-    stops the start. One guard serves the gateway (every online call) and the run (its start).
+    """Gateway, budget guard, active prompts, policy and confidence rule, loaded once: a broken
+    config or prompt file stops the start. One guard serves the gateway (every online call)
+    and the run (its start).
     `retriever`: the knowledge-base search; without it every run is handed to a human."""
     budget = BudgetGuard(database, default_limit=Decimal(str(settings.daily_budget_usd)))
     gateway = build_gateway(settings, DbCallRecorder(database), budget)
@@ -71,6 +74,9 @@ def build_pipeline(
         triage_prompt=active_prompt(settings.prompts_dir, gateway.models, "triage"),
         write_prompt=write_prompt_for(settings.prompts_dir, gateway.models, VARIANT),
         verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify"),
+        handoff_prompt=active_prompt(settings.prompts_dir, gateway.models, "handoff_summary"),
+        policy=load_policy(settings.policy_config),
+        confidence_rule=load_confidence(settings.confidence_config),
         retriever=retriever,
         checkpoints=CheckpointStore.postgres(settings.database_url.get_secret_value()),
     )

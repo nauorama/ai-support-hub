@@ -59,6 +59,7 @@ from hub.domain.enums import (
     MessageRole,
     Resolution,
     Route,
+    RouteReason,
     TicketStatus,
     Urgency,
 )
@@ -72,7 +73,7 @@ IdempotencyKey = Annotated[uuid.UUID, Header(alias="Idempotency-Key")]
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
-OPERATOR_TAKEOVER = "operator_takeover"
+OPERATOR_TAKEOVER = RouteReason.OPERATOR_TAKEOVER.value
 # An operator may answer a ticket that waits for a human or was answered already. A draft that
 # waits (`pending_approval`) is answered with the draft endpoints (`console_drafts`).
 _REPLYABLE = frozenset({TicketStatus.HANDED_OFF, TicketStatus.ANSWERED})

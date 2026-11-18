@@ -8,12 +8,14 @@ text lives only in this request's memory: it is never logged, stored or put in a
 
 A new ticket starts a run of the workflow graph (`hub.graph.run`, P6-01) after the commit. The
 run is a task of its own, so a closed stream does not stop it; the stream relays its events:
-`ticket.created` → `run.status` (understanding, searching, writing, checking) → `message` (a
-placeholder system message) → `ticket.status` (`pending_approval`, or `handed_off` after an
-`error` event) → `done`, with a `: ping` comment every 10 s while the run works (sent by
-`_run_stream` itself: FastAPI's own 15 s keep-alive applies only to generator endpoints, which
-these are not). A follow-up message starts no run yet: without auto-reply, every ticket is owned
-by a human after its first run. Its stream and a ticket handed off because masking failed are
+`ticket.created` → `run.status` (understanding, searching, writing, checking) → `message` →
+`ticket.status` → `done` (api.md §4). The `message` is the one the run saved (the handoff notice
+or an auto-reply: the run sends its id, the stream sends the stored row, P6-02), or, when the run
+saved none (approval, or a run that failed before a notice), a placeholder system message;
+`error` comes before `ticket.status` when a node failed. A `: ping` comment goes out every 10 s
+while the run works (sent by `_run_stream` itself: FastAPI's own 15 s keep-alive applies only to
+generator endpoints, which these are not). A follow-up message starts no run yet (the ownership
+rule for follow-ups comes with P6-03). Its stream and a ticket handed off because masking failed are
 `ticket.created` → placeholder → (`ticket.status`) → `done`; a replay of the same request
 (`Idempotency-Key`) always carries the ticket's current status. The placeholder is not stored:
 it stands in for an answer and would otherwise leave invented history in every ticket.
@@ -155,6 +157,20 @@ def _stream(
     return _sse(events())
 
 
+async def _stored_message(
+    container: Container, ticket_id: uuid.UUID, data: dict[str, Any]
+) -> MessageOut | None:
+    """The customer view of a message the run saved, by the id in the run's event; None when
+    it is not a message of this ticket."""
+    if container.database is None:  # pragma: no cover - a run needs the database
+        return None
+    async with container.database.sessions() as session:
+        message = await MessageRepository(session).get_in_ticket(
+            ticket_id, uuid.UUID(str(data["message_id"]))
+        )
+        return None if message is None else await _message_out(session, message)
+
+
 def _sse(events: AsyncIterator[bytes]) -> EventSourceResponse:
     # No buffering in proxies, no caching: the events must reach the browser as they are sent.
     return EventSourceResponse(
@@ -182,7 +198,7 @@ def _run_stream(
 
     async def events() -> AsyncIterator[bytes]:
         yield _event("ticket.created", created)
-        status_sent = False
+        status_sent = message_sent = False
         while True:
             try:
                 item = await asyncio.wait_for(queue.get(), timeout=PING_INTERVAL_S)
@@ -192,9 +208,18 @@ def _run_stream(
             if item is None:
                 break
             name, data = item
+            if name == "message":
+                # A message the run saved (the handoff notice or an auto-reply): the run sends
+                # its id, the stream sends the customer view of the stored row.
+                stored = await _stored_message(container, ticket_id, data)
+                if stored is None:
+                    continue
+                message_sent = True
+                data = stored.model_dump(mode="json")
             if name == "ticket.status":
                 status_sent = True
-                yield _event("message", _placeholder().model_dump(mode="json"))
+                if not message_sent:
+                    yield _event("message", _placeholder().model_dump(mode="json"))
             yield _event(name, data)
         if not status_sent:
             # A run that ended without a status (it crashed in a way `run_ticket` does not

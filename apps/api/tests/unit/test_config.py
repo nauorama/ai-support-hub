@@ -66,13 +66,19 @@ def test_app_starts_with_a_valid_env_file(tmp_path: Path, monkeypatch: pytest.Mo
     _write_env(
         tmp_path,
         "APP_ENV=test\nCORE_ANCHOR_DATE=2026-11-12\n"
-        f"MODELS_CONFIG={ROOT / 'config' / 'models.yaml'}\nPROMPTS_DIR={ROOT / 'prompts'}\n",
+        f"MODELS_CONFIG={ROOT / 'config' / 'models.yaml'}\nPROMPTS_DIR={ROOT / 'prompts'}\n"
+        f"POLICY_CONFIG={ROOT / 'config' / 'policy.yaml'}\n"
+        f"CONFIDENCE_CONFIG={ROOT / 'config' / 'confidence.json'}\n",
     )
     monkeypatch.chdir(tmp_path)
     app = create_app()
     assert app.state.container.settings.core_anchor_date == date(2026, 11, 12)
     assert app.state.container.pipeline is not None
     assert app.state.container.pipeline.write_prompt.version == "write/v2"
+    assert app.state.container.pipeline.policy.injection.high_score == 0.5
+    handoff_prompt = app.state.container.pipeline.handoff_prompt
+    assert handoff_prompt is not None
+    assert handoff_prompt.version == "handoff_summary/v1"
     # The run searches the knowledge base through the container's retriever (P5-03).
     assert app.state.container.pipeline.retriever is app.state.container.kb.retriever
 

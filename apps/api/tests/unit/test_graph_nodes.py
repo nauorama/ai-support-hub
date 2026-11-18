@@ -14,21 +14,33 @@ from langgraph.errors import GraphInterrupt
 from langgraph.runtime import Runtime
 
 from hub.domain.draft import Citation, DraftAnswer
+from hub.domain.enums import SettingKey
 from hub.domain.triage import TriageResult
 from hub.domain.verification import ClaimCheck, ClaimsAnswer, Verification
 from hub.graph import build
+from hub.graph import draft as draft_module
 from hub.graph.checkpoint import CheckpointStore, serializer
 from hub.graph.context import GraphContext, error_class, failure_reasons
 from hub.graph.nodes import act, decide, handoff_prep, policy_gate, research, verify, write
 from hub.graph.pipeline import B0_VARIANT, VARIANT, KbUnavailableError, Pipeline, write_prompt_for
 from hub.graph.state import STATE_TYPES, Evidence, InputFlags, RouteName, TicketState, run_input
 from hub.guardrails.injection import InjectionResult
+from hub.guardrails.masking import MaskResult
 from hub.guardrails.output_checks import InternalText
 from hub.kb.retriever import KbChunk, SearchMode, SearchVisibility
 from hub.llm.prompts import active_prompt
 from hub.llm.schemas import BudgetExceededError, LlmUnavailableError, StructuredOutputError
 
-from ._llm import ROOT, MemoryRecorder, ScriptedProvider, make_gateway, ok, real_models
+from ._llm import (
+    CONFIDENCE_RULE,
+    POLICY,
+    ROOT,
+    MemoryRecorder,
+    ScriptedProvider,
+    make_gateway,
+    ok,
+    real_models,
+)
 
 HAIKU = "anthropic/claude-haiku-5-5"
 PROMPTS = ROOT / "prompts"
@@ -95,6 +107,8 @@ def _pipeline(
         budget=NoBudget(),
         triage_prompt=active_prompt(PROMPTS, models, "triage"),
         write_prompt=write_prompt_for(PROMPTS, models, variant),
+        policy=POLICY,
+        confidence_rule=CONFIDENCE_RULE,
         verify_prompt=active_prompt(PROMPTS, models, "verify") if variant != B0_VARIANT else None,
         variant=variant,
         retriever=retriever,
@@ -121,7 +135,9 @@ def _state(**changes: Any) -> TicketState:  # noqa: ANN401 - any field value
             message_for_llm="How long does a SEPA withdrawal take?",
             history_for_llm="(no earlier messages)",
             input_flags=InputFlags(
-                injection=InjectionResult(score=0.0, patterns=[]), pii_placeholders={}
+                injection=InjectionResult(score=0.0, patterns=[]),
+                pii_placeholders={},
+                language="en",
             ),
         )
     )
@@ -138,6 +154,21 @@ def _answer(**changes: Any) -> DraftAnswer:  # noqa: ANN401 - any field value
         "proposed_actions": [],
     }
     return DraftAnswer(**(values | changes))
+
+
+def _triage(**changes: Any) -> TriageResult:  # noqa: ANN401 - any field value
+    values: dict[str, Any] = {
+        "intent": "withdrawal_issue",
+        "secondary_intent": None,
+        "urgency": "normal",
+        "wants_human": False,
+        "reports_unauthorised_activity": False,
+        "is_complaint_or_legal": False,
+        "asks_for_action": "none",
+        "injection_suspected": False,
+        "summary": "Asks how long a SEPA withdrawal takes.",
+    }
+    return TriageResult(**(values | changes))
 
 
 def _evidence(hits: list[KbChunk]) -> Evidence:
@@ -396,8 +427,19 @@ async def test_policy_gate_hands_off_after_a_failed_intake_or_triage() -> None:
     assert update == {"route": "handoff", "route_reasons": ["budget_exceeded"]}
 
 
-async def test_policy_gate_lets_everything_else_continue_until_the_policy_rules_exist() -> None:
-    assert await policy_gate.run(_state(), _ctx()) == {}
+async def test_policy_gate_lets_a_ticket_no_hard_rule_matches_continue() -> None:
+    assert await policy_gate.run(_state(triage=_triage()), _ctx()) == {}
+
+
+async def test_policy_gate_hands_off_on_a_hard_rule_with_every_matching_reason() -> None:
+    triage = _triage(intent="card_lost_stolen", wants_human=True)
+    update = await policy_gate.run(_state(triage=triage), _ctx())
+    assert update == {"route": "handoff", "route_reasons": ["policy_intent", "customer_request"]}
+
+
+async def test_policy_gate_hands_off_without_a_triage_result() -> None:
+    update = await policy_gate.run(_state(), _ctx())
+    assert update == {"route": "handoff", "route_reasons": ["system_error"]}
 
 
 # --- research -------------------------------------------------------------------------------
@@ -561,9 +603,82 @@ async def test_b0_and_a_run_without_a_draft_have_nothing_to_verify() -> None:
 # --- decide and act -------------------------------------------------------------------------
 
 
-async def test_decide_sends_every_draft_to_approval_until_the_routing_table_exists() -> None:
-    update = await decide.run(_state(draft=_answer(), verification=verify.unavailable()), _ctx())
-    assert update == {"route": "approval", "route_reasons": ["auto_reply_off"]}
+PASSED = Verification(
+    claims=[ClaimCheck(claim="1 business day", supported=True, source_id="withdrawal-times#0")],
+    groundedness=1.0,
+    policy_violations=[],
+    passed=True,
+)
+AUTO_REPLY_ON = {
+    SettingKey.AUTO_REPLY_ENABLED: True,
+    SettingKey.CONFIDENCE_THRESHOLD: 0.95,
+    SettingKey.INTENT_ALLOWLIST: ["withdrawal_issue"],
+}
+
+
+def _settings(monkeypatch: pytest.MonkeyPatch, values: dict[SettingKey, Any]) -> None:
+    async def read(pipeline: Pipeline) -> dict[SettingKey, Any]:
+        return dict(values)
+
+    monkeypatch.setattr(decide, "read_settings", read)
+
+
+def _verified(**changes: Any) -> TicketState:  # noqa: ANN401 - any field value
+    values: dict[str, Any] = {
+        "triage": _triage(),
+        "evidence": _evidence(HITS),
+        "draft": _answer(),
+        "verification": PASSED,
+    }
+    return _state(**(values | changes))
+
+
+async def test_decide_auto_replies_only_when_the_settings_allow_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, AUTO_REPLY_ON)
+    update = await decide.run(_verified(), _ctx())
+    assert (update["route"], update["route_reasons"], update["confidence"]) == (
+        "auto_reply",
+        [],
+        1.0,
+    )
+    assert update["features"]["groundedness"] == 1.0
+
+    _settings(monkeypatch, {})  # missing settings: the safe side
+    update = await decide.run(_verified(), _ctx())
+    assert (update["route"], update["route_reasons"]) == ("approval", ["auto_reply_off"])
+
+
+async def test_decide_sends_an_unverified_draft_to_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, AUTO_REPLY_ON)
+    update = await decide.run(_verified(verification=verify.unavailable()), _ctx())
+    assert (update["route"], update["route_reasons"]) == ("approval", ["unsupported_claims"])
+
+
+async def test_decide_hands_off_when_masking_model_text_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P3-05a review, note 3: a failed G1 mask is never auto-replied or left for approval."""
+    _settings(monkeypatch, AUTO_REPLY_ON)
+
+    def failed(text: str) -> MaskResult:
+        return MaskResult(text="[masked]", counts={}, failed=True)
+
+    monkeypatch.setattr(draft_module, "mask", failed)
+    update = await decide.run(_verified(), _ctx())
+    assert (update["route"], update["route_reasons"]) == ("handoff", ["masking_failed"])
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [(0.8, 0.8), (1, 1.0), (True, decide.NEVER), ("x", decide.NEVER)]
+)
+def test_a_broken_threshold_setting_never_allows_an_auto_reply(
+    value: object, expected: float
+) -> None:
+    assert decide.threshold(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -576,11 +691,8 @@ async def test_decide_sends_every_draft_to_approval_until_the_routing_table_exis
 )
 async def test_decide_hands_off_after_a_failed_node(errors: list[str], reasons: list[str]) -> None:
     update = await decide.run(_state(draft=_answer(), errors=errors), _ctx())
-    assert update == {"route": "handoff", "route_reasons": reasons}
-
-
-async def test_decide_never_auto_replies_yet() -> None:
-    assert (await decide.run(_state(draft=_answer()), _ctx()))["route"] != "auto_reply"
+    assert (update["route"], update["route_reasons"]) == ("handoff", reasons)
+    assert update["confidence"] is None
 
 
 async def test_act_has_nothing_to_run_before_the_review_decision_exists() -> None:

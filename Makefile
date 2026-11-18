@@ -43,10 +43,12 @@ lint:
 # hub.domain holds the ticket status transitions and the seed rules; hub.audit.chain the audit
 # hash chain and the masking of audit details; hub.auth the password hashing, the operator
 # session and CSRF token, the role rules and the login lockout; hub.llm.gateway the outbound card
-# scan (G2), retries and fallback; hub.llm.pricing the cost of every call. Add tools/permissions
+# scan (G2), retries and fallback; hub.llm.pricing the cost of every call; hub.guardrails.policy,
+# hub.graph.routing and hub.graph.confidence the routing decision (P6-02). Add tools/permissions
 # here when it is built.
 SAFETY_COVERAGE := --cov=hub.guardrails --cov=hub.domain --cov=hub.audit.chain --cov=hub.auth \
 	--cov=hub.llm.gateway --cov=hub.llm.structured --cov=hub.llm.pricing --cov=hub.llm.budget \
+	--cov=hub.graph.routing --cov=hub.graph.confidence \
 	--cov-report=term-missing:skip-covered --cov-fail-under=95
 
 test:

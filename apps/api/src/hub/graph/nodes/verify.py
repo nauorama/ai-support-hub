@@ -108,7 +108,9 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     evidence = await evidence_for_writer(pipeline, research.chunks if research else ())
     intake = intake_result(state)
     violations = check_draft(
-        draft_to_check(answer, evidence, intake), internal=await internal_text(pipeline)
+        draft_to_check(answer, evidence, intake),
+        promises=pipeline.policy.promises,
+        internal=await internal_text(pipeline),
     )
     if violations:
         return TicketState(verification=failed_checks(violations))

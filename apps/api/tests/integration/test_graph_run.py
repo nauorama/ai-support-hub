@@ -266,11 +266,12 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         " WHERE id = %s",
         ticket_id,
     )
+    # P6-02: the recorded verify answer finds one unsupported claim (row 4).
     assert (status, intent, route, reasons) == (
         "pending_approval",
         "withdrawal_issue",
         "approval",
-        ["auto_reply_off"],
+        ["unsupported_claims"],
     )
     assert urgency in {"low", "normal"}
     assert summary
@@ -281,6 +282,18 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         " input_tokens, finished_at FROM runs WHERE ticket_id = %s",
         ticket_id,
     )
+    # The rule version of confidence (P6-02): groundedness, on the run and on the ticket.
+    confidence, features, ticket_confidence = _one(
+        run_db,
+        "SELECT r.confidence, r.features, t.confidence FROM runs r JOIN tickets t"
+        " ON t.id = r.ticket_id WHERE r.ticket_id = %s",
+        ticket_id,
+    )
+    assert confidence == ticket_confidence
+    assert confidence is not None
+    assert 0 < confidence < 1
+    assert features["top_score"] > 0
+    assert features["n_citations"] >= 1
     assert (run_status, run_route, graph) == ("completed", "approval", GRAPH_VERSION)
     assert versions == {"triage": "v1", "write": "v2", "verify": "v1"}
     assert models == {
@@ -382,7 +395,10 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     assert rows["draft.created"]["prompt_version"] == "write/v2"
     assert rows["draft.created"]["variant"] == VARIANT
     assert [c["chunk_id"] for c in rows["draft.created"]["chunks"]] == EVIDENCE["run_01"]
-    assert rows["route.decided"]["reasons"] == ["auto_reply_off"]
+    assert rows["route.decided"]["reasons"] == ["unsupported_claims"]
+    assert rows["route.decided"]["confidence"] is not None
+    assert "groundedness" in rows["route.decided"]["features"]
+    assert (rows["intake.done"]["language"], rows["intake.done"]["pan_found"]) == ("en", False)
     assert rows["route.decided"]["prompt_versions"] == {
         "triage": "v1",
         "write": "v2",
@@ -412,30 +428,44 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     assert ticket_id
 
 
-def test_a_question_outside_the_kb_gets_a_draft_that_cannot_answer(
-    app: FastAPI, run_db: Urls
-) -> None:
-    ticket_id, events = _post(customer_client(app), NO_ANSWER)
+def test_a_question_outside_the_kb_is_handed_off_with_a_notice(app: FastAPI, run_db: Urls) -> None:
+    """Row 3 (P6-02): a draft that cannot answer hands the ticket off (`no_kb_answer`). The
+    customer gets the notice in the stream; the draft is kept for the operator as
+    `superseded`."""
+    customer = customer_client(app)
+    ticket_id, events = _post(customer, NO_ANSWER)
 
-    assert events[-2] == ("ticket.status", {"status": "pending_approval"})
-    can_answer, body, citations, missing = _one(
+    assert [name for name, _ in events][-3:] == ["message", "ticket.status", "done"]
+    assert events[-2] == ("ticket.status", {"status": "handed_off"})
+    notice = events[-3][1]
+    assert notice["role"] == "system"
+    assert notice["body"].startswith("I could not find the answer to your question")
+    assert "business hours" in notice["body"] or "minutes" in notice["body"]
+    # The notice is stored: the chat shows it after a reload.
+    stored = customer.get(f"/api/v1/tickets/{ticket_id}/messages").json()["items"]
+    assert stored[-1]["id"] == notice["id"]
+    assert stored[-1]["body"] == notice["body"]
+    assert _one(
+        run_db, "SELECT status, last_route, route_reasons FROM tickets WHERE id = %s", ticket_id
+    ) == ("handed_off", "handoff", ["no_kb_answer"])
+
+    can_answer, body, citations, missing, status = _one(
         run_db,
-        "SELECT can_answer, body, citations, missing_information FROM drafts WHERE ticket_id = %s",
+        "SELECT can_answer, body, citations, missing_information, status FROM drafts"
+        " WHERE ticket_id = %s",
         ticket_id,
     )
-    assert (can_answer, body, citations) == (False, "", [])
+    assert (can_answer, body, citations, status) == (False, "", [], "superseded")
     assert missing
-    # P5-04: the first code check fails, so the LLM check is never called.
+    # P5-04: the first code check fails, so the LLM check is never called. The operator summary
+    # has no recording in fake mode: the notice goes out without it (ai-pipeline §3).
     run_id, groundedness = _one(
         run_db, "SELECT run_id, groundedness FROM drafts WHERE ticket_id = %s", ticket_id
     )
     assert groundedness is None
-    assert [
-        node
-        for (node,) in run_sql(
-            run_db, "SELECT node FROM llm_calls WHERE run_id = %s ORDER BY created_at", run_id
-        )
-    ] == ["triage", "write"]
+    assert run_sql(
+        run_db, "SELECT node, status FROM llm_calls WHERE run_id = %s ORDER BY created_at", run_id
+    ) == [("triage", "ok"), ("write", "ok"), ("handoff_prep", "error")]
     (details,) = run_sql(
         run_db,
         "SELECT details FROM audit_log WHERE action = 'verify.done' AND details->>'run_id' = %s",
@@ -443,6 +473,12 @@ def test_a_question_outside_the_kb_gets_a_draft_that_cannot_answer(
     )[0]
     assert details["policy_violations"] == ["cannot_answer"]
     assert (details["passed"], details["llm_check"]) == (False, False)
+    sent = _one(run_db, "SELECT details FROM audit_log WHERE action = 'message.sent'")[0]
+    assert (sent["kind"], sent["reasons"], sent["operator_summary"]) == (
+        "handoff_notice",
+        ["no_kb_answer"],
+        False,
+    )
 
 
 # --- a run that fails ------------------------------------------------------------------------
@@ -453,7 +489,9 @@ def test_a_failed_model_call_hands_the_ticket_to_a_human(app: FastAPI, run_db: U
     ticket_id, events = _post(customer_client(app), NOT_RECORDED)
 
     names = [name for name, _ in events]
-    assert names == ["ticket.created", "run.status", "error", "message", "ticket.status", "done"]
+    # The handoff notice is saved and streamed by `handoff_prep`, before the run ends with `error`.
+    assert names == ["ticket.created", "run.status", "message", "error", "ticket.status", "done"]
+    assert events[2][1]["body"].startswith("I could not prepare an answer")
     error = dict(events)["error"]
     assert (error["code"], error["status"], error["detail"]) == (
         "internal_error",
@@ -474,27 +512,17 @@ def test_a_failed_model_call_hands_the_ticket_to_a_human(app: FastAPI, run_db: U
         "FixtureMissing",
     )
     assert run_sql(run_db, "SELECT 1 FROM drafts WHERE ticket_id = %s", ticket_id) == []
-    assert _actions(run_db)[-1] == "route.decided"
+    assert _actions(run_db)[-2:] == ["route.decided", "message.sent"]
 
 
 async def test_a_run_without_a_search_is_degraded_and_the_draft_cannot_answer(
     run_db: Urls, qdrant: str
 ) -> None:
     """ai-pipeline §3 (P6-01): a failed research step continues with what it has. Without a
-    search the writer has nothing to cite; its draft waits for the operator, and the audit
-    record says the research was degraded. (The linear run handed such a ticket off.)"""
+    search the writer has nothing to cite, so the draft cannot answer and the ticket is handed
+    off (row 3, P6-02); the audit record says the research was degraded. The operator summary
+    replaces the triage summary and never reaches the customer."""
     ticket_id, message_id = _ticket_with_message(run_db, SEPA)
-    triage = {
-        "intent": "withdrawal_issue",
-        "secondary_intent": None,
-        "urgency": "normal",
-        "wants_human": False,
-        "reports_unauthorised_activity": False,
-        "is_complaint_or_legal": False,
-        "asks_for_action": "none",
-        "injection_suspected": False,
-        "summary": "Asks how long a SEPA withdrawal takes.",
-    }
     draft = {
         "can_answer": False,
         "missing_information": "The sources do not say how long a SEPA withdrawal takes.",
@@ -502,26 +530,101 @@ async def test_a_run_without_a_search_is_degraded_and_the_draft_cannot_answer(
         "citations": [],
         "proposed_actions": [],
     }
-    provider = _Scripted([json.dumps(triage), json.dumps(draft)])
+    summary = {
+        "problem": "SEPA withdrawal of 420 EUR from yesterday has not arrived.",
+        "found": "Nothing yet.",
+        "missing": "Check the withdrawal status and the bank details.",
+    }
+    provider = _Scripted([json.dumps(TRIAGE), json.dumps(draft), json.dumps(summary)])
 
     outcome, emitted = await _run(
         run_db, qdrant, ticket_id, message_id, provider=provider, search=False
     )
 
-    assert (outcome.failed, outcome.ticket_status) == (False, TicketStatus.PENDING_APPROVAL)
+    assert (outcome.failed, outcome.ticket_status) == (False, TicketStatus.HANDED_OFF)
     assert [data["step"] for name, data in emitted if name == "run.status"] == [
         "understanding",
         "searching",
         "writing",
         "checking",
     ]
-    assert provider.answers == []  # the code check refused the empty answer: no verify call
-    can_answer, evidence = _one(
-        run_db, "SELECT can_answer, evidence FROM drafts WHERE ticket_id = %s", ticket_id
+    assert provider.answers == []  # no verify call: the code check refused the empty answer
+    can_answer, evidence, status = _one(
+        run_db, "SELECT can_answer, evidence, status FROM drafts WHERE ticket_id = %s", ticket_id
     )
-    assert (can_answer, evidence["chunks"]) == (False, [])
+    assert (can_answer, evidence["chunks"], status) == (False, [], "superseded")
     created = _one(run_db, "SELECT details FROM audit_log WHERE action = 'draft.created'")[0]
     assert created["research_degraded"] is True
+
+    stored_summary, reasons = _one(
+        run_db, "SELECT summary, route_reasons FROM tickets WHERE id = %s", ticket_id
+    )
+    assert reasons == ["no_kb_answer"]
+    assert stored_summary == (
+        f"Problem: {summary['problem']}\nFound: {summary['found']}\nMissing: {summary['missing']}"
+    )
+    # The summary is for operators only: not in the notice, not anywhere in the stream.
+    [(notice,)] = run_sql(run_db, "SELECT body FROM messages WHERE role = 'system'")
+    assert summary["missing"] not in notice
+    assert all(summary["problem"] not in json.dumps(data) for _, data in emitted)
+    [(version,)] = run_sql(
+        run_db,
+        "SELECT prompt_version FROM llm_calls WHERE run_id = %s AND node = 'handoff_prep'",
+        outcome.run_id,
+    )
+    assert version == "handoff_summary/v1"
+
+
+LOST_CARD = "I lost my card on the train this morning. What do I do?"
+
+
+def test_a_lost_card_ticket_gets_the_freeze_step_and_a_handoff_notice_in_the_stream(
+    run_db: Urls, qdrant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Done when of P6-02, through the API: triage says `card_lost_stolen`, row 1 hands the
+    ticket off before research, and the stream carries the notice with the freeze step."""
+    lost = {**TRIAGE, "intent": "card_lost_stolen", "urgency": "high"}
+    summary = {"problem": "Card lost this morning.", "found": "Nothing yet.", "missing": "All."}
+    provider = _Scripted([json.dumps(lost), json.dumps(summary)])
+    _truncate(run_db)
+    add_customer(run_db)
+    container = _container(run_db, qdrant)
+    assert container.pipeline is not None
+    pipeline = dataclasses.replace(
+        container.pipeline,
+        gateway=dataclasses.replace(container.pipeline.gateway, provider=provider),
+    )
+    application = create_app(dataclasses.replace(container, pipeline=pipeline))
+    with TestClient(application):
+        ticket_id, events = _post(customer_client(application), LOST_CARD)
+
+    names = [name for name, _ in events]
+    assert names == [
+        "ticket.created",
+        "run.status",
+        "message",
+        "ticket.status",
+        "done",
+    ]  # no searching, writing or checking: the policy gate handed off before research
+    notice = events[2][1]
+    assert notice["role"] == "system"
+    assert notice["is_ai_generated"] is False
+    assert notice["body"].startswith(
+        "This needs a support specialist, so I have passed your message to our team. "
+        "Please freeze your card in the app now."
+    )
+    assert "within 30 minutes" in notice["body"] or "within 60 minutes" in notice["body"]
+    assert summary["problem"] not in notice["body"]
+    assert events[3][1] == {"status": "handed_off"}
+    assert _one(
+        run_db, "SELECT status, route_reasons, summary FROM tickets WHERE id = %s", ticket_id
+    ) == (
+        "handed_off",
+        ["policy_intent"],
+        "Problem: Card lost this morning.\nFound: Nothing yet.\nMissing: All.",
+    )
+    assert provider.answers == []
+    assert run_sql(run_db, "SELECT 1 FROM drafts WHERE ticket_id = %s", ticket_id) == []
 
 
 def _ticket_with_message(
@@ -1085,9 +1188,9 @@ async def test_human_review_alone_stores_the_draft_for_the_operator(
     )
     try:
         update = await human_review_node.run(state, ctx)
-        handoff_state = state.copy()
-        handoff_state["route"] = "handoff"
-        skipped = await human_review_node.run(handoff_state, ctx)
+        no_draft = state.copy()
+        no_draft["draft"] = None
+        skipped = await human_review_node.run(no_draft, ctx)
     finally:
         await database.dispose()
     assert update == {"ticket_status": "pending_approval" if status == "processing" else status}
@@ -1142,5 +1245,5 @@ async def test_a_failure_after_the_draft_was_stored_keeps_run_and_ticket_in_agre
     assert emitted[-1] == ("ticket.status", {"status": "pending_approval"})
     assert _one(
         run_db, "SELECT status, route, route_reasons, error FROM runs WHERE id = %s", outcome.run_id
-    ) == ("failed", "approval", ["auto_reply_off"], "ConnectionError")
+    ) == ("failed", "approval", ["unsupported_claims"], "ConnectionError")
     assert _one(run_db, "SELECT status FROM drafts WHERE ticket_id = %s", ticket_id) == ("pending",)

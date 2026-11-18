@@ -46,6 +46,7 @@ from hub.graph.nodes.write import write_messages
 from hub.graph.pipeline import SEARCH_MODES, SEARCH_TOP_K, VARIANT
 from hub.guardrails.masking import mask
 from hub.guardrails.output_checks import InternalText, check_draft
+from hub.guardrails.policy import load_policy
 from hub.kb.loader import KbFile, read_kb
 from hub.kb.retriever import KbChunk
 from hub.llm.config import ModelsConfig, load_models
@@ -59,6 +60,7 @@ FIXTURES = ROOT / "apps" / "api" / "tests" / "fixtures"
 TICKETS = FIXTURES / "run" / "tickets.jsonl"
 EVIDENCE = FIXTURES / "run" / "evidence.json"
 REQUESTS = FIXTURES / "llm" / "requests"
+PROMISES = load_policy(ROOT / "config" / "policy.yaml").promises
 KB_DIR = ROOT / "data" / "kb"
 GENERATED = re.compile(r"run_[0-9]{2}_(triage|write|verify)\.json")
 VERIFY_CASES = FIXTURES / "verify" / "cases.jsonl"
@@ -177,7 +179,7 @@ def request_specs() -> dict[str, dict[str, Any]]:
         }
         answer = recorded_answer(models, specs[f"{ticket.id}_write.json"])
         if answer is None or check_draft(
-            draft_to_check(answer, writer_evidence, result), internal=internal
+            draft_to_check(answer, writer_evidence, result), promises=PROMISES, internal=internal
         ):
             continue
         specs[f"{ticket.id}_verify.json"] = {

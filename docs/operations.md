@@ -54,6 +54,8 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `LLM_MODE` | `real` \| `fake` | |
 | `MODELS_CONFIG` | `config/models.yaml` | |
 | `PROMPTS_DIR` | `prompts` | prompt files; the active versions are in `MODELS_CONFIG` |
+| `POLICY_CONFIG` | `config/policy.yaml` | routing rules, notice texts, support hours ([AI pipeline](ai-pipeline.md) §6); a broken file stops the start |
+| `CONFIDENCE_CONFIG` | `config/confidence.json` | rule version of confidence (AI pipeline §6) |
 | `MCP_SERVER_URL`, `MCP_SERVER_TOKEN` | `http://mcp:8001/mcp` | |
 | `JIRA_MODE`, `SLACK_MODE` | `mock` | only `mock` ([ADR-0019](adr/0019-scope-cuts.md)). The settings still accept `real` together with `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY`, `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID`; P7-02 removes them |
 | `SESSION_SECRET` | random 32 bytes | |

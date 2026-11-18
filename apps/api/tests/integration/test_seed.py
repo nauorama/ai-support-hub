@@ -18,11 +18,14 @@ from hub.auth.passwords import verify_password
 from hub.db.models import AuditLog, Customer, Operator, Setting
 from hub.domain.enums import SettingKey
 from hub.domain.seed import SeedData
+from hub.guardrails.policy import load_policy
 from hub.observability.readiness import libpq_url
 from hub.seed import SeedError, SeedReport, default_settings, load_seed, read_seed
 
 from ._compose import ROOT
 from ._db import app_url, as_user, migrate
+
+POLICY = load_policy(ROOT / "config" / "policy.yaml")
 
 DATABASE = "hub_seed_test"
 PASSWORD = "demo-password-for-tests"  # noqa: S105 - test value, not a real credential
@@ -66,7 +69,9 @@ def seed() -> SeedData:
 
 async def _load(engine: AsyncEngine, seed: SeedData, password: str = PASSWORD) -> SeedReport:
     async with AsyncSession(engine, expire_on_commit=False) as session, session.begin():
-        return await load_seed(session, seed, operator_password=password, daily_budget_usd=BUDGET)
+        return await load_seed(
+            session, seed, operator_password=password, daily_budget_usd=BUDGET, policy=POLICY
+        )
 
 
 async def _count(engine: AsyncEngine, model: type[object]) -> int:
@@ -86,7 +91,7 @@ async def test_first_load_writes_customers_operators_settings_and_audit(
         settings = {s.key: s.value for s in (await session.scalars(select(Setting))).all()}
         operators = (await session.scalars(select(Operator))).all()
         actions = (await session.scalars(select(AuditLog.action))).all()
-    assert settings == default_settings(BUDGET)
+    assert settings == default_settings(BUDGET, POLICY)
     assert settings[SettingKey.AUTO_REPLY_ENABLED] is False
     assert all(verify_password(o.password_hash, PASSWORD) for o in operators)
     assert all(PASSWORD not in o.password_hash for o in operators)

@@ -43,9 +43,6 @@ DATA_TAGS: tuple[str, ...] = (
     "tool_calls",
 )
 
-# Starting value (docs/security.md §3, G4); P6-02 moves it into config/policy.yaml.
-HIGH_INJECTION_SCORE = 0.5
-
 # Look-alikes NFKD does not fold: Cyrillic and Greek letters that look like Latin ones, and
 # angle brackets (single guillemets, CJK and mathematical angle brackets, modifier letters).
 _LOOKALIKES = str.maketrans(
@@ -138,12 +135,9 @@ class InjectionResult(BaseModel):
     score: float
     patterns: list[str]
 
-    @property
-    def high(self) -> bool:
-        return self.score >= HIGH_INJECTION_SCORE
 
-
-# Pattern groups and their weights. A single strong group reaches HIGH_INJECTION_SCORE; a weak
+# Pattern groups and their weights. A single strong group reaches the high score of
+# config/policy.yaml (`injection.high_score`, 0.5, which hands the ticket off); a weak
 # one (0.3, 0.4) needs a second group. All groups but `fake_markup` run on the folded text
 # with every run of whitespace made one space; `fake_markup` keeps the line breaks.
 _W = r"\W+"  # between two words: spaces, line breaks, dashes, quotes

@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 
 from hub.domain.enums import Intent, SettingKey
+from hub.guardrails.policy import load_policy
 from hub.seed import SEED_FILES, SeedError, default_settings, main, read_seed
+
+from ._llm import ROOT
 
 SEED_DIR = Path(__file__).resolve().parents[4] / "data" / "seed"
 
@@ -73,7 +76,8 @@ def test_an_explicit_error_codes_path_is_used(seed_dir: Path, tmp_path: Path) ->
 
 
 def test_default_settings() -> None:
-    settings = default_settings(2.5)
+    policy = load_policy(ROOT / "config" / "policy.yaml")
+    settings = default_settings(2.5, policy)
     assert set(settings) == set(SettingKey)
     assert settings[SettingKey.AUTO_REPLY_ENABLED] is False
     assert settings[SettingKey.CONFIDENCE_THRESHOLD] == 0.95
@@ -82,6 +86,8 @@ def test_default_settings() -> None:
     # Never the intents that always go to a human (docs/ai-pipeline.md §6).
     assert not {Intent.ACCOUNT_RESTRICTED, Intent.CARD_LOST_STOLEN, Intent.OTHER} & set(allowlist)
     assert len(allowlist) == 7
+    # Read from config/policy.yaml (P6-02): the setting and the policy cannot drift.
+    assert allowlist == policy.auto_reply_allowlist.intents
 
 
 def test_main_reports_a_seed_error_without_a_traceback(

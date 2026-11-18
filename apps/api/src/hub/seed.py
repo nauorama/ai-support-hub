@@ -25,36 +25,28 @@ from hub.config import Settings, SettingsError, load_settings
 from hub.db.models import Customer, Operator, Setting
 from hub.db.repositories import CustomerRepository, OperatorRepository
 from hub.db.session import connect
-from hub.domain.enums import ActorType, Intent, SettingKey
+from hub.domain.enums import ActorType, SettingKey
 from hub.domain.kb import ERROR_CODES_FILE, parse_error_codes
 from hub.domain.seed import SeedData, parse_seed, validate_seed
+from hub.guardrails.policy import Policy, PolicyError, load_policy
 
 ACTOR = "make-seed"
 SEED_DIR = Path("data/seed")
 SEED_FILES = ("customers.json", "cards.json", "transactions.json", "operators.json")
 
-# First value of the allow-list: the `auto_reply_allowlist` of docs/ai-pipeline.md §6.
-# Hard-coded until `config/policy.yaml` exists (deferred to P6-02, docs/build-plan.md).
-DEFAULT_INTENT_ALLOWLIST = (
-    Intent.PAYMENT_PENDING,
-    Intent.WITHDRAWAL_ISSUE,
-    Intent.CARD_DECLINED,
-    Intent.KYC_VERIFICATION,
-    Intent.FEES_FX,
-    Intent.LIMITS,
-    Intent.ACCOUNT_MANAGEMENT,
-)
-# Until phase 9 there is no trained confidence model: auto-reply starts off and the threshold
-# is 0.95 (docs/ai-pipeline.md §6).
+# Until a confidence model is trained (never in budget mode, ADR-0018) auto-reply starts off and
+# the threshold is 0.95 (docs/ai-pipeline.md §6).
 DEFAULT_CONFIDENCE_THRESHOLD = 0.95
 
 
-def default_settings(daily_budget_usd: float) -> dict[SettingKey, Any]:
+def default_settings(daily_budget_usd: float, policy: Policy) -> dict[SettingKey, Any]:
+    """The first value of every setting. The intent allow-list is the `auto_reply_allowlist` of
+    `config/policy.yaml`, so the two cannot drift (P6-02)."""
     return {
         SettingKey.AUTO_REPLY_ENABLED: False,
         SettingKey.CONFIDENCE_THRESHOLD: DEFAULT_CONFIDENCE_THRESHOLD,
         SettingKey.DAILY_BUDGET_USD: daily_budget_usd,
-        SettingKey.INTENT_ALLOWLIST: [str(intent) for intent in DEFAULT_INTENT_ALLOWLIST],
+        SettingKey.INTENT_ALLOWLIST: list(policy.auto_reply_allowlist.intents),
     }
 
 
@@ -113,7 +105,12 @@ def read_error_codes(path: Path) -> frozenset[str]:
 
 
 async def load_seed(
-    session: AsyncSession, seed: SeedData, *, operator_password: str, daily_budget_usd: float
+    session: AsyncSession,
+    seed: SeedData,
+    *,
+    operator_password: str,
+    daily_budget_usd: float,
+    policy: Policy,
 ) -> SeedReport:
     """Write the seed inside the caller's transaction (the caller commits)."""
     if not operator_password:
@@ -124,7 +121,7 @@ async def load_seed(
     report = SeedReport()
     await _load_customers(session, seed, report)
     await _load_operators(session, seed, operator_password, report)
-    await _load_settings(session, default_settings(daily_budget_usd), report)
+    await _load_settings(session, default_settings(daily_budget_usd, policy), report)
     return report
 
 
@@ -222,6 +219,10 @@ async def _audit(
 
 async def run(settings: Settings, seed_dir: Path) -> SeedReport:
     seed = read_seed(seed_dir)
+    try:
+        policy = load_policy(settings.policy_config)
+    except PolicyError as error:
+        raise SeedError(str(error)) from error
     database = connect(settings.database_url.get_secret_value())
     try:
         async with database.sessions() as session, session.begin():
@@ -230,6 +231,7 @@ async def run(settings: Settings, seed_dir: Path) -> SeedReport:
                 seed,
                 operator_password=settings.seed_operator_password.get_secret_value(),
                 daily_budget_usd=settings.daily_budget_usd,
+                policy=policy,
             )
     finally:
         await database.dispose()

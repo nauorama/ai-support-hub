@@ -15,7 +15,7 @@ What the state holds and why:
 - chunk texts are stored once, in `evidence`.
 
 Not here yet: `customer_context` (the customer profile and memory items, P6-05 and P7),
-`features` and `confidence` (P6-02), account facts in the evidence (P7).
+account facts in the evidence (P7).
 """
 
 from typing import Any, Literal, TypedDict
@@ -38,6 +38,10 @@ class InputFlags(BaseModel):
 
     injection: InjectionResult
     pii_placeholders: dict[str, int]
+    # "en" when the message looks English, None otherwise (unknown counts as not English, P6-02).
+    language: str | None = None
+    # G1 masked a card number in the message (`messages.masked_entities`).
+    pan_found: bool = False
 
 
 class Evidence(BaseModel):
@@ -75,6 +79,9 @@ class TicketState(TypedDict, total=False):
     retry_count: int
     route: RouteName | None
     route_reasons: list[str]
+    # The rule version of confidence and its inputs (`decide`, P6-02); None before `decide`.
+    confidence: float | None
+    features: dict[str, float]
     review: dict[str, Any] | None  # ReviewDecision, set on resume (P6-03)
     final_message_id: str | None
     # `<node>:<error class>` for every node that failed; any entry hands the ticket off.
@@ -121,6 +128,8 @@ def run_input(*, ticket_id: str, run_id: str, message_id: str, customer_ref: str
         retry_count=0,
         route=None,
         route_reasons=[],
+        confidence=None,
+        features={},
         review=None,
         final_message_id=None,
         errors=[],

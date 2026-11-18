@@ -82,7 +82,13 @@ Keep the state small: chunk texts are stored once in `evidence`; nodes do not co
 
 Every node: writes an audit record for its decision, emits a `run.status` event at start, and has a timeout.
 
-How "fails into" is built (P6-01, `hub/graph/build.py`): failures have no edges of their own, so the drawn graph is the one above. A node that fails into a handoff records `<node>:<error class>` in `errors`; the nodes up to `verify` are then skipped, and `policy_gate` (after intake or triage) or `decide` (after research, write or verify) route to `handoff_prep` (row 2). A timeout is a failure (`TimeoutError`), except for `research` (degraded, empty evidence) and `verify` (unsupported draft), which continue as the table says; a model node's timeout is longer than one call (`timeout_s`) and shorter than all retries and the fallback in a row. From `handoff_prep` on, a failure stops the graph and the run's last resort (`hub/graph/run.py`) marks the run `failed` and hands the ticket off. Until P6-02 and P6-03, `policy_gate` and `decide` apply row 2 only (everything else: approval, `auto_reply_off`), `human_review` stores the draft without pausing, `handoff_prep` sends no notice, and `act` has nothing to run (its "records the error, continues" comes with the Jira actions, P7).
+How "fails into" is built (P6-01, `hub/graph/build.py`): failures have no edges of their own, so the drawn graph is the one above. A node that fails into a handoff records `<node>:<error class>` in `errors`; the nodes up to `verify` are then skipped, and `policy_gate` (after intake or triage) or `decide` (after research, write or verify) route to `handoff_prep` (row 2). A timeout is a failure (`TimeoutError`), except for `research` (degraded, empty evidence) and `verify` (unsupported draft), which continue as the table says; a model node's timeout is longer than one call (`timeout_s`) and shorter than all retries and the fallback in a row. From `handoff_prep` on, a failure stops the graph and the run's last resort (`hub/graph/run.py`) marks the run `failed` and hands the ticket off. Until P6-03, `human_review` stores the draft without pausing, and `act` has nothing to run (its "records the error, continues" comes with the Jira actions, P7).
+
+What P6-02 built (`hub/guardrails/policy.py`, `hub/graph/routing.py`, `hub/graph/confidence.py`):
+- `intake` detects the language with the English heuristic of the output checks (`looks_english`, no dependency): `en` or unknown; unknown counts as not English (owner decision). It also notes whether G1 masked a card number in the message (`input_flags.pan_found`).
+- `policy_gate` applies row 1; `decide` rows 2 to 9 with the console settings (`auto_reply_enabled`, `confidence_threshold`, `intent_allowlist`, read per run; a missing or broken setting is the safe side). `respond` sends an auto-reply (row 9): the draft is stored `approved`, the answer saved as an `assistant` message, the ticket `answered` with resolution `ai`.
+- `handoff_prep` saves the customer notice as a `system` message and streams it (`message` event) before the run waits. The operator summary (`prompts/handoff_summary/v1.md`, structured `HandoffSummary`: problem, found, missing) is G1-masked and replaces `tickets.summary`; it never reaches the customer. It is skipped after a failed node and in the evaluation runner (a paid call per handoff), and any failure, a 20 s timeout included, gives the notice without it.
+- On a handoff after `decide` (rows 2 and 3) the run's draft is stored as `superseded` for the operator (its missing information and the `verify.done` codes stay readable); it is never sent.
 
 ## 4. Research step in detail
 
@@ -193,10 +199,10 @@ Validation: the gateway asks the provider for JSON that matches the schema, vali
 2. Every `[n]` marker has a citation, and every citation points to a chunk or fact in `evidence`.
 3. At least one citation. Every paragraph with a number, date, fee or time has a marker.
 4. No card-data pattern, no placeholder left in the text, no text from `internal` documents (the writer never receives them; this is a second check with the list of internal chunk hashes: SHA-256 of every 8-word window of the internal chunks, without the windows an external chunk has too, read from Postgres per run).
-5. No forbidden promise from `config/policy.yaml` (refund, limit increase, unfreeze, the reason of a restriction, legal advice). Checked with patterns and by the LLM verifier. Until P6-02 creates `config/policy.yaml`, the patterns are `FORBIDDEN_PROMISES` in `output_checks.py`, for a first-person promise or a done deed ("we will refund", "your refund will be issued", "your account is restricted for security reasons"). They are matched on the folded view of G4 (NFKC, then look-alike letters mapped, invisible characters and combining marks dropped, case-folded), so a zero-width space or a Cyrillic letter cannot hide a promise. They are a first filter, not a complete list; a test checks that no external chunk matches them. The verify prompt counts a promise no source makes as an unsupported claim.
+5. No forbidden promise from `config/policy.yaml` (refund, limit increase, unfreeze, the reason of a restriction, legal advice). Checked with patterns and by the LLM verifier. The patterns are `forbidden_promises` in `config/policy.yaml` (moved from `output_checks.py` in P6-02), for a first-person promise or a done deed ("we will refund", "your refund will be issued", "your account is restricted for security reasons"). They are matched on the folded view of G4 (NFKC, then look-alike letters mapped, invisible characters and combining marks dropped, case-folded), so a zero-width space or a Cyrillic letter cannot hide a promise. They are a first filter, not a complete list; a test checks that no external chunk matches them. The verify prompt counts a promise no source makes as an unsupported claim.
 6. Length ≤ 1,200 characters; language = English (a heuristic without a dependency: most letters ASCII, and English function words outnumber those of other European languages when there are any).
 
-**LLM check** (`prompts/verify/v1.md`, role `verify`, `graph/nodes/verify.py`): the model splits the answer into atomic claims and names, for each, the source id that states it, or null. Code then drops a source id the writer was not given (stored as null, so only known chunk ids reach the draft), counts a claim marked supported without a known source id as unsupported, sets `groundedness` (3 decimals) and `passed` (every claim supported; an answer without any claim gets groundedness 0 and fails). The result is stored on the draft (`groundedness`, `unsupported_claims`) and in the `verify.done` audit record (counts and codes only). Until P6-02 the graph routes every draft to approval with reason `auto_reply_off` whatever the verification says; routing on it (row 4) and the retry (P6-04) come with the graph.
+**LLM check** (`prompts/verify/v1.md`, role `verify`, `graph/nodes/verify.py`): the model splits the answer into atomic claims and names, for each, the source id that states it, or null. Code then drops a source id the writer was not given (stored as null, so only known chunk ids reach the draft), counts a claim marked supported without a known source id as unsupported, sets `groundedness` (3 decimals) and `passed` (every claim supported; an answer without any claim gets groundedness 0 and fails). The result is stored on the draft (`groundedness`, `unsupported_claims`) and in the `verify.done` audit record (counts and codes only). `decide` routes on the verification the run holds in memory (row 4, P6-02): `policy_violation` when a code check failed, `unsupported_claims` when the LLM check found any or did not run. The draft keeps only `groundedness` and `unsupported_claims`; a later reader takes the violation codes from the `verify.done` audit record. The retry comes with P6-04.
 
 If the LLM check finds unsupported claims and `retry_count == 0`, the graph goes back to `research` with the list of unsupported claims as extra search hints. After one retry, the result stands.
 
@@ -211,10 +217,12 @@ always_handoff:
   intents: [account_restricted, card_lost_stolen, other]
   flags: [wants_human, reports_unauthorised_activity, is_complaint_or_legal, injection_suspected]
   actions: [refund, limit_increase, unfreeze]     # the customer asks us to DO it, not how it works
-  conditions: [language_not_english, customer_restricted, pan_in_message_with_fraud_words]
-safe_first_step:           # fixed customer text added to the handoff notice
-  card_lost_stolen: "Please freeze your card now in the app: Card → Freeze. …"
-  reports_unauthorised_activity: "Please freeze your card now in the app and change your password. …"
+  conditions: [language_not_english, customer_restricted, pan_in_message_with_fraud_words, injection_score_high]
+fraud_words: [fraud, stolen, scam, hacked, unauthorised, unauthorized, "didn't make", "did not make", "not me", "someone used"]
+injection: {high_score: 0.5}   # G4: a score at or above it hands off, with or without the triage flag
+safe_first_step:           # fixed customer text added to the handoff notice; key: intent, flag, condition or reason
+  card_lost_stolen: ["Please freeze your card in the app now. You can freeze it at any time."]
+  fraud_report: ["Please freeze your card in the app now. …", "Tallybridge staff never ask for your full card number, CVV, PIN, password or 2FA code."]
 approval_only:             # AI may draft, a human must send
   intents: [login_security, dispute_chargeback]
   actions: [dispute]
@@ -227,21 +235,36 @@ support_hours:             # used for the expected response time in handoff noti
   weekdays: "08:00-20:00"
   saturday: "10:00-16:00"
   sla: {standard_business_hours: 4, urgent_minutes: 30, urgent_out_of_hours_minutes: 60}
+  urgent_reasons: [fraud_report, restricted_account]   # world file §8; also triage urgency high
+  urgent_intents: [card_lost_stolen, account_restricted]
+handoff_notices: {default: "…", policy_intent: "…", …}  # opening sentence per first reason
+response_time: {urgent: "…", standard: "…", standard_closed: "…"}
 ```
+
+Notes on the file (P6-02, owner decisions):
+- **Row 1 order.** Every matching rule's reason goes into `route_reasons`, in this fixed order: `policy_intent`, `fraud_report`, `injection`, `complaint`, `customer_request`, `action_request`, `restricted_account`, `language`. The first one decides (the reason code of the route, the opening of the notice); the policy topic comes first, so `policy_intent` wins over `restricted_account` (dev tickets T-0014 and T-0017). The safe first steps and the urgency of the notice come from **all** matching rules: intent `other` with `reports_unauthorised_activity` still gets the freeze step.
+- **Injection (G4).** A score of at least `injection.high_score` (condition `injection_score_high`) or the triage flag `injection_suspected` each hand off on their own (OR).
+- **Fraud words.** `pan_in_message_with_fraud_words`: G1 masked a card number in the message and a fraud word or phrase is in it (whole words, matched on the G4 folded view).
+- **Language.** `language_not_english` matches when intake's check says not English or cannot tell (unknown counts as not English).
+- **Not matched yet.** `customer_restricted` needs the customer profile (P7-04) and `memory_shows_open_case` needs memory (P6-05); until then they never match.
+- **Intent rules** look at the primary `intent` only, not `secondary_intent`.
+- **Handoff notice.** The opening of the first reason (`handoff_notices`, `default` for a reason without its own text), the safe first steps without repeats, then the expected response time: urgent cases 30 minutes in support hours and 60 minutes outside them (on-call), others 4 business hours, outside support hours with the next opening time ("Our support team is back on Monday at 08:00 CET."). Fixed texts only, facts from the world file; never a restriction reason or the operator summary.
 
 Decision table:
 
 | # | Condition | Route | Reason code |
 |---|---|---|---|
-| 1 | A rule in `always_handoff` matches (checked in `policy_gate`, before research) | handoff | `policy_intent`, `customer_request`, `fraud_report`, `complaint`, `injection`, `action_request`, `language`, `restricted_account` |
-| 2 | Budget stop or model failure | handoff | `budget_exceeded`, `system_error` |
+| 1 | A rule in `always_handoff` matches (checked in `policy_gate`, before research); every match is listed, in this order, the first decides | handoff | `policy_intent`, `fraud_report`, `injection`, `complaint`, `customer_request`, `action_request`, `restricted_account`, `language` |
+| 2 | Budget stop or model failure; masking (G1) of a model-written string of the run failed (P3-05a review) | handoff | `budget_exceeded`, `system_error`, `masking_failed` |
 | 3 | `draft.can_answer` is false | handoff | `no_kb_answer` |
-| 4 | Verification failed after the retry | approval | `unsupported_claims`, `policy_violation` |
+| 4 | Verification failed after the retry | approval | `policy_violation` (a code check failed), `unsupported_claims` (the LLM check found any, or did not run) |
 | 5 | Research was degraded | approval | `degraded` |
 | 6 | A rule in `approval_only` matches | approval | `policy_review` |
 | 7 | Setting `auto_reply_enabled` is false, or the intent is not in the allow-list | approval | `auto_reply_off` |
 | 8 | `confidence < confidence_threshold` | approval | `low_confidence` |
 | 9 | Otherwise | auto_reply | — |
+
+**Known false routing to a human (row 4, owner decision PR #34).** The `card_data` code check reuses G1, which over-masks a number next to a trigger word or a date-like pair, so a correct answer such as "Transfers over 1000 EUR need a 2FA code [1]." or "On 05/2025, 1200 payments failed [1]." fails with `card_data` and goes to approval (`policy_violation`). G1 is not loosened: over-masking is the safe side.
 
 **Budget stop (row 2, G8).** The run checks the daily budget once at its start, before the first model call, and the gateway checks it again before every online chat call (not before calls to the local, free `fastembed/` embedding model, P5-01), so a run that crosses the limit half way stops at its next call. A refusal makes no model call and writes no `llm_calls` row; the run is `failed` (error `BudgetExceededError`) with route handoff and reason `budget_exceeded`, and the stream is the same as for any failed run. What counts: [security](security.md) G8.
 
@@ -272,7 +295,7 @@ Training rules (kept for reference; they assumed the earlier 210-ticket dev set,
 - If the trained model is not better than the rule version below in cross-validation, the rule version stays. This is a valid result and is written in the experiments file.
 - Retrain after every change of prompts, models or retrieval.
 
-Rule version (used in budget mode, and in the trained design until a model is trained): `confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above a fixed value, else 0; a null `groundedness`, i.e. a code check failed and the LLM check did not run, gives confidence 0 and never an auto-reply, P5-04) and the default threshold is 0.95, with auto-reply **off** by default.
+Rule version (used in budget mode, and in the trained design until a model is trained): `config/confidence.json` contains a rule version (`confidence = groundedness` if `top_score` is above `top_score_floor`, else 0; the floor is 0.0 for now, a placeholder to be set before H7, P6-06; a null `groundedness`, i.e. a code check failed and the LLM check did not run, gives confidence 0 and never an auto-reply, P5-04) and the default threshold is 0.95, with auto-reply **off** by default.
 
 ## 7. Prompts
 
