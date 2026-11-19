@@ -249,7 +249,10 @@ async def test_the_limit_is_counted_from_the_recorded_rows_across_sessions(
 
 
 async def test_a_scope_with_another_customers_reference_is_refused(
-    client: ToolClient, core: FakeCore, recorder: MemoryRecorder
+    client: ToolClient,
+    core: FakeCore,
+    recorder: MemoryRecorder,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The ticket belongs to CUS-0001; a scope that names CUS-0002 reaches nothing.
     session = client.session(scope(customer_ref="CUS-0002"))
@@ -259,6 +262,11 @@ async def test_a_scope_with_another_customers_reference_is_refused(
         assert outcome.error == "invalid_identity"
     assert core.calls == []
     assert all(row.reason == "invalid_identity" for row in recorder.rows)
+    # Logged as a warning too (a scope bug, not a normal denial), without the reference.
+    warnings = [r for r in caplog.records if r.message == "tool call with an invalid identity"]
+    assert len(warnings) == 3
+    assert all(r.levelname == "WARNING" for r in warnings)
+    assert "CUS-0002" not in caplog.text
     assert "CUS-0002" not in repr([row.arguments for row in recorder.rows])
     # A ticket that does not exist has no customer either.
     recorder.owners.clear()

@@ -13,8 +13,8 @@ always_handoff:
   intents: [account_restricted, card_lost_stolen, other]
   flags: [wants_human, reports_unauthorised_activity, is_complaint_or_legal, injection_suspected]
   actions: [refund, limit_increase, unfreeze]     # the customer asks us to DO it, not how it works
-  # `customer_restricted` needs the customer profile (core_get_customer, P7-04); until then it
-  # never matches.
+  # `customer_restricted`: the profile's flag, loaded by intake with core_get_customer (P7-04).
+  # A failed profile load hands the ticket off before this row (system_error, fail-closed).
   conditions: [language_not_english, customer_restricted, pan_in_message_with_fraud_words, injection_score_high]
 
 # Words that, together with a card number in the message (G1 masked it), report fraud. Matched as

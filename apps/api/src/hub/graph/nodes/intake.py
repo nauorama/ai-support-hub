@@ -24,8 +24,11 @@ The customer is the ticket's own, never one a model named. `intake.done` gets th
 Customer profile (P7-04): `core_get_customer` through the tool client, with the scope built
 from the tickets row (`hub.graph.tools`). Intake keeps tier, country and the restricted flag
 (`hub.tools.facts.profile`), never a reason; `policy_gate` hands a restricted customer off
-(row 1, `restricted_account`). A failed or denied call, or a run without a tool client, leaves
-the profile None (the rule then cannot match) and the run goes on. `intake.done` gets
+(row 1, `restricted_account`). Fail-closed (owner decision, PR #41): when the tool client is
+there but the profile cannot be loaded (error, timeout, denial, unreadable result), the
+restricted status is unknown, so intake records `intake:ProfileUnavailableError` in `errors` and
+the ticket is handed off (`system_error`). A run without a tool client (unit tests, the
+evaluation runner until P7-06) loads no profile and goes on. `intake.done` gets
 `profile_loaded`.
 """
 
@@ -192,6 +195,9 @@ async def load_profile(state: TicketState, ctx: GraphContext) -> CustomerProfile
     return read_profile(outcome.result) if outcome.result is not None else None
 
 
+PROFILE_UNAVAILABLE = "intake:ProfileUnavailableError"
+
+
 async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     ticket_id, run_id = ids(state)
     # Before the transaction: the tool call records its own row and audit record.
@@ -240,4 +246,8 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             pan_found=pan_found(trigger),
         ),
         customer_context=context,
+        # Restricted status unknown is not safe: hand the ticket to a human.
+        errors=[*state.get("errors", []), PROFILE_UNAVAILABLE]
+        if ctx.pipeline.tools is not None and profile is None
+        else state.get("errors", []),
     )

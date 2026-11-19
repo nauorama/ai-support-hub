@@ -19,6 +19,7 @@ P7-04:
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -43,12 +44,15 @@ from hub.tools.permissions import (
     Approval,
     Caller,
     Denied,
+    DenyReason,
     ToolRequest,
     ToolScope,
     authorize,
     resolve,
 )
 from hub.tools.registry import Identity
+
+logger = logging.getLogger(__name__)
 
 CALLED_ACTION = "tool.called"
 DENIED_ACTION = "tool.denied"
@@ -301,6 +305,18 @@ class ToolClient:
     ) -> ToolOutcome:
         decision = await self._decide(request, scope, approval)
         if isinstance(decision, Denied):
+            if decision.reason is DenyReason.INVALID_IDENTITY:
+                # Not a normal denial: the scope does not match the ticket's customer, which
+                # means a bug in how the scope was built. Audited as `tool.denied` below too.
+                logger.warning(
+                    "tool call with an invalid identity",
+                    extra={
+                        "run_id": str(scope.run_id),
+                        "ticket_id": str(scope.ticket_id),
+                        "tool": decision.tool,
+                        "node": scope.node.value,
+                    },
+                )
             await self._recorder.record(
                 ToolCallRow(
                     scope=scope,

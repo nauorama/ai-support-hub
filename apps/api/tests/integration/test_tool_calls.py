@@ -576,3 +576,29 @@ async def test_the_research_loop_finds_a_failed_withdrawal(
     async with database.sessions() as session:
         calls = (await session.scalars(select(LlmCall).where(LlmCall.run_id == run_id))).all()
     assert [(c.node, c.prompt_version) for c in calls] == [("research", "research/v1")] * 3
+
+
+async def test_a_failed_profile_load_hands_the_ticket_off(
+    mcp_server: tuple[str, str], tools_db: tuple[str, str], database: Database
+) -> None:
+    """Fail-closed (owner decision, PR #41): restricted status unknown is not safe."""
+    ticket_id, run_id = _add_ticket(tools_db[0], "CUS-0016")
+    broken = ToolClient(McpTransport(mcp_server[0], "wrong"), DbToolCallRecorder(database))
+    policy = load_policy(ROOT / "config" / "policy.yaml")
+    pipeline = cast(Any, SimpleNamespace(database=database, tools=broken, policy=policy))
+    ctx = GraphContext(pipeline=pipeline, emit=_emit)
+    state = _state(ticket_id, run_id, "Where is my withdrawal?")
+    with psycopg.connect(libpq_url(tools_db[0]), autocommit=True) as connection:
+        connection.execute(
+            "INSERT INTO messages (id, ticket_id, role, body) VALUES (%s, %s, 'customer', %s)",
+            (run_id, ticket_id, "Where is my withdrawal?"),
+        )
+    update = await intake.run(state, ctx)
+    assert update["errors"] == [intake.PROFILE_UNAVAILABLE]
+    assert update["customer_context"] is not None
+    assert update["customer_context"].profile is None
+    state.update(update)
+    gate = await policy_gate.run(state, ctx)
+    assert (gate["route"], gate["route_reasons"]) == ("handoff", ["system_error"])
+    [row] = await _rows(database)
+    assert (row.node, row.status) == (ToolNode.INTAKE, ToolCallStatus.ERROR)
