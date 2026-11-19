@@ -203,3 +203,11 @@ class RouteReason(StrEnum):
     LOW_CONFIDENCE = "low_confidence"
     # outside the graph: an operator claimed a ticket that was still `processing`
     OPERATOR_TAKEOVER = "operator_takeover"
+
+
+class ToolCallStatus(StrEnum):
+    """`tool_calls.status` (data model §1, P7-03): `denied` by the permissions (G6)."""
+
+    OK = "ok"
+    ERROR = "error"
+    DENIED = "denied"

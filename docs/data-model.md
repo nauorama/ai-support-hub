@@ -188,14 +188,17 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 | id | uuid PK | |
 | run_id | uuid FK | |
 | tool | text | e.g. `core_get_transaction` |
-| arguments | jsonb | masked |
-| result_summary | text | short, masked |
+| arguments | jsonb | masked; for a `denied` call only the argument names (`{"names": [...]}`), so a forged `customer_ref` is never stored; also only the names when the masked values are too long or cannot be stored |
+| result_summary | text | short (300 characters), masked; the safe error text for `error` |
 | status | text | `ok` \| `error` \| `denied` |
 | side_effect | bool | true for Jira and Slack |
 | approved_by | uuid FK null | operator for approved actions |
-| idempotency_key | text null unique | |
-| external_ref | text null | e.g. Jira key |
+| idempotency_key | text null unique | `<tool>:<ticket id>`; set only on a successful side-effect call (a retry after an error reuses the key) |
+| external_ref | text null | e.g. Jira key, Slack message `ts` |
 | latency_ms | int | |
+| created_at | timestamptz | |
+
+Written by `hub/tools/mcp_client.py` (P7-03, migration 0011), one row per call, allowed or denied by `tools/permissions.py` (G6), each with an audit record `tool.called` or `tool.denied` in the same transaction. Index on `run_id`.
 
 ### customer_memory
 

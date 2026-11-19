@@ -52,8 +52,8 @@ def memory_db(postgres_url: str, qdrant_url: str) -> Iterator[Urls]:
 def fresh(memory_db: Urls) -> Urls:
     run_sql(
         memory_db,
-        "TRUNCATE audit_log, llm_calls, drafts, runs, feedback, messages, tickets, customers,"
-        " customer_memory, operators, checkpoints, checkpoint_blobs, checkpoint_writes"
+        "TRUNCATE audit_log, llm_calls, tool_calls, drafts, runs, feedback, messages, tickets,"
+        " customers, customer_memory, operators, checkpoints, checkpoint_blobs, checkpoint_writes"
         " RESTART IDENTITY CASCADE",
     )
     add_operator(memory_db, OPERATOR)

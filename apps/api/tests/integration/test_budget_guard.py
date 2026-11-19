@@ -75,8 +75,8 @@ def budget_db(postgres_url: str) -> Iterator[Urls]:
 def _empty(budget_db: Urls) -> None:
     run_sql(
         budget_db,
-        "TRUNCATE audit_log, llm_calls, drafts, runs, feedback, messages, tickets, customers,"
-        " operators, settings RESTART IDENTITY CASCADE",
+        "TRUNCATE audit_log, llm_calls, tool_calls, drafts, runs, feedback, messages, tickets,"
+        " customers, operators, settings RESTART IDENTITY CASCADE",
     )
     add_customer(budget_db)
 
