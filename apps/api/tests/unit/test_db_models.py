@@ -31,6 +31,7 @@ from hub.domain.enums import (
     RunStatus,
     SettingKey,
     TicketStatus,
+    ToolCallStatus,
     Urgency,
 )
 from hub.domain.kb import Product, Visibility
@@ -60,6 +61,7 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("kb_documents", "product", Product),
     ("kb_documents", "visibility", Visibility),
     ("customer_memory", "kind", MemoryKind),
+    ("tool_calls", "status", ToolCallStatus),
 ]
 
 # The dialect the app uses (psycopg 3), without a database.
@@ -79,6 +81,7 @@ TABLES = {
     "kb_documents",
     "kb_chunks",
     "customer_memory",
+    "tool_calls",
 }
 # Tables whose primary key is text (the KB slug and `<doc_id>#<n>`, data model §1).
 TEXT_KEY_TABLES = {"kb_documents", "kb_chunks"}

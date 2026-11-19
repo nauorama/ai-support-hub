@@ -62,6 +62,7 @@ from hub.domain.enums import (
     RunStatus,
     SettingKey,
     TicketStatus,
+    ToolCallStatus,
     Urgency,
 )
 from hub.domain.kb import Product, Visibility
@@ -351,6 +352,35 @@ class CustomerMemory(Base):
     expires_at: Mapped[datetime] = mapped_column(
         server_default=text("now() + interval '12 months'")
     )
+    created_at: Mapped[datetime] = _created_at_column()
+
+
+class ToolCall(Base):
+    """One tool call of a run, allowed or denied by the permissions (G6, P7-03). Arguments and
+    the result summary are masked (G1); a denied call keeps only its argument names."""
+
+    __tablename__ = "tool_calls"
+    __table_args__ = (
+        enum_check("status", ToolCallStatus),
+        CheckConstraint("jsonb_typeof(arguments) = 'object'", name="arguments"),
+        CheckConstraint("latency_ms >= 0", name="latency_ms"),
+        Index("ix_tool_calls_run_id", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _id_column()
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
+    tool: Mapped[str]
+    arguments: Mapped[dict[str, Any]] = mapped_column(
+        default=dict, server_default=text("'{}'::jsonb")
+    )
+    result_summary: Mapped[str | None]
+    status: Mapped[ToolCallStatus] = mapped_column(TextEnum(ToolCallStatus))
+    side_effect: Mapped[bool]
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("operators.id"))
+    # Set on successful side-effect calls only: a retry after an error reuses the key.
+    idempotency_key: Mapped[str | None] = mapped_column(unique=True)
+    external_ref: Mapped[str | None]
+    latency_ms: Mapped[int]
     created_at: Mapped[datetime] = _created_at_column()
 
 

@@ -28,8 +28,8 @@ OPERATOR_PASSWORD = "operator-password-for-tests"  # noqa: S105 - test value
 # Hashed once: Argon2 takes tens of milliseconds per hash.
 OPERATOR_HASH = hash_password(OPERATOR_PASSWORD)
 TABLES = (
-    "audit_log, feedback, llm_calls, drafts, runs, customer_memory, messages, tickets, customers,"
-    " operators"
+    "audit_log, feedback, llm_calls, tool_calls, drafts, runs, customer_memory, messages, tickets,"
+    " customers, operators"
 )
 
 Urls = tuple[str, str]

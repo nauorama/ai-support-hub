@@ -27,6 +27,7 @@ TABLES = {
     "kb_documents",
     "kb_chunks",
     "customer_memory",
+    "tool_calls",
     # langgraph-checkpoint-postgres (migration 0009)
     "checkpoints",
     "checkpoint_blobs",
@@ -120,4 +121,4 @@ def test_there_is_exactly_one_head() -> None:
     from alembic.script import ScriptDirectory
 
     heads = ScriptDirectory.from_config(alembic_config("postgresql://unused")).get_heads()
-    assert heads == ["0010"]
+    assert heads == ["0011"]

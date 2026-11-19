@@ -33,6 +33,9 @@ dependencies = [
     "langgraph-prebuilt==1.1.1",
     "langsmith==0.14.17",
     "litellm==1.108.6",
+    # MCP client of the support-tools server, used only in hub.tools (ADR-0011, P7-03). The same
+    # release as apps/mcp_server (2.3.0, API §7).
+    "mcp==2.3.0",
     # Native code of fastembed. Held at 2.5.4 (2026-10-10) and 1.31.1 (2026-10-26): numpy 2.5.5
     # and onnxruntime 1.32.0 were under a week old at P5-01.
     "numpy==2.5.4",

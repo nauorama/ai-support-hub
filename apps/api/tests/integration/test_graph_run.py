@@ -157,8 +157,8 @@ def _container(urls: Urls, qdrant_url: str, *, search: bool = True) -> Container
 def _truncate(urls: Urls) -> None:
     run_sql(
         urls,
-        "TRUNCATE audit_log, llm_calls, drafts, runs, feedback, messages, tickets, customers,"
-        " operators RESTART IDENTITY CASCADE",
+        "TRUNCATE audit_log, llm_calls, tool_calls, drafts, runs, feedback, messages, tickets,"
+        " customers, operators RESTART IDENTITY CASCADE",
     )
 
 
