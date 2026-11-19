@@ -70,7 +70,9 @@ def decide(
     done: int = 0,
     approval: Approval | None = None,
     operator_exists: bool = True,
+    owner: str | None = "CUS-0001",
 ) -> Allowed | Denied:
+    """`owner`: the reference of the scope ticket's customer, as the database says."""
     return authorize(
         request,
         where or scope(),
@@ -78,6 +80,7 @@ def decide(
         side_effects_for_ticket=done,
         approval=approval,
         operator_exists=operator_exists,
+        ticket_customer_ref=owner,
     )
 
 
@@ -105,9 +108,17 @@ def alert_approval(**changes: object) -> Approval:
 # --- the schema the model sees ---------------------------------------------------------------
 
 
-def test_model_tools_are_the_four_read_tools_of_ai_pipeline_4() -> None:
-    assert set(MODEL_TOOLS) == {"get_account", "get_transactions", "get_transaction", "get_cards"}
+def test_model_tools_are_the_four_read_tools_and_search_kb_of_ai_pipeline_4() -> None:
+    assert set(MODEL_TOOLS) == {
+        "get_account",
+        "get_transactions",
+        "get_transaction",
+        "get_cards",
+        "search_kb",
+    }
     assert not any(spec.side_effect for spec in MODEL_TOOLS.values())
+    # Only search_kb runs in the Hub; the others are MCP tools.
+    assert {name for name, spec in MODEL_TOOLS.items() if spec.local} == {"search_kb"}
 
 
 @pytest.mark.parametrize("name", sorted(MODEL_TOOLS))
@@ -168,6 +179,30 @@ def test_a_broken_scope_identity_is_denied(bad: str) -> None:
     assert decision == Denied("core_get_cards", DenyReason.INVALID_IDENTITY, ("customer_ref",))
 
 
+@pytest.mark.parametrize("owner", ["CUS-0002", None])
+def test_a_scope_with_another_customers_reference_is_refused(owner: str | None) -> None:
+    # The scope says CUS-0001, but the ticket belongs to CUS-0002 (or does not exist): a scope
+    # built from anything but the tickets row cannot reach that customer's data (P7-04).
+    for name in ("get_account", "get_transactions", "get_cards"):
+        decision = decide(model(name), owner=owner)
+        assert isinstance(decision, Denied)
+        assert decision.reason is DenyReason.INVALID_IDENTITY
+        assert decision.fields == ("customer_ref",)
+    issue = decide(
+        code("jira_create_issue", **ISSUE),
+        scope(ToolNode.ACT),
+        approval=operator_approval(),
+        owner=owner,
+    )
+    assert issue == Denied("jira_create_issue", DenyReason.INVALID_IDENTITY, ("customer_ref",))
+
+
+def test_a_tool_without_customer_needs_no_owner() -> None:
+    decision = decide(model("search_kb", query="SEPA withdrawal"), owner=None)
+    assert isinstance(decision, Allowed)
+    assert decision.arguments == {"query": "SEPA withdrawal"}
+
+
 _JSON = st.recursive(
     st.none() | st.booleans() | st.integers() | st.text(max_size=20),
     lambda inner: st.lists(inner, max_size=3) | st.dictionaries(st.text(max_size=8), inner),
@@ -196,6 +231,7 @@ def test_no_model_arguments_reach_another_customer(name: str, arguments: dict[st
 
 def test_the_allow_lists() -> None:
     assert ALLOWLIST[ToolNode.RESEARCH] == {
+        "search_kb",
         "core_get_customer",
         "core_list_transactions",
         "core_get_transaction",
@@ -267,6 +303,9 @@ def test_list_arguments_are_validated_and_none_is_left_out() -> None:
 def test_the_research_loop_stops_at_five_calls() -> None:
     assert isinstance(decide(model("get_cards"), calls=4), Allowed)
     assert decide(model("get_cards"), calls=5) == Denied("core_get_cards", DenyReason.RUN_LIMIT)
+    # search_kb shares the limit.
+    search = model("search_kb", query="fees")
+    assert decide(search, calls=5) == Denied("search_kb", DenyReason.RUN_LIMIT)
 
 
 def test_a_second_side_effect_for_the_ticket_is_denied() -> None:

@@ -30,6 +30,7 @@ from hub.domain.handoff import HandoffSummary
 from hub.graph.context import GraphContext, failure_reasons, ids
 from hub.graph.draft import OutputMask
 from hub.graph.nodes.intake import intake_result
+from hub.graph.nodes.policy_gate import restricted
 from hub.graph.pipeline import Pipeline
 from hub.graph.routing import gate_matches
 from hub.graph.state import TicketState
@@ -103,7 +104,11 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     why = reasons(state)
     triage = state.get("triage")
     matches = gate_matches(
-        policy, triage, state.get("message_masked", ""), state.get("input_flags")
+        policy,
+        triage,
+        state.get("message_masked", ""),
+        state.get("input_flags"),
+        restricted(state),
     )
     urgent = is_urgent(
         policy, matches, triage.urgency if triage else None, triage.intent if triage else None

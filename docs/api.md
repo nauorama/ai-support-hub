@@ -52,7 +52,7 @@ A customer can read only their own tickets (404 for others, not 403).
   "created_at": "2026-11-12T10:15:04Z"
 }
 ```
-`masked` is true when the server hid card data in the message (not for a partly masked IBAN, ADR-0017) (the chat shows a note, [UI](ui.md) §2). Internal fields (chunk ids, scores, confidence, route reasons) are never in customer responses.
+A citation of an account fact (P7-04) has the title `Your account` and an empty `url`: it is not a help-centre page, so the chat shows it without a link. `masked` is true when the server hid card data in the message (not for a partly masked IBAN, ADR-0017) (the chat shows a note, [UI](ui.md) §2). Internal fields (chunk ids, scores, confidence, route reasons) are never in customer responses.
 
 **Ticket object (customer view):** `id`, `status`, `ai_disclosure` (the text of [security](security.md) §7), `ai_disclosed_at`, `created_at`.
 
@@ -156,4 +156,4 @@ Transport: streamable HTTP at `/mcp` (Hub → server, bearer token from `MCP_SER
 
 Adapters: `core` reads `data/seed` (always a mock; own read-only schemas in `support_tools/seed.py`, kept in agreement with `hub.domain.seed` by a test). Limits report how much is used per currency, without conversion (the mock has no exchange rates): daily limits count transactions dated today (CET), monthly ones this calendar month. Seed events are never dated today, so the daily `used` is always empty in the demo data; the tool description says what an empty `used` means. `jira` and `slack` are mocks too: they write to a local table (a SQLite file, `MCP_MOCK_DB`) and log the key, type and ticket only. There is no real mode ([ADR-0019](adr/0019-scope-cuts.md)). Idempotency: the same `idempotency_key` with the same arguments returns the first result (`created: false`); the same key with other arguments is refused; a second issue or alert for the same ticket under a new key is refused (at most 1 issue and 1 alert per ticket, security T8). Unique indexes enforce both. Jira keys are `TB-<n>` with URLs on the reserved domain `jira.tallybridge.example`.
 
-How the Hub exposes tools to the model during research (see [ai-pipeline](ai-pipeline.md) §4): only the four read tools plus `search_kb`, **without** the `customer_ref` argument. The Hub adds `customer_ref` from the session. Tools with side effects are never given to the model as callable tools.
+How the Hub exposes tools to the model during research (see [ai-pipeline](ai-pipeline.md) §4): only the four read tools plus `search_kb`, **without** the `customer_ref` argument. The Hub adds `customer_ref` from the tickets row (the `external_ref` of the ticket's customer, P7-04), never from the model. `search_kb` runs in the Hub, not on this server; it is decided and recorded in `tool_calls` like the MCP tools. Tools with side effects are never given to the model as callable tools.

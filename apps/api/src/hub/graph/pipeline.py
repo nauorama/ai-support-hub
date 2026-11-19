@@ -23,11 +23,13 @@ from hub.llm.budget import BudgetCheck
 from hub.llm.config import ModelsConfig
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt, active_prompt, load_prompt
+from hub.tools.mcp_client import ToolClient
 
+# `graph-v4`: the research tool loop and the customer profile in intake (P7-04).
 # `graph-v3`: the retry loop (P6-04) and memory in `intake` and `decide` (P6-05). `graph-v2` added
 # the pause in `human_review` (P6-03); `graph-v1` was the LangGraph workflow of P6-01 without it
 # (the linear run was `linear-v1` to `linear-v3`).
-GRAPH_VERSION = "graph-v3"
+GRAPH_VERSION = "graph-v4"
 VARIANT = "rag_hybrid"
 B0_VARIANT = "b0_full_kb"
 # The variants this workflow can run (ai-pipeline §10), with the search mode of the RAG ones.
@@ -116,6 +118,11 @@ class Pipeline:
     # The memory summary of a closed ticket (`memory_summary`, role triage, P6-05). None: a
     # close writes no memory.
     memory_prompt: Prompt | None = None
+    # The research tool loop (`research/v1`, P7-04). None: research is step 0 only.
+    research_prompt: Prompt | None = None
+    # The guarded client of the `support-tools` MCP server (P7-03). None: intake loads no
+    # profile and research runs no tool loop (unit tests, the evaluation runner until P7-06).
+    tools: ToolClient | None = None
     # Where the graph keeps its checkpoints. The app and the evaluation runner pass the Postgres
     # store (`CheckpointStore.postgres`); the in-memory default is for unit tests, which start
     # no database.
@@ -141,11 +148,19 @@ class Pipeline:
         return self.variant != B0_VARIANT
 
     @property
+    def researches(self) -> bool:
+        """Whether runs of this pipeline run the research tool loop: a RAG variant with a tool
+        client and a research prompt."""
+        return self.verifies and self.tools is not None and self.research_prompt is not None
+
+    @property
     def prompt_versions(self) -> dict[str, str]:
         """node -> version without the node prefix (data model §1, `runs.prompt_versions`)."""
         prompts = [self.triage_prompt, self.write_prompt]
         if self.verifies and self.verify_prompt is not None:
             prompts.append(self.verify_prompt)
+        if self.researches and self.research_prompt is not None:
+            prompts.append(self.research_prompt)
         return {prompt.node: prompt.front.version for prompt in prompts}
 
 

@@ -46,23 +46,34 @@ class Decision:
     features: dict[str, float] = field(default_factory=dict)
 
 
-def gate_input(triage: TriageResult, message_masked: str, flags: InputFlags | None) -> GateInput:
+def gate_input(
+    triage: TriageResult,
+    message_masked: str,
+    flags: InputFlags | None,
+    customer_restricted: bool | None = None,
+) -> GateInput:
     return GateInput(
         triage=triage,
         message_masked=message_masked,
         english=None if flags is None or flags.language is None else flags.language == ENGLISH,
         pan_found=bool(flags and flags.pan_found),
         injection_score=flags.injection.score if flags else 0.0,
+        customer_restricted=customer_restricted,
     )
 
 
 def gate_matches(
-    policy: Policy, triage: TriageResult | None, message_masked: str, flags: InputFlags | None
+    policy: Policy,
+    triage: TriageResult | None,
+    message_masked: str,
+    flags: InputFlags | None,
+    customer_restricted: bool | None = None,
 ) -> list[RuleMatch]:
-    """Row 1's matches; none without a triage result."""
+    """Row 1's matches; none without a triage result. `customer_restricted`: the profile's
+    flag (P7-04), None when no profile was loaded."""
     if triage is None:
         return []
-    return hard_rules(policy, gate_input(triage, message_masked, flags))
+    return hard_rules(policy, gate_input(triage, message_masked, flags, customer_restricted))
 
 
 def gate(
@@ -72,10 +83,11 @@ def gate(
     triage: TriageResult | None,
     message_masked: str,
     flags: InputFlags | None,
+    customer_restricted: bool | None = None,
 ) -> Decision:
     if errors or triage is None:
         return Decision("handoff", failure_reasons(errors))
-    matched = reasons(gate_matches(policy, triage, message_masked, flags))
+    matched = reasons(gate_matches(policy, triage, message_masked, flags, customer_restricted))
     return Decision("handoff", matched) if matched else Decision(None, [])
 
 

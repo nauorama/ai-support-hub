@@ -8,12 +8,17 @@ Rules, in the order they are checked:
 1. The tool exists. A model may name only a model tool (`registry.MODEL_TOOLS`); code names the
    MCP tool.
 2. The node's allow-list holds the tool. Anything else is denied.
-3. Limits: calls per node and run (research: 5, ai-pipeline §4), and at most one successful call
-   of each side-effect tool per ticket (security T8; the server enforces it again).
+3. Limits: calls per node and run (research: 5, `search_kb` included, ai-pipeline §4), counted
+   by the caller from the run's `tool_calls` rows (denied ones too, P7-04), and at most one
+   successful call of each side-effect tool per ticket (security T8; the server enforces it
+   again).
 4. Identity: no caller may send `customer_ref`, `ticket_id` or `idempotency_key`. They come
-   from the run state only, so a model can never choose whose data it reads. A model that tries
-   is denied, and the denial is recorded and audited (the argument name, never its value).
+   from the scope only, which the graph builds from the tickets row, so a model can never choose
+   whose data it reads. A model that tries is denied, and the denial is recorded and audited
+   (the argument name, never its value).
 5. The arguments match the tool's argument model (extra fields forbidden).
+   The scope's `customer_ref` must be the reference of the scope ticket's own customer, as the
+   database says (`ticket_customer_ref`); anything else is `invalid_identity` (P7-04).
 6. A side-effect tool runs only with an approval for exactly this tool, this ticket and these
    arguments, of the kind the tool needs: an operator's review for Jira, the urgent-handoff rule
    of `handoff_prep` for the Slack alert (ai-pipeline §3). The operator must exist; the alert
@@ -29,11 +34,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+# Re-exported: the nodes are a column of `tool_calls` now (P7-04), so the enum lives in domain.
+from hub.domain.enums import ToolNode as ToolNode
 from hub.domain.enums import Urgency
 from hub.tools.registry import (
     IDEMPOTENCY_KEY,
     IDENTITY_ARGUMENTS,
     MODEL_TOOLS,
+    SEARCH_KB,
     TOOLS,
     Identity,
     ToolSpec,
@@ -47,15 +55,6 @@ MAX_NAME_LENGTH = 64
 UNKNOWN_TOOL_NAME = "unknown"
 
 
-class ToolNode(StrEnum):
-    """The graph nodes that call tools."""
-
-    INTAKE = "intake"
-    RESEARCH = "research"
-    HANDOFF_PREP = "handoff_prep"
-    ACT = "act"
-
-
 class Caller(StrEnum):
     MODEL = "model"  # the research loop passes a model's tool call on unchanged
     CODE = "code"
@@ -65,7 +64,13 @@ ALLOWLIST: Mapping[ToolNode, frozenset[str]] = {
     # P7-04: intake loads the customer profile through the tool.
     ToolNode.INTAKE: frozenset({"core_get_customer"}),
     ToolNode.RESEARCH: frozenset(
-        {"core_get_customer", "core_list_transactions", "core_get_transaction", "core_get_cards"}
+        {
+            SEARCH_KB,
+            "core_get_customer",
+            "core_list_transactions",
+            "core_get_transaction",
+            "core_get_cards",
+        }
     ),
     ToolNode.HANDOFF_PREP: frozenset({"slack_post_escalation"}),
     ToolNode.ACT: frozenset({"jira_create_issue"}),
@@ -121,7 +126,9 @@ class DenyReason(StrEnum):
 
 @dataclass(frozen=True)
 class ToolScope:
-    """Who a call is for and where it comes from. Built by the graph from the run state."""
+    """Who a call is for and where it comes from. Built by the graph from the tickets row
+    (`customer_ref` is the `customers.external_ref` of the ticket's customer), never from model
+    output."""
 
     run_id: uuid.UUID
     ticket_id: uuid.UUID
@@ -179,10 +186,12 @@ def authorize(
     side_effects_for_ticket: int = 0,
     approval: Approval | None = None,
     operator_exists: bool = False,
+    ticket_customer_ref: str | None = None,
 ) -> Allowed | Denied:
     """Decide one tool call. `calls_in_run` counts this node's earlier calls in the run (denied
     ones too); `side_effects_for_ticket` the successful calls of this tool for the ticket;
-    `operator_exists` whether the approval's operator is a row in `operators`."""
+    `operator_exists` whether the approval's operator is a row in `operators`;
+    `ticket_customer_ref` the `external_ref` of the scope ticket's customer (None: not found)."""
     spec = resolve(request)
     if spec is None:
         return Denied(UNKNOWN_TOOL_NAME, DenyReason.UNKNOWN_TOOL)
@@ -201,7 +210,9 @@ def authorize(
         names = sorted({str(item["loc"][0]) for item in error.errors() if item["loc"]})
         return Denied(spec.name, DenyReason.INVALID_ARGUMENTS, tuple(shown_name(n) for n in names))
     chosen = validated.model_dump(mode="json", exclude_none=True)
-    if Identity.CUSTOMER_REF in spec.injects and not CUSTOMER_REF.fullmatch(scope.customer_ref):
+    if Identity.CUSTOMER_REF in spec.injects and not (
+        CUSTOMER_REF.fullmatch(scope.customer_ref) and scope.customer_ref == ticket_customer_ref
+    ):
         return Denied(spec.name, DenyReason.INVALID_IDENTITY, (Identity.CUSTOMER_REF.value,))
     approved_by: uuid.UUID | None = None
     key: str | None = None

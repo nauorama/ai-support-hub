@@ -7,13 +7,21 @@ recorded in `tool_calls` with an audit record (`tool.called` or `tool.denied`), 
 The transport opens one MCP session per call over streamable HTTP with the bearer token. A tool
 error, a timeout or a broken connection is an `error` outcome with a short safe text; nothing
 from here raises into the node for those.
+
+P7-04:
+- The per-run limit is counted from the run's `tool_calls` rows of the scope's node (denied ones
+  too), not in memory, so it holds across a resume or a second session of the same run.
+- A tool that injects `customer_ref` runs only when the scope's reference is the one of the
+  scope ticket's own customer in the database (`invalid_identity` otherwise).
+- A local tool (`search_kb`) is decided and recorded like the others; the session's caller
+  passes its handler, which returns the value for the caller and a short summary to store.
 """
 
 import asyncio
 import json
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -25,9 +33,9 @@ from sqlalchemy import func, select
 from hub.audit import AuditValueError
 from hub.audit import record as audit_record
 from hub.audit.chain import mask_details
-from hub.db.models import Operator, Run, ToolCall
+from hub.db.models import Customer, Operator, Run, Ticket, ToolCall
 from hub.db.session import Database
-from hub.domain.enums import ActorType, ToolCallStatus
+from hub.domain.enums import ActorType, ToolCallStatus, ToolNode
 from hub.guardrails.masking import mask_text
 from hub.tools.permissions import (
     MAX_NAME_LENGTH,
@@ -40,6 +48,7 @@ from hub.tools.permissions import (
     authorize,
     resolve,
 )
+from hub.tools.registry import Identity
 
 CALLED_ACTION = "tool.called"
 DENIED_ACTION = "tool.denied"
@@ -81,6 +90,19 @@ class McpTransport:
 
 
 @dataclass(frozen=True)
+class LocalResult:
+    """What a local tool's handler returns: `result` goes to the caller only; `summary` is
+    stored (masked, shortened), so it must hold no text the table may not keep."""
+
+    result: dict[str, Any]
+    summary: str
+
+
+# A local tool's handler gets the validated arguments.
+type LocalTool = Callable[[dict[str, Any]], Awaitable[LocalResult]]
+
+
+@dataclass(frozen=True)
 class ToolOutcome:
     tool: str
     status: ToolCallStatus
@@ -114,6 +136,12 @@ class ToolCallRecorder(Protocol):
     async def side_effects_done(self, ticket_id: uuid.UUID, tool: str) -> int:
         """Successful calls of `tool` in any run of the ticket."""
 
+    async def calls_in_run(self, run_id: uuid.UUID, node: ToolNode) -> int:
+        """Every recorded call of `node` in the run, denied ones too."""
+
+    async def customer_ref_of(self, ticket_id: uuid.UUID) -> str | None:
+        """The `external_ref` of the ticket's customer; None when the ticket does not exist."""
+
     async def operator_exists(self, operator_id: uuid.UUID) -> bool:
         """Whether an approval's operator is a row in `operators`."""
 
@@ -146,10 +174,28 @@ class DbToolCallRecorder:
             found = await session.scalar(select(Operator.id).where(Operator.id == operator_id))
         return found is not None
 
+    async def calls_in_run(self, run_id: uuid.UUID, node: ToolNode) -> int:
+        async with self._database.sessions() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(ToolCall)
+                .where(ToolCall.run_id == run_id, ToolCall.node == node)
+            )
+        return int(count or 0)
+
+    async def customer_ref_of(self, ticket_id: uuid.UUID) -> str | None:
+        async with self._database.sessions() as session:
+            return await session.scalar(
+                select(Customer.external_ref)
+                .join(Ticket, Ticket.customer_id == Customer.id)
+                .where(Ticket.id == ticket_id)
+            )
+
     async def record(self, row: ToolCallRow) -> None:
         async with self._database.sessions.begin() as session:
             entry = ToolCall(
                 run_id=row.scope.run_id,
+                node=row.scope.node,
                 tool=row.tool,
                 arguments=row.arguments,
                 result_summary=row.result_summary,
@@ -237,13 +283,23 @@ class ToolClient:
         self._recorder = recorder
         self._timeout_s = timeout_s
 
-    def session(self, scope: ToolScope) -> "ToolSession":
-        return ToolSession(self, scope)
+    async def calls_in_run(self, scope: ToolScope) -> int:
+        return await self._recorder.calls_in_run(scope.run_id, scope.node)
+
+    def session(
+        self, scope: ToolScope, local: Mapping[str, LocalTool] | None = None
+    ) -> "ToolSession":
+        """`local`: the handlers of the local tools this session may run, by tool name."""
+        return ToolSession(self, scope, dict(local or {}))
 
     async def run(
-        self, request: ToolRequest, scope: ToolScope, calls_in_run: int, approval: Approval | None
+        self,
+        request: ToolRequest,
+        scope: ToolScope,
+        approval: Approval | None,
+        local: Mapping[str, LocalTool] | None = None,
     ) -> ToolOutcome:
-        decision = await self._decide(request, scope, calls_in_run, approval)
+        decision = await self._decide(request, scope, approval)
         if isinstance(decision, Denied):
             await self._recorder.record(
                 ToolCallRow(
@@ -260,34 +316,55 @@ class ToolClient:
                 )
             )
             return ToolOutcome(decision.tool, ToolCallStatus.DENIED, error=decision.reason.value)
-        return await self._execute(decision, request.caller, scope)
+        return await self._execute(decision, request.caller, scope, local or {})
 
     async def _decide(
-        self, request: ToolRequest, scope: ToolScope, calls_in_run: int, approval: Approval | None
+        self, request: ToolRequest, scope: ToolScope, approval: Approval | None
     ) -> Allowed | Denied:
         spec = resolve(request)
         done = 0
         operator_exists = False
+        owner: str | None = None
         if spec is not None and spec.side_effect:
             done = await self._recorder.side_effects_done(scope.ticket_id, spec.name)
             if approval is not None and approval.operator_id is not None:
                 operator_exists = await self._recorder.operator_exists(approval.operator_id)
+        if spec is not None and Identity.CUSTOMER_REF in spec.injects:
+            owner = await self._recorder.customer_ref_of(scope.ticket_id)
         return authorize(
             request,
             scope,
-            calls_in_run=calls_in_run,
+            calls_in_run=await self._recorder.calls_in_run(scope.run_id, scope.node),
             side_effects_for_ticket=done,
             approval=approval,
             operator_exists=operator_exists,
+            ticket_customer_ref=owner,
         )
 
-    async def _execute(self, allowed: Allowed, caller: Caller, scope: ToolScope) -> ToolOutcome:
+    async def _call(
+        self, allowed: Allowed, local: Mapping[str, LocalTool]
+    ) -> tuple[TransportResult, str | None]:
+        """The answer, and for a local tool its summary to store."""
         name = allowed.spec.name
-        started = time.monotonic()
-        try:
+        if not allowed.spec.local:
             # The transport has its own timeouts; this one holds whatever it does.
             async with asyncio.timeout(self._timeout_s):
-                answer = await self._transport.call(name, allowed.arguments, self._timeout_s)
+                return await self._transport.call(name, allowed.arguments, self._timeout_s), None
+        handler = local.get(name)
+        if handler is None:
+            return TransportResult(True, None, "local tool not available"), None
+        async with asyncio.timeout(self._timeout_s):
+            done = await handler(allowed.arguments)
+        return TransportResult(False, done.result), done.summary
+
+    async def _execute(
+        self, allowed: Allowed, caller: Caller, scope: ToolScope, local: Mapping[str, LocalTool]
+    ) -> ToolOutcome:
+        name = allowed.spec.name
+        started = time.monotonic()
+        summary: str | None = None
+        try:
+            answer, summary = await self._call(allowed, local)
         except Exception as failure:  # any failure is an `error` outcome; only its class is kept
             answer = TransportResult(True, None, type(failure).__name__)
         latency_ms = max(0, round((time.monotonic() - started) * 1000))
@@ -295,6 +372,9 @@ class ToolClient:
         status = ToolCallStatus.OK if ok else ToolCallStatus.ERROR
         error = None if ok else mask_text(answer.error_text or "no structured result")[:200]
         result = answer.structured if ok else None
+        stored = (
+            mask_text(summary)[:MAX_SUMMARY_LENGTH] if summary is not None else None
+        ) or result_summary(result)
         await self._recorder.record(
             ToolCallRow(
                 scope=scope,
@@ -304,7 +384,7 @@ class ToolClient:
                 arguments=stored_arguments(allowed.arguments),
                 side_effect=allowed.spec.side_effect,
                 latency_ms=latency_ms,
-                result_summary=result_summary(result) if ok else error,
+                result_summary=stored if ok else error,
                 approved_by=allowed.approved_by,
                 idempotency_key=allowed.idempotency_key if ok else None,
                 external_ref=external_ref(result) if allowed.spec.side_effect else None,
@@ -314,12 +394,15 @@ class ToolClient:
 
 
 class ToolSession:
-    """The calls of one node in one run. Counts them for the per-run limit, denied ones too."""
+    """The calls of one node in one run. The per-run limit is counted from the recorded rows,
+    so a second session of the same run and node continues the count."""
 
-    def __init__(self, client: ToolClient, scope: ToolScope) -> None:
+    def __init__(
+        self, client: ToolClient, scope: ToolScope, local: dict[str, LocalTool] | None = None
+    ) -> None:
         self._client = client
         self.scope = scope
-        self.calls = 0
+        self._local = local or {}
 
     async def call(
         self,
@@ -330,6 +413,12 @@ class ToolSession:
         approval: Approval | None = None,
     ) -> ToolOutcome:
         request = ToolRequest(name=name, arguments=arguments or {}, caller=caller)
-        outcome = await self._client.run(request, self.scope, self.calls, approval)
-        self.calls += 1
-        return outcome
+        return await self._client.run(request, self.scope, approval, self._local)
+
+    def local(self, name: str, handler: LocalTool) -> None:
+        """Give the session the handler of a local tool."""
+        self._local[name] = handler
+
+    async def calls_used(self) -> int:
+        """This node's recorded calls in the run, denied ones too (the limit's count)."""
+        return await self._client.calls_in_run(self.scope)

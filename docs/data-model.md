@@ -148,8 +148,8 @@ One execution of the workflow for one customer message.
 | can_answer | bool | from `DraftAnswer` (P3-05); an unchanged draft with `false` cannot be approved |
 | missing_information | text null | from `DraftAnswer`, shown to the operator; placeholders restored, then card data masked (G1) |
 | body | text | AI draft: placeholders restored, then card data masked (G1); markers without a kept citation removed; empty when `can_answer` is false |
-| citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`: `source_id` is the chunk id the writer cited, `title` the article title and `url` the section link `/help/<doc_id>#<anchor>`, both from the search hit (built by the server, never by the model); in baseline B0 `source_id` is a document id and `url` the article link |
-| evidence | jsonb | object: retrieved chunks and account facts shown to the operator; from P5-03 `{"variant": "rag_hybrid", "chunks": [{"chunk_id", "doc_id", "title", "section", "url", "score", "rank", "text"}], "dropped_markers": [n, ...]}` (the hits of the first search in rank order, external only); in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because they had no kept citation: the citation pointed to no external document, or the model wrote the marker without any citation) |
+| citations | jsonb | `[{"marker", "source_id", "doc_id", "title", "url"}]`: `source_id` is the chunk id the writer cited, `title` the article title and `url` the section link `/help/<doc_id>#<anchor>`, both from the search hit (built by the server, never by the model); in baseline B0 `source_id` is a document id and `url` the article link; for an account fact (P7-04) `source_id` is the fact id (`A1`), `doc_id` is `account`, `title` is `Your account` and `url` is empty (no help-centre page) |
+| evidence | jsonb | object: retrieved chunks and account facts shown to the operator; from P5-03 `{"variant": "rag_hybrid", "chunks": [{"chunk_id", "doc_id", "title", "section", "url", "score", "rank", "text"}], "dropped_markers": [n, ...]}` (the hits of the first search in rank order, external only; from P7-04 also the `search_kb` hits of the research loop, at most 8 chunks, and `"account_facts": [{"fact_id", "source_tool", "text"}]` when the research loop found any); in B0 `{"variant": "b0_full_kb", "documents": [{"doc_id", "title", "url"}], "dropped_markers": [n, ...]}` (the cited documents; markers removed from the body because they had no kept citation: the citation pointed to no external document, or the model wrote the marker without any citation) |
 | proposed_actions | jsonb | `[{"id": "a1", "type": "jira_create_issue", "params": {...}}]` |
 | groundedness | numeric(4,3) null | from the verify step (P5-04): supported claims / all claims; null when a code check failed (the LLM check did not run) and in B0 (no verify step) |
 | unsupported_claims | jsonb | from the verify step: `[{"claim", "source_id"}]`, the claims the verifier found unsupported, model-written so card masked (G1); empty when none or when the LLM check did not run |
@@ -187,9 +187,10 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 |---|---|---|
 | id | uuid PK | |
 | run_id | uuid FK | |
-| tool | text | e.g. `core_get_transaction` |
-| arguments | jsonb | masked; for a `denied` call only the argument names (`{"names": [...]}`), so a forged `customer_ref` is never stored; also only the names when the masked values are too long or cannot be stored |
-| result_summary | text | short (300 characters), masked; the safe error text for `error` |
+| node | text | `intake` \| `research` \| `handoff_prep` \| `act` (P7-04, migration 0012): the node that made the call; the per-run limits count a node's rows |
+| tool | text | e.g. `core_get_transaction`; `search_kb` for the research loop's knowledge-base search (a Hub tool, not on the MCP server) |
+| arguments | jsonb | masked (a `search_kb` query too); for a `denied` call only the argument names (`{"names": [...]}`), so a forged `customer_ref` is never stored; also only the names when the masked values are too long or cannot be stored |
+| result_summary | text | short (300 characters), masked; the safe error text for `error`; for `search_kb` only the hit chunk ids, never chunk text |
 | status | text | `ok` \| `error` \| `denied` |
 | side_effect | bool | true for Jira and Slack |
 | approved_by | uuid FK null | operator for approved actions |
@@ -198,7 +199,7 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 | latency_ms | int | |
 | created_at | timestamptz | |
 
-Written by `hub/tools/mcp_client.py` (P7-03, migration 0011), one row per call, allowed or denied by `tools/permissions.py` (G6), each with an audit record `tool.called` or `tool.denied` in the same transaction. Index on `run_id`.
+Written by `hub/tools/mcp_client.py` (P7-03, migration 0011), one row per call, allowed or denied by `tools/permissions.py` (G6), each with an audit record `tool.called` or `tool.denied` in the same transaction. Index on `(run_id, node)` (migration 0012): the per-run limit of a node (research 5, the others 1, denied calls included) is counted from these rows, so it holds across a resume or a second session of the run (P7-04). Migration 0012 filled `node` of older rows from their audit record.
 
 ### customer_memory
 

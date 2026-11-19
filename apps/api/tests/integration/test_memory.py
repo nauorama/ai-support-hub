@@ -11,8 +11,10 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import re
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -23,6 +25,7 @@ from hub.db.session import connect
 from hub.deps import Container, build_pipeline
 from hub.domain.memory import CustomerContext
 from hub.graph.context import GraphContext
+from hub.graph.nodes import decide as decide_node
 from hub.graph.nodes import intake as intake_node
 from hub.graph.state import run_input
 from hub.llm.gateway import FIXTURES_DIR, FixtureProvider
@@ -60,6 +63,10 @@ def fresh(memory_db: Urls) -> Urls:
     return memory_db
 
 
+MEMORY_BLOCK = re.compile(r"<memory>\n(.*?)\n</memory>", re.DOTALL)
+NO_MEMORY_BLOCK = "<memory>\n(none)\n</memory>"
+
+
 @dataclasses.dataclass
 class MemoryAnswers:
     """Answers the memory calls with scripted summaries and every other call from the fake-mode
@@ -67,6 +74,8 @@ class MemoryAnswers:
 
     summaries: list[str]
     seen: list[str] = dataclasses.field(default_factory=list)
+    # The `<memory>` blocks of the write requests (write/v3, P7-04).
+    memory_blocks: list[str] = dataclasses.field(default_factory=list)
     fixtures: FixtureProvider = dataclasses.field(
         default_factory=lambda: FixtureProvider(FIXTURES_DIR)
     )
@@ -74,13 +83,27 @@ class MemoryAnswers:
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
         system = str(request.messages[0]["content"])
         if "memory note" not in system:
-            return await self.fixtures.complete(request)
+            return await self.fixtures.complete(self._without_memory(request))
         self.seen.append(str(request.messages[-1]["content"]))
         content = json.dumps({"summary": self.summaries.pop(0)})
         return ProviderResponse(content=content, usage=Usage(input_tokens=50, output_tokens=20))
 
     async def embed(self, request: ProviderRequest) -> ProviderResponse:
         return await self.fixtures.embed(request)
+
+    def _without_memory(self, request: ProviderRequest) -> ProviderRequest:
+        """A write request with memory items is kept for the test and answered with the
+        recording of the same request without them (the recordings have no memory)."""
+        messages = list(request.messages)
+        user = messages[-1].get("content")
+        if not isinstance(user, str):
+            return request
+        found = MEMORY_BLOCK.search(user)
+        if found is None or found.group(1) == "(none)":
+            return request
+        self.memory_blocks.append(found.group(1))
+        messages[-1] = {**messages[-1], "content": MEMORY_BLOCK.sub(NO_MEMORY_BLOCK, user)}
+        return request.model_copy(update={"messages": messages})
 
 
 def _with(container: Container, provider: MemoryAnswers) -> Container:
@@ -166,10 +189,17 @@ def test_a_second_ticket_of_the_customer_has_the_first_ones_summary_in_context(
     assert isinstance(context, CustomerContext)
     assert [item.summary for item in context.memory] == [SUMMARY]
     assert context.memory[0].intent == "withdrawal_issue"
-    # the recorded SEPA run: triage withdrawal_issue, retry, then every claim supported
+    # write/v3 (P7-04): the writer reads the memory item, as context, in every write call
+    assert provider.memory_blocks
+    assert all(f"(withdrawal_issue): {SUMMARY}" in block for block in provider.memory_blocks)
+    # the recorded SEPA run: triage withdrawal_issue, then a retry. The memory shows an open case
+    # on the intent (row 6, `policy_review`), but with the write/v3 recordings (P7-04) the second
+    # check still finds an unsupported claim, and row 4 comes first. Row 6 alone is covered by
+    # tests/unit/test_routing.py.
     assert values["triage"].intent == "withdrawal_issue"
     assert values["retry_count"] == 1
-    assert (values["route"], values["route_reasons"]) == ("approval", ["policy_review"])
+    assert decide_node.open_case(values, datetime.now(UTC))
+    assert (values["route"], values["route_reasons"]) == ("approval", ["unsupported_claims"])
 
     assert [item["summary"] for item in detail["memory"]] == [SUMMARY]
     assert detail["memory"][0]["ticket_id"] == str(first)

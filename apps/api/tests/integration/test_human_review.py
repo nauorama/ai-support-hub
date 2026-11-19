@@ -355,7 +355,7 @@ async def test_a_failure_after_the_resume_fails_the_run_and_keeps_the_answer(
     assert ended is False
     assert _one(
         fresh, "SELECT status, route, route_reasons, error FROM runs WHERE id = %s", outcome.run_id
-    ) == ("failed", "approval", ["auto_reply_off"], "ConnectionError")
+    ) == ("failed", "approval", ["unsupported_claims"], "ConnectionError")
     assert _one(fresh, "SELECT status FROM tickets WHERE id = %s", ticket_id) == ("answered",)
 
 

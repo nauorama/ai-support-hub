@@ -17,13 +17,15 @@ What the state holds and why:
 - `customer_context`: memory items and the customer's other open tickets, loaded by intake
   (P6-05); context only, never a source of facts.
 
-Not here yet: the customer profile in `customer_context` and account facts in the evidence (P7).
+- P7-04: the customer profile (tier, country, restricted flag; never a restriction reason) in
+  `customer_context.profile`, and the account facts of the research loop in `evidence`.
 """
 
 from typing import Any, Literal, TypedDict
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from hub.domain.account import AccountFact, CustomerProfile
 from hub.domain.draft import Citation, DraftAnswer, ProposedAction
 from hub.domain.memory import CustomerContext, MemoryItem, OpenTicket
 from hub.domain.review import ReviewDecision
@@ -49,14 +51,16 @@ class InputFlags(BaseModel):
 
 
 class Evidence(BaseModel):
-    """What research found (ai-pipeline §4). Step 0 only until P6-04 and P7: one search with
-    the masked ticket text, no tool calls, no account facts."""
+    """What research found (ai-pipeline §4): step 0 (one search with the masked ticket text),
+    then the tool loop's hits and account facts (P7-04). `tool_calls`: the loop's calls in this
+    run, denied ones too."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     chunks: list[KbChunk]
     top_score: float
     score_margin: float
+    account_facts: list[AccountFact] = Field(default_factory=list)
     tool_calls: int = 0
     degraded: bool = False
 
@@ -114,6 +118,8 @@ STATE_TYPES: tuple[type[Any], ...] = (
     CustomerContext,
     MemoryItem,
     OpenTicket,
+    CustomerProfile,
+    AccountFact,
 )
 
 

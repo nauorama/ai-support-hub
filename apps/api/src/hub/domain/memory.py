@@ -8,14 +8,15 @@
   (ai-pipeline §6): another open ticket with the same intent, or a memory item of the last 14
   days on the same intent. A repeated contact means the first answer did not help.
 
-The profile part of the context (tier, country, restricted flag) comes with the customer tool
-(P7-04).
+- `profile`: tier, country and the restricted flag, loaded by intake with `core_get_customer`
+  (P7-04); None when the tool failed or the run has no tool client.
 """
 
 from datetime import datetime, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hub.domain.account import CustomerProfile
 from hub.domain.enums import Intent, TicketStatus
 
 MEMORY_ITEMS = 5  # ai-pipeline §9: intake loads the 5 newest
@@ -60,6 +61,7 @@ class CustomerContext(BaseModel):
 
     memory: list[MemoryItem] = Field(default_factory=list)
     open_tickets: list[OpenTicket] = Field(default_factory=list)
+    profile: CustomerProfile | None = None
 
 
 def shows_open_case(context: CustomerContext | None, intent: Intent | str, now: datetime) -> bool:

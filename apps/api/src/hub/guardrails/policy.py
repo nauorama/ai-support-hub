@@ -11,9 +11,9 @@ Pure functions over the loaded file:
   the first reason, the safe first steps, and the expected response time from `support_hours`.
 
 A high G4 injection score and the triage flag `injection_suspected` each hand the ticket off on
-their own (owner decision: OR, security G4). Two conditions need data that does not exist yet and
-never match until it does: `customer_restricted` (the customer profile, P7-04) and
-`memory_shows_open_case` (memory, P6-05).
+their own (owner decision: OR, security G4). `customer_restricted` reads the profile's flag that
+intake loads with `core_get_customer` (P7-04); it cannot match when no profile was loaded.
+`memory_shows_open_case` uses memory (P6-05).
 
 The loader refuses a file with an unknown intent, flag, action, condition or reason, an invalid
 regular expression or invalid support hours, so a typo cannot switch a rule off silently.
@@ -231,7 +231,7 @@ class RuleMatch:
 class GateInput:
     """What row 1 looks at. `english`: intake's language check (None, unknown, counts as not
     English; owner decision, P6-02). `pan_found`: G1 masked a card number in the message.
-    `customer_restricted`: None until the customer profile is loaded (P7-04)."""
+    `customer_restricted`: the profile's flag (P7-04); None when no profile was loaded."""
 
     triage: TriageResult
     message_masked: str

@@ -28,6 +28,7 @@ from hub.observability.readiness import (
     postgres_check,
     qdrant_check,
 )
+from hub.tools.mcp_client import DbToolCallRecorder, McpTransport, ToolClient
 
 
 @dataclass(frozen=True)
@@ -58,13 +59,22 @@ class Container:
         return OperatorSessionSigner(secret) if secret else None
 
 
+def tool_client(settings: Settings, database: Database) -> ToolClient | None:
+    token = settings.mcp_server_token.get_secret_value()
+    if not token:
+        return None
+    return ToolClient(McpTransport(settings.mcp_server_url, token), DbToolCallRecorder(database))
+
+
 def build_pipeline(
     settings: Settings, database: Database, retriever: KbSearch | None = None
 ) -> Pipeline:
     """Gateway, budget guard, active prompts, policy and confidence rule, loaded once: a broken
     config or prompt file stops the start. One guard serves the gateway (every online call)
     and the run (its start).
-    `retriever`: the knowledge-base search; without it every run is handed to a human."""
+    `retriever`: the knowledge-base search; without it every run is handed to a human.
+    The tool client (P7-04) needs `MCP_SERVER_TOKEN`: without it intake loads no profile and
+    research runs no tool loop."""
     budget = BudgetGuard(database, default_limit=Decimal(str(settings.daily_budget_usd)))
     gateway = build_gateway(settings, DbCallRecorder(database), budget)
     return Pipeline(
@@ -76,6 +86,8 @@ def build_pipeline(
         verify_prompt=active_prompt(settings.prompts_dir, gateway.models, "verify"),
         handoff_prompt=active_prompt(settings.prompts_dir, gateway.models, "handoff_summary"),
         memory_prompt=active_prompt(settings.prompts_dir, gateway.models, "memory_summary"),
+        research_prompt=active_prompt(settings.prompts_dir, gateway.models, "research"),
+        tools=tool_client(settings, database),
         policy=load_policy(settings.policy_config),
         confidence_rule=load_confidence(settings.confidence_config),
         retriever=retriever,

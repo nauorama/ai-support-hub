@@ -32,6 +32,7 @@ from hub.domain.enums import (
     SettingKey,
     TicketStatus,
     ToolCallStatus,
+    ToolNode,
     Urgency,
 )
 from hub.domain.kb import Product, Visibility
@@ -62,6 +63,7 @@ ENUM_COLUMNS: list[tuple[str, str, type[StrEnum]]] = [
     ("kb_documents", "visibility", Visibility),
     ("customer_memory", "kind", MemoryKind),
     ("tool_calls", "status", ToolCallStatus),
+    ("tool_calls", "node", ToolNode),
 ]
 
 # The dialect the app uses (psycopg 3), without a database.
