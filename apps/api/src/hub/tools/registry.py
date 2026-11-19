@@ -1,9 +1,10 @@
 """The tools of the `support-tools` MCP server as the Hub sees them (API §7, ai-pipeline §4).
 
 Each tool has an argument model with only the arguments a caller may choose. The identity
-arguments (`customer_ref`, `ticket_id`) are never in it: `hub.tools.permissions` adds them from
-the run state (ADR-0011). The argument models forbid extra fields, so a caller that sends an
-identity argument anyway fails validation; permissions checks for that first and records it.
+arguments (`customer_ref`, `ticket_id`, the Slack alert's `urgency`) are never in it:
+`hub.tools.permissions` adds them from the run state (ADR-0011). The argument models forbid
+extra fields, so a caller that sends an identity argument anyway fails validation; permissions
+checks for that first and records it.
 
 Only the four read tools of the core mock are given to the model (`MODEL_TOOLS`), under the
 names of ai-pipeline §4. `search_kb` is not an MCP tool; the research loop adds it (P7-04).
@@ -17,7 +18,6 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from hub.domain.draft import IssueType
-from hub.domain.enums import Urgency
 from hub.domain.seed import TransactionRef, TransactionStatus, TransactionType
 
 # Same bound as the server (`MAX_TRANSACTIONS` in support_tools.adapters.core).
@@ -29,6 +29,8 @@ class Identity(StrEnum):
 
     CUSTOMER_REF = "customer_ref"
     TICKET_ID = "ticket_id"
+    # The ticket's triage urgency: the Slack alert is only for `high` (ai-pipeline §3).
+    URGENCY = "urgency"
 
 
 IDENTITY_ARGUMENTS = frozenset(item.value for item in Identity)
@@ -68,7 +70,7 @@ class CreateIssueArguments(_Arguments):
 
 
 class SlackAlertArguments(_Arguments):
-    urgency: Urgency
+    # `urgency` is injected from the run state, never chosen by a caller.
     text: str = Field(min_length=1, max_length=3000)
 
 
@@ -152,7 +154,7 @@ TOOLS: Mapping[str, ToolSpec] = {
         _spec(
             "slack_post_escalation",
             SlackAlertArguments,
-            {Identity.TICKET_ID},
+            {Identity.TICKET_ID, Identity.URGENCY},
             side_effect=True,
         ),
     )

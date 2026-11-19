@@ -25,7 +25,7 @@ from sqlalchemy import func, select
 from hub.audit import AuditValueError
 from hub.audit import record as audit_record
 from hub.audit.chain import mask_details
-from hub.db.models import Run, ToolCall
+from hub.db.models import Operator, Run, ToolCall
 from hub.db.session import Database
 from hub.domain.enums import ActorType, ToolCallStatus
 from hub.guardrails.masking import mask_text
@@ -38,6 +38,7 @@ from hub.tools.permissions import (
     ToolRequest,
     ToolScope,
     authorize,
+    resolve,
 )
 
 CALLED_ACTION = "tool.called"
@@ -113,6 +114,9 @@ class ToolCallRecorder(Protocol):
     async def side_effects_done(self, ticket_id: uuid.UUID, tool: str) -> int:
         """Successful calls of `tool` in any run of the ticket."""
 
+    async def operator_exists(self, operator_id: uuid.UUID) -> bool:
+        """Whether an approval's operator is a row in `operators`."""
+
     async def record(self, row: ToolCallRow) -> None:
         """Store the row and its audit record in one transaction."""
 
@@ -136,6 +140,11 @@ class DbToolCallRecorder:
                 )
             )
         return int(count or 0)
+
+    async def operator_exists(self, operator_id: uuid.UUID) -> bool:
+        async with self._database.sessions() as session:
+            found = await session.scalar(select(Operator.id).where(Operator.id == operator_id))
+        return found is not None
 
     async def record(self, row: ToolCallRow) -> None:
         async with self._database.sessions.begin() as session:
@@ -256,16 +265,20 @@ class ToolClient:
     async def _decide(
         self, request: ToolRequest, scope: ToolScope, calls_in_run: int, approval: Approval | None
     ) -> Allowed | Denied:
-        first = authorize(request, scope, calls_in_run=calls_in_run, approval=approval)
-        if isinstance(first, Denied) or not first.spec.side_effect:
-            return first
-        done = await self._recorder.side_effects_done(scope.ticket_id, first.spec.name)
+        spec = resolve(request)
+        done = 0
+        operator_exists = False
+        if spec is not None and spec.side_effect:
+            done = await self._recorder.side_effects_done(scope.ticket_id, spec.name)
+            if approval is not None and approval.operator_id is not None:
+                operator_exists = await self._recorder.operator_exists(approval.operator_id)
         return authorize(
             request,
             scope,
             calls_in_run=calls_in_run,
             side_effects_for_ticket=done,
             approval=approval,
+            operator_exists=operator_exists,
         )
 
     async def _execute(self, allowed: Allowed, caller: Caller, scope: ToolScope) -> ToolOutcome:

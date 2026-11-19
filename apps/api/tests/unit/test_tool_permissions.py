@@ -9,10 +9,11 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from hub.domain.enums import Urgency
 from hub.tools.permissions import (
     ALLOWLIST,
     MAX_CALLS_PER_RUN,
-    MAX_NAME_LENGTH,
+    UNKNOWN_TOOL_NAME,
     Allowed,
     Approval,
     ApprovalBasis,
@@ -39,11 +40,18 @@ TICKET_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000a002")
 OTHER_TICKET_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000a003")
 OPERATOR_ID = uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000a004")
 ISSUE = {"issue_type": "dispute", "summary": "Card payment dispute", "description": "Check it."}
-ALERT = {"urgency": "high", "text": "Urgent handoff: suspected account takeover."}
+ALERT = {"text": "Urgent handoff: suspected account takeover."}
+VISA = "4111 1111 1111 1111"  # public test card number
 
 
-def scope(node: ToolNode = ToolNode.RESEARCH, customer_ref: str = "CUS-0001") -> ToolScope:
-    return ToolScope(run_id=RUN_ID, ticket_id=TICKET_ID, customer_ref=customer_ref, node=node)
+def scope(
+    node: ToolNode = ToolNode.RESEARCH,
+    customer_ref: str = "CUS-0001",
+    urgency: Urgency | None = None,
+) -> ToolScope:
+    return ToolScope(
+        run_id=RUN_ID, ticket_id=TICKET_ID, customer_ref=customer_ref, node=node, urgency=urgency
+    )
 
 
 def model(name: str, **arguments: object) -> ToolRequest:
@@ -61,6 +69,7 @@ def decide(
     calls: int = 0,
     done: int = 0,
     approval: Approval | None = None,
+    operator_exists: bool = True,
 ) -> Allowed | Denied:
     return authorize(
         request,
@@ -68,6 +77,7 @@ def decide(
         calls_in_run=calls,
         side_effects_for_ticket=done,
         approval=approval,
+        operator_exists=operator_exists,
     )
 
 
@@ -137,7 +147,7 @@ def test_identity_is_injected_from_the_scope() -> None:
     assert decision.arguments == {"reference": "TX-000012", "customer_ref": "CUS-0001"}
 
 
-@pytest.mark.parametrize("argument", ["customer_ref", "ticket_id", "idempotency_key"])
+@pytest.mark.parametrize("argument", ["customer_ref", "ticket_id", "urgency", "idempotency_key"])
 @pytest.mark.parametrize("caller", list(Caller))
 def test_a_supplied_identity_argument_is_denied(argument: str, caller: Caller) -> None:
     name = "get_account" if caller is Caller.MODEL else "core_get_customer"
@@ -215,13 +225,14 @@ def test_a_tool_outside_the_allow_list_is_denied(node: ToolNode, name: str) -> N
 
 @pytest.mark.parametrize("name", ["jira_create_issue", "core_get_customer", "delete_everything"])
 def test_a_model_can_name_only_model_tools(name: str) -> None:
-    assert decide(model(name)) == Denied(name, DenyReason.UNKNOWN_TOOL)
+    assert decide(model(name)) == Denied(UNKNOWN_TOOL_NAME, DenyReason.UNKNOWN_TOOL)
 
 
-def test_an_unknown_name_is_shortened() -> None:
-    decision = decide(model("x" * 500))
-    assert isinstance(decision, Denied)
-    assert len(decision.tool) == MAX_NAME_LENGTH
+@pytest.mark.parametrize("name", [VISA, "CUS-0002", "x" * 500])
+@pytest.mark.parametrize("caller", list(Caller))
+def test_an_unknown_name_is_never_kept(name: str, caller: Caller) -> None:
+    decision = decide(ToolRequest(name=name, arguments={}, caller=caller))
+    assert decision == Denied("unknown", DenyReason.UNKNOWN_TOOL)
 
 
 # --- arguments and limits --------------------------------------------------------------------
@@ -269,7 +280,9 @@ def test_a_second_side_effect_for_the_ticket_is_denied() -> None:
 def test_a_side_effect_tool_without_approval_is_denied() -> None:
     decision = decide(code("jira_create_issue", **ISSUE), scope(ToolNode.ACT))
     assert decision == Denied("jira_create_issue", DenyReason.APPROVAL_REQUIRED)
-    alert = decide(code("slack_post_escalation", **ALERT), scope(ToolNode.HANDOFF_PREP))
+    alert = decide(
+        code("slack_post_escalation", **ALERT), scope(ToolNode.HANDOFF_PREP, urgency=Urgency.HIGH)
+    )
     assert alert == Denied("slack_post_escalation", DenyReason.APPROVAL_REQUIRED)
 
 
@@ -291,11 +304,13 @@ def test_an_approved_jira_issue_is_allowed_with_identity_and_key() -> None:
 def test_an_urgent_handoff_alert_is_allowed_without_an_operator() -> None:
     decision = decide(
         code("slack_post_escalation", **ALERT),
-        scope(ToolNode.HANDOFF_PREP),
+        scope(ToolNode.HANDOFF_PREP, urgency=Urgency.HIGH),
         approval=alert_approval(),
+        operator_exists=False,
     )
     assert isinstance(decision, Allowed)
     assert decision.arguments == ALERT | {
+        "urgency": "high",
         "ticket_id": str(TICKET_ID),
         "idempotency_key": idempotency_key("slack_post_escalation", TICKET_ID),
     }
@@ -322,6 +337,37 @@ def test_an_approval_for_something_else_is_denied(approval: Approval) -> None:
 def test_an_operator_approval_does_not_cover_the_slack_alert() -> None:
     approval = alert_approval(basis=ApprovalBasis.OPERATOR_REVIEW, operator_id=OPERATOR_ID)
     decision = decide(
-        code("slack_post_escalation", **ALERT), scope(ToolNode.HANDOFF_PREP), approval=approval
+        code("slack_post_escalation", **ALERT),
+        scope(ToolNode.HANDOFF_PREP, urgency=Urgency.HIGH),
+        approval=approval,
     )
     assert decision == Denied("slack_post_escalation", DenyReason.APPROVAL_MISMATCH)
+
+
+@pytest.mark.parametrize("urgency", [None, Urgency.NORMAL, Urgency.LOW])
+def test_the_alert_needs_high_urgency_in_the_state(urgency: Urgency | None) -> None:
+    decision = decide(
+        code("slack_post_escalation", **ALERT),
+        scope(ToolNode.HANDOFF_PREP, urgency=urgency),
+        approval=alert_approval(),
+    )
+    assert decision == Denied("slack_post_escalation", DenyReason.NOT_URGENT, ("urgency",))
+
+
+def test_a_caller_cannot_claim_high_urgency() -> None:
+    decision = decide(
+        code("slack_post_escalation", urgency="high", **ALERT),
+        scope(ToolNode.HANDOFF_PREP, urgency=Urgency.NORMAL),
+        approval=alert_approval(),
+    )
+    assert decision == Denied("slack_post_escalation", DenyReason.IDENTITY_ARGUMENT, ("urgency",))
+
+
+def test_an_approval_by_an_unknown_operator_is_denied() -> None:
+    decision = decide(
+        code("jira_create_issue", **ISSUE),
+        scope(ToolNode.ACT),
+        approval=operator_approval(),
+        operator_exists=False,
+    )
+    assert decision == Denied("jira_create_issue", DenyReason.UNKNOWN_OPERATOR)

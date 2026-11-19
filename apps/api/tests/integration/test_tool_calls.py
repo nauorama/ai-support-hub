@@ -259,3 +259,30 @@ async def test_a_wrong_token_is_an_error_outcome(
     assert outcome.status is ToolCallStatus.ERROR
     [row] = await _rows(database)
     assert row.status is ToolCallStatus.ERROR
+
+
+async def test_an_unknown_operator_and_a_card_as_tool_name_are_denied(
+    client: ToolClient, database: Database
+) -> None:
+    approval = Approval(
+        tool="jira_create_issue",
+        ticket_id=TICKET_ID,
+        basis=ApprovalBasis.OPERATOR_REVIEW,
+        operator_id=uuid.UUID("0193a0c2-7d5e-7a01-8b02-00000000d0ff"),
+        arguments=ISSUE,
+    )
+    issue = await client.session(_scope(ToolNode.ACT)).call(
+        "jira_create_issue", ISSUE, approval=approval
+    )
+    assert issue.error == "unknown_operator"
+    card = "4111 1111 1111 1111"  # public test card number
+    named = await client.session(_scope(ToolNode.RESEARCH)).call(card, caller=Caller.MODEL)
+    assert named.tool == "unknown"
+    rows = await _rows(database)
+    assert [(row.tool, row.status) for row in rows] == [
+        ("jira_create_issue", ToolCallStatus.DENIED),
+        ("unknown", ToolCallStatus.DENIED),
+    ]
+    async with database.sessions() as session:
+        stored = await session.scalars(select(AuditLog.details))
+        assert "4111" not in str(list(stored))

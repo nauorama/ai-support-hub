@@ -64,6 +64,10 @@ class FakeCore:
 @dataclass
 class MemoryRecorder:
     rows: list[ToolCallRow] = field(default_factory=list)
+    operators: set[uuid.UUID] = field(default_factory=lambda: {OPERATOR_ID})
+
+    async def operator_exists(self, operator_id: uuid.UUID) -> bool:
+        return operator_id in self.operators
 
     async def side_effects_done(self, ticket_id: uuid.UUID, tool: str) -> int:
         return sum(
@@ -281,3 +285,31 @@ def test_result_helpers() -> None:
     assert external_ref({"key": "TB-7"}) == "TB-7"
     assert external_ref({"ts": "1.2", "created": True}) == "1.2"
     assert external_ref({"created": True}) is None
+
+
+async def test_a_card_number_as_tool_name_is_never_stored(
+    client: ToolClient, core: FakeCore, recorder: MemoryRecorder
+) -> None:
+    outcome = await client.session(scope()).call(VISA, caller=Caller.MODEL)
+    assert outcome.tool == "unknown"
+    assert outcome.error == "unknown_tool"
+    assert recorder.rows[0].tool == "unknown"
+    assert "4111" not in repr(recorder.rows[0])
+    assert core.calls == []
+
+
+async def test_an_approval_by_an_unknown_operator_is_denied(
+    client: ToolClient, core: FakeCore, recorder: MemoryRecorder
+) -> None:
+    approval = Approval(
+        tool="jira_create_issue",
+        ticket_id=TICKET_ID,
+        basis=ApprovalBasis.OPERATOR_REVIEW,
+        operator_id=uuid.uuid4(),
+        arguments=ISSUE,
+    )
+    outcome = await client.session(scope(ToolNode.ACT)).call(
+        "jira_create_issue", ISSUE, approval=approval
+    )
+    assert outcome.error == "unknown_operator"
+    assert core.calls == []

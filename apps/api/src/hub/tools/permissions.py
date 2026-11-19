@@ -16,7 +16,8 @@ Rules, in the order they are checked:
 5. The arguments match the tool's argument model (extra fields forbidden).
 6. A side-effect tool runs only with an approval for exactly this tool, this ticket and these
    arguments, of the kind the tool needs: an operator's review for Jira, the urgent-handoff rule
-   of `handoff_prep` for the Slack alert (ai-pipeline §3).
+   of `handoff_prep` for the Slack alert (ai-pipeline §3). The operator must exist; the alert
+   needs the ticket's urgency `high`, taken from the run state (the scope), never from arguments.
 """
 
 import re
@@ -28,6 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from hub.domain.enums import Urgency
 from hub.tools.registry import (
     IDEMPOTENCY_KEY,
     IDENTITY_ARGUMENTS,
@@ -40,6 +42,9 @@ from hub.tools.registry import (
 CUSTOMER_REF = re.compile(r"^CUS-\d{4}$")
 # A denied name is stored for the operator; a model can make it any length.
 MAX_NAME_LENGTH = 64
+# Stored instead of a tool name that is not in the registry: a model chooses that name, and it
+# may hold card data or another customer's reference.
+UNKNOWN_TOOL_NAME = "unknown"
 
 
 class ToolNode(StrEnum):
@@ -110,6 +115,8 @@ class DenyReason(StrEnum):
     INVALID_IDENTITY = "invalid_identity"
     APPROVAL_REQUIRED = "approval_required"
     APPROVAL_MISMATCH = "approval_mismatch"
+    UNKNOWN_OPERATOR = "unknown_operator"
+    NOT_URGENT = "not_urgent"
 
 
 @dataclass(frozen=True)
@@ -120,6 +127,8 @@ class ToolScope:
     ticket_id: uuid.UUID
     customer_ref: str
     node: ToolNode
+    # The triage urgency of the ticket (state); the Slack alert needs `high`.
+    urgency: Urgency | None = None
 
 
 @dataclass(frozen=True)
@@ -169,12 +178,14 @@ def authorize(
     calls_in_run: int,
     side_effects_for_ticket: int = 0,
     approval: Approval | None = None,
+    operator_exists: bool = False,
 ) -> Allowed | Denied:
     """Decide one tool call. `calls_in_run` counts this node's earlier calls in the run (denied
-    ones too); `side_effects_for_ticket` the successful calls of this tool for the ticket."""
+    ones too); `side_effects_for_ticket` the successful calls of this tool for the ticket;
+    `operator_exists` whether the approval's operator is a row in `operators`."""
     spec = resolve(request)
     if spec is None:
-        return Denied(shown_name(request.name), DenyReason.UNKNOWN_TOOL)
+        return Denied(UNKNOWN_TOOL_NAME, DenyReason.UNKNOWN_TOOL)
     if spec.name not in ALLOWLIST[scope.node]:
         return Denied(spec.name, DenyReason.NOT_ALLOWED)
     if calls_in_run >= MAX_CALLS_PER_RUN[scope.node]:
@@ -199,6 +210,10 @@ def authorize(
             return Denied(spec.name, DenyReason.APPROVAL_REQUIRED)
         if not _approval_matches(approval, spec, scope, chosen):
             return Denied(spec.name, DenyReason.APPROVAL_MISMATCH)
+        if approval.basis is ApprovalBasis.OPERATOR_REVIEW and not operator_exists:
+            return Denied(spec.name, DenyReason.UNKNOWN_OPERATOR)
+        if approval.basis is ApprovalBasis.URGENT_HANDOFF and scope.urgency is not Urgency.HIGH:
+            return Denied(spec.name, DenyReason.NOT_URGENT, (Identity.URGENCY.value,))
         approved_by = approval.operator_id
         key = idempotency_key(spec.name, scope.ticket_id)
     arguments = {**chosen, **_identity(spec, scope)}
@@ -208,7 +223,11 @@ def authorize(
 
 
 def _identity(spec: ToolSpec, scope: ToolScope) -> dict[str, str]:
-    values = {Identity.CUSTOMER_REF: scope.customer_ref, Identity.TICKET_ID: str(scope.ticket_id)}
+    values = {
+        Identity.CUSTOMER_REF: scope.customer_ref,
+        Identity.TICKET_ID: str(scope.ticket_id),
+        Identity.URGENCY: str(scope.urgency),
+    }
     return {item.value: values[item] for item in spec.injects}
 
 
