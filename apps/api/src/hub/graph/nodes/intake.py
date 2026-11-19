@@ -21,7 +21,15 @@ Customer context (P6-05, ai-pipeline §9): up to 5 memory items that have not ex
 customer's other open tickets (id, intent, status), for `memory_shows_open_case` in `decide`.
 The customer is the ticket's own, never one a model named. `intake.done` gets their counts.
 
-Not built yet: the customer profile (`core_get_customer`, P7-04).
+Customer profile (P7-04): `core_get_customer` through the tool client, with the scope built
+from the tickets row (`hub.graph.tools`). Intake keeps tier, country and the restricted flag
+(`hub.tools.facts.profile`), never a reason; `policy_gate` hands a restricted customer off
+(row 1, `restricted_account`). Fail-closed (owner decision, PR #41): when the tool client is
+there but the profile cannot be loaded (error, timeout, denial, unreadable result), the
+restricted status is unknown, so intake records `intake:ProfileUnavailableError` in `errors` and
+the ticket is handed off (`system_error`). A run without a tool client (unit tests, the
+evaluation runner until P7-06) loads no profile and goes on. `intake.done` gets
+`profile_loaded`.
 """
 
 import re
@@ -34,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from hub.audit import record
 from hub.db.models import Message
 from hub.db.repositories import MemoryRepository, MessageRepository, TicketRepository
+from hub.domain.account import CustomerProfile
 from hub.domain.enums import ActorType, TicketStatus
 from hub.domain.memory import (
     MEMORY_ITEMS,
@@ -45,6 +54,7 @@ from hub.domain.memory import (
 from hub.graph.context import GraphContext, ids
 from hub.graph.state import InputFlags, TicketState
 from hub.graph.store import ticket
+from hub.graph.tools import tool_scope
 from hub.guardrails.injection import InjectionResult, score_injection
 from hub.guardrails.output_checks import (
     MIN_WORDS_FOR_LANGUAGE,
@@ -53,6 +63,8 @@ from hub.guardrails.output_checks import (
     words,
 )
 from hub.guardrails.placeholders import replace_pii, restore_pii
+from hub.tools.facts import profile as read_profile
+from hub.tools.permissions import ToolNode
 
 HISTORY_TURNS = 10  # ai-pipeline §2: the last 10 turns of the ticket
 NO_HISTORY = "(no earlier messages)"
@@ -172,8 +184,24 @@ async def customer_context(
     )
 
 
+async def load_profile(state: TicketState, ctx: GraphContext) -> CustomerProfile | None:
+    """The ticket customer's profile through `core_get_customer`; None without a tool client or
+    when the call does not succeed (it is recorded in `tool_calls` either way)."""
+    tools = ctx.pipeline.tools
+    if tools is None:
+        return None
+    session = tools.session(await tool_scope(ctx.pipeline, state, ToolNode.INTAKE))
+    outcome = await session.call("core_get_customer")
+    return read_profile(outcome.result) if outcome.result is not None else None
+
+
+PROFILE_UNAVAILABLE = "intake:ProfileUnavailableError"
+
+
 async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     ticket_id, run_id = ids(state)
+    # Before the transaction: the tool call records its own row and audit record.
+    profile = await load_profile(state, ctx)
     message_id = uuid.UUID(state["message_id"])
     async with ctx.pipeline.database.sessions.begin() as session:
         messages = await MessageRepository(session).list_for_ticket(ticket_id)
@@ -186,6 +214,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             found.language = found_language
             await repository.save(found)
         context = await customer_context(session, found.customer_id, ticket_id)
+        context = context.model_copy(update={"profile": profile})
         await record(
             session,
             actor_type=ActorType.AI,
@@ -202,6 +231,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                 "pan_found": pan_found(trigger),
                 "memory_items": len(context.memory),
                 "open_tickets": len(context.open_tickets),
+                "profile_loaded": profile is not None,
             },
         )
     return TicketState(
@@ -216,4 +246,8 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             pan_found=pan_found(trigger),
         ),
         customer_context=context,
+        # Restricted status unknown is not safe: hand the ticket to a human.
+        errors=[*state.get("errors", []), PROFILE_UNAVAILABLE]
+        if ctx.pipeline.tools is not None and profile is None
+        else state.get("errors", []),
     )

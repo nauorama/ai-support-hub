@@ -41,6 +41,8 @@ DATA_TAGS: tuple[str, ...] = (
     "rubric",
     "transcript",
     "tool_calls",
+    # The research loop wraps each tool result as data (ai-pipeline §4, P7-04).
+    "tool_result",
 )
 
 # Look-alikes NFKD does not fold: Cyrillic and Greek letters that look like Latin ones, and

@@ -63,6 +63,7 @@ from hub.domain.enums import (
     SettingKey,
     TicketStatus,
     ToolCallStatus,
+    ToolNode,
     Urgency,
 )
 from hub.domain.kb import Product, Visibility
@@ -362,13 +363,16 @@ class ToolCall(Base):
     __tablename__ = "tool_calls"
     __table_args__ = (
         enum_check("status", ToolCallStatus),
+        enum_check("node", ToolNode),
         CheckConstraint("jsonb_typeof(arguments) = 'object'", name="arguments"),
         CheckConstraint("latency_ms >= 0", name="latency_ms"),
-        Index("ix_tool_calls_run_id", "run_id"),
+        # The research limit counts the calls of one node in one run (P7-04).
+        Index("ix_tool_calls_run_id_node", "run_id", "node"),
     )
 
     id: Mapped[uuid.UUID] = _id_column()
     run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("runs.id"))
+    node: Mapped[ToolNode] = mapped_column(TextEnum(ToolNode))
     tool: Mapped[str]
     arguments: Mapped[dict[str, Any]] = mapped_column(
         default=dict, server_default=text("'{}'::jsonb")

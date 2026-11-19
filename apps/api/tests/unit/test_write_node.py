@@ -101,11 +101,11 @@ def test_chunks_are_rendered_in_rank_order_with_their_source_id() -> None:
 
 
 def test_the_active_write_prompt_has_the_hits_and_the_ticket_in_the_user_part() -> None:
-    assert PROMPT.version == "write/v2"
+    assert PROMPT.version == "write/v3"
     assert PROMPT.front.role == "write"
-    assert PROMPT.placeholders == {"kb", "history", "ticket"}
+    assert PROMPT.placeholders == {"kb", "account_facts", "memory", "history", "ticket"}
     assert "{{" not in PROMPT.system
-    for name in ("kb", "history", "ticket"):
+    for name in ("kb", "account_facts", "memory", "history", "ticket"):
         assert f"<{name}>\n{{{{{name}}}}}\n</{name}>" in PROMPT.user
 
 
@@ -218,7 +218,7 @@ async def test_write_records_its_node_prompt_version_and_run() -> None:
     [row] = recorder.rows
     assert (row.node, row.prompt_version, row.run_id, row.context, row.status) == (
         LlmNode.WRITE,
-        "write/v2",
+        "write/v3",
         run_id,
         LlmCallContext.ONLINE,
         LlmCallStatus.OK,

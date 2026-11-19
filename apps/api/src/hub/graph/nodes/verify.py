@@ -105,7 +105,11 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
         return TicketState()
     _, run_id = ids(state)
     research = state.get("evidence")
-    evidence = await evidence_for_writer(pipeline, research.chunks if research else ())
+    evidence = await evidence_for_writer(
+        pipeline,
+        research.chunks if research else (),
+        research.account_facts if research else (),
+    )
     intake = intake_result(state)
     violations = check_draft(
         draft_to_check(answer, evidence, intake),
@@ -119,7 +123,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
             pipeline.gateway,
             pipeline.verify_prompt,
             draft=answer.answer,
-            kb=evidence.kb,
+            kb=evidence.sources,
             ticket=intake.message_for_llm,
             history=intake.history_for_llm,
             run_id=run_id,

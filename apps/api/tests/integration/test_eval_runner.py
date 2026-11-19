@@ -617,7 +617,7 @@ async def test_a_rag_ticket_runs_through_the_runner(
     assert {k: v for k, v in aliases.items() if k != EVAL_KB_ALIAS} == app_aliases
 
     (result,) = files.read_results(run_dir / files.RESULTS_FILE)
-    assert result.prompt_versions == {"triage": "v1", "write": "v2", "verify": "v1"}
+    assert result.prompt_versions == {"triage": "v1", "write": "v3", "verify": "v1"}
     assert result.draft is not None
     assert result.draft.evidence["variant"] == "rag_hybrid"
     ranked = result.draft.ranked_chunk_ids

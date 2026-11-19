@@ -12,6 +12,7 @@ import pytest
 from hub.domain.enums import ToolCallStatus
 from hub.tools.mcp_client import (
     MAX_ARGUMENTS_JSON,
+    LocalResult,
     ToolCallRow,
     ToolClient,
     TransportResult,
@@ -63,8 +64,18 @@ class FakeCore:
 
 @dataclass
 class MemoryRecorder:
+    """The recorder's queries over rows kept in memory, like `DbToolCallRecorder` over the
+    table. `owners`: ticket -> the customer's reference (the tickets row)."""
+
     rows: list[ToolCallRow] = field(default_factory=list)
     operators: set[uuid.UUID] = field(default_factory=lambda: {OPERATOR_ID})
+    owners: dict[uuid.UUID, str] = field(default_factory=lambda: {TICKET_ID: "CUS-0001"})
+
+    async def calls_in_run(self, run_id: uuid.UUID, node: ToolNode) -> int:
+        return sum(1 for row in self.rows if row.scope.run_id == run_id and row.scope.node is node)
+
+    async def customer_ref_of(self, ticket_id: uuid.UUID) -> str | None:
+        return self.owners.get(ticket_id)
 
     async def operator_exists(self, operator_id: uuid.UUID) -> bool:
         return operator_id in self.operators
@@ -82,8 +93,10 @@ class MemoryRecorder:
         self.rows.append(row)
 
 
-def scope(node: ToolNode = ToolNode.RESEARCH, customer_ref: str = "CUS-0001") -> ToolScope:
-    return ToolScope(run_id=RUN_ID, ticket_id=TICKET_ID, customer_ref=customer_ref, node=node)
+def scope(
+    node: ToolNode = ToolNode.RESEARCH, customer_ref: str = "CUS-0001", run_id: uuid.UUID = RUN_ID
+) -> ToolScope:
+    return ToolScope(run_id=run_id, ticket_id=TICKET_ID, customer_ref=customer_ref, node=node)
 
 
 @pytest.fixture
@@ -141,8 +154,9 @@ async def test_another_customers_transaction_is_not_found(
 
 @pytest.mark.parametrize("name", ["get_account", "get_transactions", "get_cards"])
 async def test_every_model_tool_is_sent_with_the_scope_customer(
-    client: ToolClient, core: FakeCore, name: str
+    client: ToolClient, core: FakeCore, recorder: MemoryRecorder, name: str
 ) -> None:
+    recorder.owners[TICKET_ID] = "CUS-0003"
     session = client.session(scope(customer_ref="CUS-0003"))
     outcome = await session.call(name, caller=Caller.MODEL)
     assert outcome.status is ToolCallStatus.OK
@@ -196,7 +210,7 @@ async def test_an_approved_issue_runs_once_per_ticket(
     assert details["caller"] == "code"
     assert "summary" not in details
     # A later run of the same ticket cannot create a second issue.
-    second = await client.session(scope(ToolNode.ACT)).call(
+    second = await client.session(scope(ToolNode.ACT, run_id=uuid.uuid4())).call(
         "jira_create_issue", ISSUE, approval=approval
     )
     assert second.error == "ticket_limit"
@@ -211,8 +225,91 @@ async def test_the_session_counts_denied_calls_towards_the_limit(
         await session.call("nope", caller=Caller.MODEL)
     assert (await session.call("get_cards", caller=Caller.MODEL)).status is ToolCallStatus.OK
     assert (await session.call("get_cards", caller=Caller.MODEL)).error == "run_limit"
-    assert session.calls == 6
+    assert await session.calls_used() == 6
     assert len(core.calls) == 1
+
+
+async def test_the_limit_is_counted_from_the_recorded_rows_across_sessions(
+    client: ToolClient, core: FakeCore, recorder: MemoryRecorder
+) -> None:
+    # A resume or a second session of the same run continues the count (P7-04).
+    first = client.session(scope())
+    for _ in range(3):
+        await first.call("get_cards", caller=Caller.MODEL)
+    second = client.session(scope())
+    assert await second.calls_used() == 3
+    await second.call("nope", caller=Caller.MODEL)
+    assert (await second.call("get_cards", caller=Caller.MODEL)).status is ToolCallStatus.OK
+    assert (await second.call("get_cards", caller=Caller.MODEL)).error == "run_limit"
+    # Another node of the same run has its own count.
+    intake = client.session(scope(ToolNode.INTAKE))
+    assert await intake.calls_used() == 0
+    assert (await intake.call("core_get_customer")).status is ToolCallStatus.OK
+    assert len(core.calls) == 5
+
+
+async def test_a_scope_with_another_customers_reference_is_refused(
+    client: ToolClient,
+    core: FakeCore,
+    recorder: MemoryRecorder,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The ticket belongs to CUS-0001; a scope that names CUS-0002 reaches nothing.
+    session = client.session(scope(customer_ref="CUS-0002"))
+    for name in ("get_account", "get_transactions", "get_cards"):
+        outcome = await session.call(name, caller=Caller.MODEL)
+        assert outcome.status is ToolCallStatus.DENIED
+        assert outcome.error == "invalid_identity"
+    assert core.calls == []
+    assert all(row.reason == "invalid_identity" for row in recorder.rows)
+    # Logged as a warning too (a scope bug, not a normal denial), without the reference.
+    warnings = [r for r in caplog.records if r.message == "tool call with an invalid identity"]
+    assert len(warnings) == 3
+    assert all(r.levelname == "WARNING" for r in warnings)
+    assert "CUS-0002" not in caplog.text
+    assert "CUS-0002" not in repr([row.arguments for row in recorder.rows])
+    # A ticket that does not exist has no customer either.
+    recorder.owners.clear()
+    outcome = await client.session(scope()).call("get_cards", caller=Caller.MODEL)
+    assert outcome.error == "invalid_identity"
+
+
+async def test_a_local_tool_is_decided_counted_and_recorded_with_its_summary(
+    client: ToolClient, core: FakeCore, recorder: MemoryRecorder
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def search(arguments: dict[str, Any]) -> LocalResult:
+        seen.append(arguments)
+        return LocalResult(result={"chunk_ids": ["fees#0"]}, summary=f"fees#0 {VISA}")
+
+    session = client.session(scope(), local={"search_kb": search})
+    outcome = await session.call("search_kb", {"query": "fees"}, caller=Caller.MODEL)
+    assert outcome.status is ToolCallStatus.OK
+    assert outcome.result == {"chunk_ids": ["fees#0"]}
+    assert seen == [{"query": "fees"}]
+    assert core.calls == []
+    [row] = recorder.rows
+    assert (row.tool, row.status, row.side_effect) == ("search_kb", ToolCallStatus.OK, False)
+    assert row.arguments == {"query": "fees"}
+    assert row.result_summary is not None
+    assert VISA not in row.result_summary
+    assert await session.calls_used() == 1
+
+
+async def test_a_local_tool_without_handler_or_failing_is_an_error(
+    client: ToolClient, recorder: MemoryRecorder
+) -> None:
+    async def broken(arguments: dict[str, Any]) -> LocalResult:
+        raise RuntimeError("secret")
+
+    missing = await client.session(scope()).call("search_kb", {"query": "x"}, caller=Caller.MODEL)
+    assert missing.status is ToolCallStatus.ERROR
+    session = client.session(scope())
+    session.local("search_kb", broken)
+    failed = await session.call("search_kb", {"query": "x"}, caller=Caller.MODEL)
+    assert failed.error == "RuntimeError"
+    assert "secret" not in repr(recorder.rows)
 
 
 # --- errors and what is stored ----------------------------------------------------------------

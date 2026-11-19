@@ -50,7 +50,11 @@ async def store_draft(
         raise ValueError("no draft")
     ticket_id, run_id = ids(state)
     research = state.get("evidence")
-    evidence = await evidence_for_writer(pipeline, research.chunks if research else ())
+    evidence = await evidence_for_writer(
+        pipeline,
+        research.chunks if research else (),
+        research.account_facts if research else (),
+    )
     verification = state.get("verification")
     models = state.get("models", {})
     clean = OutputMask(intake_result(state))

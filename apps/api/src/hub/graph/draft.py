@@ -2,10 +2,12 @@
 
 Pure functions, apart from `writer_evidence` and `internal_text`, which read the KB.
 
-Citations name chunk ids (B0: document ids). The server, not the model, turns each one into a
-link: the title of the chunk's article and the URL of its section (`/help/<doc_id>#<anchor>`,
-from the index payload). A citation whose id is not one of the hits is dropped with its marker,
-so a customer never sees a link the writer was not given.
+Citations name chunk ids (B0: document ids) or account fact ids (`A1`, P7-04). The server, not
+the model, turns each one into a link: the title of the chunk's article and the URL of its
+section (`/help/<doc_id>#<anchor>`, from the index payload); an account fact gets the title
+`Your account` and no URL (it is not a help-centre page). A citation whose id is not one of the
+hits or facts is dropped with its marker, so a customer never sees a link the writer was not
+given.
 
 Model output is untrusted (security T2-T5): every model-written string (draft body, missing
 information, proposed actions, triage summary) gets the run's placeholders restored and then
@@ -25,8 +27,10 @@ from sqlalchemy import select
 
 from hub.db.models import KbChunk as KbChunkRow
 from hub.db.models import KbDocument
+from hub.domain.account import AccountFact
 from hub.domain.draft import DraftAnswer
 from hub.domain.kb import Visibility
+from hub.domain.memory import CustomerContext
 from hub.domain.verification import Verification
 from hub.graph.nodes.intake import IntakeResult
 from hub.graph.pipeline import (
@@ -41,6 +45,13 @@ from hub.guardrails.output_checks import DraftToCheck, InternalText
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
 from hub.kb.retriever import KbChunk
+from hub.tools.facts import render_facts
+
+# The writer's blocks when there is nothing to put in them (write/v3).
+NO_ACCOUNT_FACTS = "(none)"
+NO_MEMORY = "(none)"
+ACCOUNT_DOC_ID = "account"
+ACCOUNT_TITLE = "Your account"
 
 
 @dataclass
@@ -99,6 +110,21 @@ class WriterEvidence:
     kb: str
     citable: Mapping[str, Citable]
     chunks: tuple[KbChunk, ...] | None = None
+    facts: tuple[AccountFact, ...] = ()
+
+    @property
+    def account_facts(self) -> str:
+        """The `{{account_facts}}` value of write/v3."""
+        return render_facts(self.facts) or NO_ACCOUNT_FACTS
+
+    @property
+    def sources(self) -> str:
+        """Every source as the verifier reads it (`{{kb}}` of verify/v1): the sections, then the
+        account facts in the same `Source id:` form. Without facts, the sections alone, so a
+        run without tools sends the same request as before P7-04."""
+        if not self.facts:
+            return self.kb
+        return "\n\n".join(part for part in (self.kb, render_facts(self.facts)) if part)
 
     def stored(self, cited: set[str], dropped: list[int]) -> dict[str, Any]:
         """`drafts.evidence` (data model): the hits of the search for the operator, or in B0
@@ -110,13 +136,16 @@ class WriterEvidence:
                 if item.source_id in cited
             ]
             return {"variant": self.variant, "documents": documents, "dropped_markers": dropped}
-        return {
+        stored: dict[str, Any] = {
             "variant": self.variant,
             "chunks": [
                 chunk.model_dump(include=STORED_CHUNK_FIELDS, mode="json") for chunk in self.chunks
             ],
             "dropped_markers": dropped,
         }
+        if self.facts:
+            stored["account_facts"] = [fact.model_dump(mode="json") for fact in self.facts]
+        return stored
 
 
 STORED_CHUNK_FIELDS = {"chunk_id", "doc_id", "title", "section", "url", "score", "rank", "text"}
@@ -130,15 +159,32 @@ def b0_evidence(sources: Sequence[KbSource]) -> WriterEvidence:
     )
 
 
-def rag_evidence(variant: str, hits: Sequence[KbChunk]) -> WriterEvidence:
-    """The hits as the writer reads them. Only `external` chunks can be cited: the search
-    filters on it, and this is the second check (AGENTS.md never-do 5)."""
+def rag_evidence(
+    variant: str, hits: Sequence[KbChunk], facts: Sequence[AccountFact] = ()
+) -> WriterEvidence:
+    """The hits and account facts as the writer reads them. Only `external` chunks can be
+    cited: the search filters on it, and this is the second check (AGENTS.md never-do 5)."""
     kept = tuple(hit for hit in hits if hit.visibility == "external")
+    citable = {h.chunk_id: Citable(h.chunk_id, h.doc_id, h.title, h.url) for h in kept}
+    citable.update(
+        {f.fact_id: Citable(f.fact_id, ACCOUNT_DOC_ID, ACCOUNT_TITLE, "") for f in facts}
+    )
     return WriterEvidence(
         variant=variant,
         kb=render_chunks(kept),
-        citable={h.chunk_id: Citable(h.chunk_id, h.doc_id, h.title, h.url) for h in kept},
+        citable=citable,
         chunks=kept,
+        facts=tuple(facts),
+    )
+
+
+def memory_text(context: CustomerContext | None) -> str:
+    """The `{{memory}}` value of write/v3: the memory items, newest first, context only."""
+    if context is None or not context.memory:
+        return NO_MEMORY
+    return "\n".join(
+        f"- {item.created_at.date().isoformat()} ({item.intent or 'other'}): {item.summary}"
+        for item in context.memory
     )
 
 
@@ -264,16 +310,18 @@ async def search(pipeline: Pipeline, query: str) -> list[KbChunk]:
     return list(rag_evidence(pipeline.variant, hits).chunks or ())
 
 
-async def evidence_for_writer(pipeline: Pipeline, chunks: Sequence[KbChunk]) -> WriterEvidence:
-    """What the writer reads. B0: every external document from Postgres. RAG: the chunks the
-    research step found."""
+async def evidence_for_writer(
+    pipeline: Pipeline, chunks: Sequence[KbChunk], facts: Sequence[AccountFact] = ()
+) -> WriterEvidence:
+    """What the writer reads. B0: every external document from Postgres. RAG: the chunks and
+    account facts the research step found."""
     if pipeline.variant == B0_VARIANT:
         async with pipeline.database.sessions() as session:
             sources = await load_external_sources(session)
         if not sources:
             raise KbUnavailableError
         return b0_evidence(sources)
-    return rag_evidence(pipeline.variant, chunks)
+    return rag_evidence(pipeline.variant, chunks, facts)
 
 
 async def writer_evidence(pipeline: Pipeline, query: str) -> WriterEvidence:

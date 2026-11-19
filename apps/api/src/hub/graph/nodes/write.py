@@ -1,7 +1,9 @@
 """Write node (docs/ai-pipeline.md §3): one structured call on the `write` role.
 
 RAG (`write/v2`, P5-03): the chunks of the research step go into the user part with their
-`Source id:` lines, and citations name chunk ids.
+`Source id:` lines, and citations name chunk ids. `write/v3` (P7-04) adds the account facts of
+the research loop (`<account_facts>`, cited as `A1`, ...) and the customer's memory items
+(`<memory>`, context only, never cited); a prompt without those placeholders gets neither.
 
 B0 (ai-pipeline §10) has no retrieval: every external KB document is in the system part of the
 prompt (`hub.kb.full_text`), marked for prompt caching, and the ticket and history are in the
@@ -16,7 +18,7 @@ import uuid
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import LlmCallContext, LlmNode
 from hub.graph.context import GraphContext, ids
-from hub.graph.draft import evidence_for_writer
+from hub.graph.draft import NO_ACCOUNT_FACTS, NO_MEMORY, evidence_for_writer, memory_text
 from hub.graph.state import TicketState
 from hub.llm.gateway import Gateway
 from hub.llm.prompts import Prompt, PromptError, cache_system
@@ -25,12 +27,29 @@ from hub.llm.schemas import CallContext, Message, Structured
 NODE = LlmNode.WRITE
 
 
-def write_messages(prompt: Prompt, *, kb: str, ticket: str, history: str) -> list[Message]:
+def write_messages(
+    prompt: Prompt,
+    *,
+    kb: str,
+    ticket: str,
+    history: str,
+    account_facts: str = NO_ACCOUNT_FACTS,
+    memory: str = NO_MEMORY,
+) -> list[Message]:
     """The messages of a write call. `make llm-requests` uses the same function, so the
     recorded requests match what `write` sends."""
     if prompt.node != NODE.value:
         raise PromptError(f"{prompt.version} is not a write prompt")
-    return cache_system(prompt.render({"kb": kb, "ticket": ticket, "history": history}))
+    values = {
+        "kb": kb,
+        "ticket": ticket,
+        "history": history,
+        "account_facts": account_facts,
+        "memory": memory,
+    }
+    return cache_system(
+        prompt.render({k: v for k, v in values.items() if k in prompt.placeholders})
+    )
 
 
 async def write(
@@ -40,11 +59,15 @@ async def write(
     kb: str,
     ticket: str,
     history: str,
+    account_facts: str = NO_ACCOUNT_FACTS,
+    memory: str = NO_MEMORY,
     run_id: uuid.UUID | None = None,
     context: LlmCallContext = LlmCallContext.ONLINE,
 ) -> Structured[DraftAnswer]:
     call = CallContext(context=context, node=NODE, run_id=run_id, prompt_version=prompt.version)
-    messages = write_messages(prompt, kb=kb, ticket=ticket, history=history)
+    messages = write_messages(
+        prompt, kb=kb, ticket=ticket, history=history, account_facts=account_facts, memory=memory
+    )
     return await gateway.complete_structured(prompt.front.role, messages, DraftAnswer, call=call)
 
 
@@ -52,13 +75,19 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
     pipeline = ctx.pipeline
     _, run_id = ids(state)
     research = state.get("evidence")
-    evidence = await evidence_for_writer(pipeline, research.chunks if research else ())
+    evidence = await evidence_for_writer(
+        pipeline,
+        research.chunks if research else (),
+        research.account_facts if research else (),
+    )
     written = await write(
         pipeline.gateway,
         pipeline.write_prompt,
         kb=evidence.kb,
         ticket=state["message_for_llm"],
         history=state["history_for_llm"],
+        account_facts=evidence.account_facts,
+        memory=memory_text(state.get("customer_context")),
         run_id=run_id,
         context=pipeline.context,
     )

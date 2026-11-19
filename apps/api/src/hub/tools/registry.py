@@ -6,8 +6,11 @@ arguments (`customer_ref`, `ticket_id`, the Slack alert's `urgency`) are never i
 extra fields, so a caller that sends an identity argument anyway fails validation; permissions
 checks for that first and records it.
 
-Only the four read tools of the core mock are given to the model (`MODEL_TOOLS`), under the
-names of ai-pipeline §4. `search_kb` is not an MCP tool; the research loop adds it (P7-04).
+Only the four read tools of the core mock and `search_kb` are given to the model
+(`MODEL_TOOLS`), under the names of ai-pipeline §4. `search_kb` is a local tool (`local`): it is
+not on the MCP server, the research loop runs it with the knowledge-base search (P7-04). It goes
+through the same permissions and is recorded in `tool_calls` like the others, so the research
+limit counts it.
 """
 
 from collections.abc import Mapping
@@ -58,6 +61,18 @@ class GetTransactionArguments(_Arguments):
     reference: TransactionRef = Field(description="Transaction reference, e.g. TX-000001")
 
 
+# A search query, written by the model; the loop masks it (G1) before it searches or stores it.
+MAX_QUERY_LENGTH = 300
+
+
+class SearchKbArguments(_Arguments):
+    query: str = Field(
+        min_length=1,
+        max_length=MAX_QUERY_LENGTH,
+        description="What to search the help centre for, in plain words (max 300 characters)",
+    )
+
+
 class GetIssueArguments(_Arguments):
     key: str = Field(pattern=r"^TB-[1-9]\d{0,8}$")
 
@@ -83,6 +98,8 @@ class ToolSpec:
     # The name and description the model sees; None: never given to a model.
     model_name: str | None = None
     model_description: str = ""
+    # Run by the Hub itself (the caller passes the handler), not by the MCP server.
+    local: bool = False
 
 
 def _spec(
@@ -93,6 +110,7 @@ def _spec(
     side_effect: bool = False,
     model_name: str | None = None,
     model_description: str = "",
+    local: bool = False,
 ) -> ToolSpec:
     return ToolSpec(
         name=name,
@@ -101,22 +119,36 @@ def _spec(
         side_effect=side_effect,
         model_name=model_name,
         model_description=model_description,
+        local=local,
     )
 
 
 _CUSTOMER = {Identity.CUSTOMER_REF}
 
+SEARCH_KB = "search_kb"
+
 TOOLS: Mapping[str, ToolSpec] = {
     spec.name: spec
     for spec in (
+        _spec(
+            SEARCH_KB,
+            SearchKbArguments,
+            set(),
+            model_name=SEARCH_KB,
+            model_description=(
+                "Search the help centre again, with other words or for a second question. "
+                "Returns up to 6 sections."
+            ),
+            local=True,
+        ),
         _spec(
             "core_get_customer",
             NoArguments,
             _CUSTOMER,
             model_name="get_account",
             model_description=(
-                "The customer's account: tier, country, verification status, whether the "
-                "account is restricted, limits and how much of each is used."
+                "The customer's account: tier, country, verification and upgrade status, "
+                "limits and how much of each is used."
             ),
         ),
         _spec(

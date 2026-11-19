@@ -211,3 +211,12 @@ class ToolCallStatus(StrEnum):
     OK = "ok"
     ERROR = "error"
     DENIED = "denied"
+
+
+class ToolNode(StrEnum):
+    """The graph nodes that call tools (`tool_calls.node`, security G6, P7-04)."""
+
+    INTAKE = "intake"
+    RESEARCH = "research"
+    HANDOFF_PREP = "handoff_prep"
+    ACT = "act"

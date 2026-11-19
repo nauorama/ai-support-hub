@@ -16,11 +16,11 @@
     "withdrawal-own-name#0"
   ],
   "run_01_retry": [
-    "physical-card-delivery#1",
-    "withdrawal-bank-details#0",
-    "withdrawal-times#0",
-    "incoming-payment-times#4",
+    "withdrawal-failed-or-returned#4",
     "withdrawal-times#3",
-    "complaints#2"
+    "physical-card-delivery#3",
+    "incoming-payment-not-arrived#0",
+    "payment-request-card-availability#3",
+    "withdrawal-times#4"
   ]
 }
