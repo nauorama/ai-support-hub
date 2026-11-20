@@ -757,3 +757,70 @@ def test_a_card_hidden_anywhere_in_a_valid_iban_never_survives(
             assert run[start : start + 5] not in card, result.text
     assert result.counts.get("IBAN", 0) + result.counts.get("PAN", 0) >= 1
     assert mask(result.text).text == result.text
+
+
+# --- canonical UUIDs (owner decision, P8-03) ---------------------------------------------------
+
+# Text masking used to make this "0b74d[CARD ****8741]-e5b0ef08c44e" (a Luhn-valid run across
+# its dashes).
+UUID_WITH_A_LUHN_RUN = "0b74d664-3640-4097-8741-e5b0ef08c44e"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        UUID_WITH_A_LUHN_RUN,
+        f"ticket {UUID_WITH_A_LUHN_RUN} claimed",
+        f'{{"ticket_id": "{UUID_WITH_A_LUHN_RUN}"}}',
+        f"id={UUID_WITH_A_LUHN_RUN}.",
+        UUID_WITH_A_LUHN_RUN.upper(),
+        f"{UUID_WITH_A_LUHN_RUN} {UUID_WITH_A_LUHN_RUN}",
+    ],
+)
+def test_a_canonical_uuid_stays_readable(text: str) -> None:
+    result = mask(text)
+    assert result.text == text
+    assert result.counts == {}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"{UUID_WITH_A_LUHN_RUN} card 4111 1111 1111 1111",
+        f"card 4111 1111 1111 1111, ticket {UUID_WITH_A_LUHN_RUN}",
+        f"{UUID_WITH_A_LUHN_RUN}\nCard: 4111-1111-1111-1111",
+    ],
+)
+def test_a_card_next_to_a_uuid_is_still_masked(text: str) -> None:
+    result = mask(text)
+    assert UUID_WITH_A_LUHN_RUN in result.text
+    assert "4111" not in result.text.replace(UUID_WITH_A_LUHN_RUN, "")
+    assert result.counts == {"PAN": 1}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A digit within a separator of the UUID: a card could be split across its edge.
+        f"4111 1111 1111 {UUID_WITH_A_LUHN_RUN}",
+        f"{UUID_WITH_A_LUHN_RUN} 1",
+        # Joined to a letter, digit, dash or underscore: not exactly a UUID.
+        f"x{UUID_WITH_A_LUHN_RUN}",
+        f"{UUID_WITH_A_LUHN_RUN}-1",
+        f"_{UUID_WITH_A_LUHN_RUN}",
+        # Not the 8-4-4-4-12 shape.
+        "0b74d6643640-4097-8741-e5b0ef08c44e",
+    ],
+)
+def test_a_uuid_that_does_not_stand_alone_is_masked_like_text(text: str) -> None:
+    assert mask(text).counts.get("PAN") == 1
+
+
+def test_a_card_in_the_shape_of_a_uuid_is_kept() -> None:
+    """Accepted limitation (security §3, P8-03)."""
+    text = "41111111-1111-1111-1111-111111111111"
+    assert mask(text).text == text
+
+
+def test_a_code_after_a_uuid_is_still_redacted() -> None:
+    assert mask(f"{UUID_WITH_A_LUHN_RUN} PIN 1234").text == f"{UUID_WITH_A_LUHN_RUN} PIN [REDACTED]"

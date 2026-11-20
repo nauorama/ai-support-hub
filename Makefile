@@ -8,10 +8,10 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm llm-requests eval eval-attacks models mcp mcp-smoke
+	record-llm llm-requests eval eval-attacks leak-scan models mcp mcp-smoke
 NOT_IMPLEMENTED := test-e2e \
 	eval-smoke eval-report web-types retention \
-	leak-scan export-review-candidates rollback
+	export-review-candidates rollback
 
 .PHONY: eval-rejudge help $(BUILT) $(NOT_IMPLEMENTED)
 
@@ -151,6 +151,11 @@ eval-attacks:
 	uv run python -m hub_evals.attacks $(if $(NO_CACHE),--no-cache,) \
 		$(if $(RUN_DIR),--run-dir $(RUN_DIR),) $(if $(NO_TOOLS),--no-tools,) \
 		$(if $(ESTIMATE),--estimate-only,) $(if $(PROBES),--probes-only,)
+
+# After an eval run (P8-03): card data and canary strings in both databases, the stack's logs and
+# the recorded model requests and results. Prints locations only, never the text; exit 1 on a hit.
+leak-scan:
+	$(COMPOSE) logs --no-color 2>/dev/null | uv run python -m hub_evals.leak_scan --logs -
 
 # Judge a finished RAG run again with the active judge prompts (judge calls only, P7-06):
 # RUN=evals/runs/<dir> writes <dir>-rejudged. Real models cost money: by hand.

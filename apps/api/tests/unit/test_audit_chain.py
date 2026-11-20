@@ -205,13 +205,16 @@ def test_values_jsonb_cannot_store_are_refused(details: dict[Any, Any], message:
         mask_details(details)
 
 
-# Text masking finds a Luhn-valid run across its dashes: "0b74d[CARD ****8741]-e5b0ef08c44e".
+# Text masking found a Luhn-valid run across its dashes ("0b74d[CARD ****8741]-e5b0ef08c44e")
+# until P8-03, which keeps a canonical UUID (owner decision, security §3).
 UUID_WITH_A_LUHN_RUN = "0b74d664-3640-4097-8741-e5b0ef08c44e"
 
 
-def test_text_masking_would_change_this_uuid() -> None:
-    """The reason UUID objects are kept; if masking changes, this example must be replaced."""
-    assert mask_text(UUID_WITH_A_LUHN_RUN) != UUID_WITH_A_LUHN_RUN
+def test_text_masking_keeps_this_uuid_but_not_a_card_next_to_it() -> None:
+    assert mask_text(UUID_WITH_A_LUHN_RUN) == UUID_WITH_A_LUHN_RUN
+    assert mask_field(f"{UUID_WITH_A_LUHN_RUN}, card 4111 1111 1111 1111") == (
+        f"{UUID_WITH_A_LUHN_RUN}, card [CARD ****1111]"
+    )
 
 
 def test_a_uuid_object_is_kept() -> None:
@@ -228,13 +231,29 @@ def test_a_uuid_object_is_kept() -> None:
     [
         UUID_WITH_A_LUHN_RUN,
         UUID_WITH_A_LUHN_RUN.upper(),
-        # UUID-shaped strings that hold a full card number (round-2 review).
+        # UUID-shaped strings that hold a full card number (round-2 review): kept since P8-03,
+        # an accepted limitation of the owner's decision (security §3).
         "41111111-1111-1111-abcd-ef0123456789",
         "00000000-4111-1111-1111-111100000000",
         "55555555-5555-4444-0000-000000000000",
     ],
 )
-def test_a_uuid_shaped_string_is_masked_like_any_text(text: str) -> None:
+def test_a_canonical_uuid_string_is_kept_like_a_uuid_object(text: str) -> None:
+    assert mask_text(text) == text
+    assert mask_id(text) == text
+    assert mask_field(text) == text
+    assert mask_details({"ref": text}) == {"ref": text}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"ref{UUID_WITH_A_LUHN_RUN}",
+        "41111111-1111-1111-abcd-ef0123456789-1",
+        "41111111-11111111-abcd-ef0123456789",
+    ],
+)
+def test_a_string_that_is_not_exactly_a_uuid_is_masked_like_any_text(text: str) -> None:
     assert mask_text(text) != text
     assert mask_id(text) == mask_text(text)
     assert mask_field(text) == mask_text(text)

@@ -787,6 +787,20 @@ async def test_a_failed_code_check_skips_the_model_call() -> None:
 
 
 @pytest.mark.usefixtures("no_internal_text")
+async def test_verify_finds_a_prompt_fragment_and_a_canary_in_the_draft() -> None:
+    """G7 code controls of P8-02: the pipeline's own prompts are the fragments."""
+    pipeline = _pipeline(ScriptedProvider({}))
+    fragment = " ".join(pipeline.write_prompt.system.split()[:12])
+    draft = _answer(
+        answer=f"A SEPA withdrawal takes 1 business day [1].\n\n{fragment} CANARY-INT-HERON"
+    )
+    update = await verify.run(_state(evidence=_evidence(HITS), draft=draft), _ctx(pipeline))
+    verification = update["verification"]
+    assert verification is not None
+    assert {"canary", "prompt_fragment"} <= set(verification.policy_violations)
+
+
+@pytest.mark.usefixtures("no_internal_text")
 async def test_a_failed_claim_check_counts_the_draft_as_unsupported() -> None:
     provider = ScriptedProvider({HAIKU: [ok("not json")] * 2})
     update = await verify.run(

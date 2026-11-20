@@ -211,6 +211,9 @@ _GROUPS: tuple[tuple[str, float, bool, re.Pattern[str]], ...] = (
             r"(?![\w-])[^<>]*>"
             r"|(?:^|\n)\s*(?:system|developer)\s*:"
             r"|\[/?inst\]|<\|im_(?:start|end)\|>|<<sys>>|#{2,} ?(?:system|instruction)"
+            # Role tags in brackets or chat-template pipes (P3-04 review, P8-02).
+            r"|\[\s*/?\s*(?:system|developer|assistant)\s*\]"
+            r"|<\|\s*/?\s*(?:system|developer|assistant)\s*\|>"
         ),
     ),
     (

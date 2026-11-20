@@ -8,6 +8,11 @@ IBAN keeps only its country code, check digits and last 4 characters, ``[IBAN DE
 masks customer text, operator text, log records and traces (G9), so it must never raise: on an
 internal error it masks every digit instead.
 
+A token that is exactly a canonical UUID (8-4-4-4-12 hex digits, no letter, digit or dash
+joined to it, and no digit within a separator of it) is kept as it is (owner decision, P8-03):
+ticket, customer and operator ids in log records and traces stay searchable. About 1 in 100
+UUIDs held a Luhn-valid run of 13+ digits across its dashes and was masked as a card.
+
 Pure functions; no imports from the rest of the project.
 """
 
@@ -326,6 +331,29 @@ def _mask_iban(text: str, end: int, compact: str, counts: Counter[EntityType]) -
     return f"[IBAN {compact[:4]} \u2026]{separator}{masked_run}", joined.end()
 
 
+# A canonical UUID: no letter, digit, dash or underscore joined to it on either side.
+_UUID = re.compile(
+    r"(?<![\w-])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}(?![\w-])",
+    re.ASCII,
+)
+_DIGIT_BEFORE = re.compile(rf"\d{_SEPARATOR}?\Z")
+_DIGIT_AFTER = re.compile(rf"{_SEPARATOR}?\d")
+
+
+def _uuid_spans(text: str) -> list[tuple[int, int]]:
+    """Canonical UUIDs that stand alone: a digit within a separator before or after one could
+    be part of a card number written across it, so such a UUID is masked like any text."""
+    matches = list(_UUID.finditer(text))
+    # The digits of the other UUIDs do not count: two ids next to each other stay readable.
+    blanked = _UUID.sub(lambda match: "x" * len(match.group(0)), text)
+    return [
+        (match.start(), match.end())
+        for match in matches
+        if not _DIGIT_BEFORE.search(blanked, 0, match.start())
+        and not _DIGIT_AFTER.match(blanked, match.end())
+    ]
+
+
 def _mask_card_runs(text: str, counts: Counter[EntityType]) -> str:
     def replace(match: re.Match[str]) -> str:
         masked, found = _mask_run(match.group(0))
@@ -416,14 +444,24 @@ def _mask_all_digits(text: str) -> str:
     return _DIGIT.sub("#", text)
 
 
+def _mask_text(text: str, counts: Counter[EntityType]) -> str:
+    return _mask_codes(_mask_cards(text, counts), counts)
+
+
 def mask(text: str) -> MaskResult:
     """Mask card numbers, CVV, PIN and 2FA codes; never raises."""
     counts: Counter[EntityType] = Counter()
     try:
         # Callers are typed, but a log record can hold anything.
         source = text if isinstance(text, str) else str(text)
-        masked = _mask_cards(source, counts)
-        masked = _mask_codes(masked, counts)
+        parts: list[str] = []
+        position = 0
+        for start, end in _uuid_spans(source):
+            parts.append(_mask_text(source[position:start], counts))
+            parts.append(source[start:end])
+            position = end
+        parts.append(_mask_text(source[position:], counts))
+        masked = "".join(parts)
     except Exception:
         # Should not happen; if it does, lose information rather than leak a card number.
         fallback = _mask_all_digits(text) if isinstance(text, str) else REDACTED

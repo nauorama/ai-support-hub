@@ -144,7 +144,7 @@ async def test_text_fields_are_stored_masked(
 async def test_a_uuid_object_is_stored_unchanged(
     app_engine: AsyncEngine, audit_db: tuple[str, str]
 ) -> None:
-    """Text masking would turn this id into "0b74d[CARD ****8741]-e5b0ef08c44e"."""
+    """Text masking turned this id into "0b74d[CARD ****8741]-e5b0ef08c44e" before P8-03."""
     value = uuid.UUID("0b74d664-3640-4097-8741-e5b0ef08c44e")
     async with AsyncSession(app_engine) as session:
         await record(
@@ -166,10 +166,12 @@ async def test_a_uuid_object_is_stored_unchanged(
     assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
 
 
-async def test_a_card_in_a_uuid_shaped_string_or_a_float_is_stored_masked(
+async def test_a_card_in_a_float_is_stored_masked_a_canonical_uuid_string_is_kept(
     app_engine: AsyncEngine, audit_db: tuple[str, str]
 ) -> None:
-    """Round-2 review: neither shape may carry a full card number into the log."""
+    """Round-2 review: a float may not carry a full card number into the log. A string that is
+    exactly a canonical UUID is kept since P8-03 (owner decision; a card written in that shape
+    is an accepted limitation, security §3); one joined to other text is still masked."""
     shaped = "41111111-1111-1111-abcd-ef0123456789"
     async with AsyncSession(app_engine) as session:
         await record(
@@ -178,19 +180,22 @@ async def test_a_card_in_a_uuid_shaped_string_or_a_float_is_stored_masked(
             actor_id=shaped,
             action="ticket.created",
             entity_type="ticket",
-            entity_id=shaped,
+            entity_id=f"ref{shaped}",
             details={"ref": shaped, "n": float(VISA)},
         )
         await session.commit()
 
     with psycopg.connect(libpq_url(audit_db[0])) as connection:
         row = connection.execute(
-            "SELECT concat_ws('|', actor_id, entity_id, details::text) FROM audit_log"
+            "SELECT actor_id, entity_id, details::text FROM audit_log"
         ).fetchone()
     assert row is not None
-    assert "41111111-1111-1111" not in row[0]
-    assert VISA not in row[0]
-    assert "[CARD ****1111]" in row[0]
+    actor_id, entity_id, details = row
+    assert actor_id == shaped
+    assert "41111111-1111-1111" not in entity_id
+    assert VISA not in details
+    assert "[CARD ****1111]" in details
+    assert f'"ref": "{shaped}"' in details
     assert await _verify(app_engine) == ChainCheck(ok=True, checked=1)
 
 
