@@ -46,6 +46,9 @@ class RunConfig(_Frozen):
     prompts_sha256: str = ""
     kb_sha256: str = ""
     core_anchor_date: date | None
+    # The research loop with the account tools ran (P7-06); false for a `--no-tools` run and
+    # for runs before P7-06.
+    account_tools: bool = False
     tickets_file: str
     tickets_sha256: str
     # Judge prompt versions; empty when the run has no judges (`--no-judges`). Judge results of

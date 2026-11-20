@@ -252,7 +252,7 @@ def _pipeline(
     settings = Settings(_env_file=None, llm_mode="real", **FIXTURE_CONFIG)  # type: ignore[arg-type]
     database = connect("postgresql+psycopg://nobody@localhost:1/none")  # never connected
     pipeline, _, provider = build_pipeline(
-        settings, database, variant=variant, cache_dir=tmp_path if cache else None
+        settings, database, variant=variant, cache_dir=tmp_path if cache else None, tools=False
     )
     return pipeline, provider
 
@@ -719,9 +719,32 @@ def test_a_run_with_account_tools_needs_a_fixed_anchor_date(tmp_path: Path) -> N
     # B0 runs no research, so it needs no tools and no date.
     b0, _, _ = build_pipeline(_tool_settings(), database, variant="b0_full_kb", cache_dir=None)
     assert b0.tools is None
-    # Without a token there are no tools (the tests and a run without the MCP server).
+    # An explicit no-tools run needs neither the token nor the date.
     plain, _ = _pipeline(tmp_path, cache=False, variant="rag_hybrid")
     assert not plain.researches  # type: ignore[attr-defined]
+
+
+def test_an_empty_token_stops_the_run_unless_it_is_marked_no_tools(tmp_path: Path) -> None:
+    """Owner decision (P7-06): a run without account tools must say so."""
+    database = connect("postgresql+psycopg://nobody@localhost:1/none")  # never connected
+    settings = _tool_settings(mcp_server_token="", core_anchor_date="2026-11-12")
+    with pytest.raises(EvalSetupError, match="--no-tools"):
+        build_pipeline(settings, database, variant="rag_hybrid", cache_dir=None)
+    pipeline, _, _ = build_pipeline(
+        settings, database, variant="rag_hybrid", cache_dir=None, tools=False
+    )
+    assert pipeline.tools is None
+    assert not parse_args(["--no-tools"]).tools
+    assert parse_args([]).tools
+    assert files.config_differences(_config(account_tools=True), _config()) == ["account_tools"]
+
+
+def test_the_report_states_a_run_without_tools() -> None:
+    data = reporting.evaluate([], [], planned=0)
+    without = reporting.render_report(_config(), data, run_name="r")
+    assert "| Account tools | **no** (run without tools) |" in without
+    with_tools = reporting.render_report(_config(account_tools=True), data, run_name="r")
+    assert "| Account tools | yes |" in with_tools
 
 
 def test_the_estimate_adds_the_research_turns_and_the_account_facts(tmp_path: Path) -> None:

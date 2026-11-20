@@ -38,12 +38,14 @@ run's own cost limit in place of the daily budget, and the disk cache.
   chunk for a citation; for B0 the cited documents. Judge calls use the same gateway, cache
   and cost limit; they are recorded with node `judge` and no `run_id`. A judge that fails for
   good is noted in the ticket's result; an outage is not written, so a resume judges again.
-- **Account tools** (P7-06): with `MCP_SERVER_TOKEN` set, a RAG variant runs the research tool
-  loop against the `support-tools` server like the app (`hub.deps.tool_client`, `research/v1`),
-  and intake loads the customer profile. The answers then depend on "today" of the core mock,
-  so such a run needs a fixed `CORE_ANCHOR_DATE` (eval plan §1 principle 6, operations §2; the
-  `mcp` service reads the same `.env`): without it the runner stops before any call. The date
-  is part of `config.json`, so a resume with another date is refused.
+- **Account tools** (P7-06): a RAG variant needs `MCP_SERVER_TOKEN` (the runner stops without
+  it, unless the run is marked `--no-tools`, which `config.json` and the report state) and runs
+  the research tool loop against the `support-tools` server like the app
+  (`hub.deps.tool_client`, `research/v1`); intake loads the customer profile. The answers then
+  depend on "today" of the core mock, so such a run needs a fixed `CORE_ANCHOR_DATE` (eval plan
+  §1 principle 6, operations §2; the `mcp` service reads the same `.env`): without it the
+  runner stops before any call. The date is part of `config.json`, so a resume with another
+  date is refused.
 - **Metrics and report** (P4-04): `metrics.json` and `report.md` from `hub_evals.report`.
 
 The output names counts only, never ticket text. The test set is never read (AGENTS.md rule 7).
@@ -888,6 +890,8 @@ class Options:
     cache_dir: Path = CACHE_DIR
     seed_dir: Path = SEED_DIR
     kb_dir: Path = KB_DIR
+    # False only for an explicit `--no-tools` run (P7-06): no research loop, no profile.
+    tools: bool = True
 
 
 @dataclass
@@ -917,6 +921,7 @@ def build_pipeline(
     variant: str,
     cache_dir: Path | None,
     provider: Provider | None = None,
+    tools: bool = True,
 ) -> tuple[Pipeline, CostLimit, CachingProvider | None]:
     """The evaluation pipeline, its cost limit and its cache (None with `--no-cache`).
     `provider`: tests pass a scripted provider in place of the chat provider of `LLM_MODE`;
@@ -932,8 +937,15 @@ def build_pipeline(
     limit = CostLimit(
         limit=Decimal(str(settings.eval_max_cost_usd)), enforced=settings.llm_mode == "real"
     )
-    tools = tool_client(settings, database) if variant != B0_VARIANT else None
-    if tools is not None and settings.core_anchor_date is None:
+    client = tool_client(settings, database) if tools and variant != B0_VARIANT else None
+    if tools and variant != B0_VARIANT and client is None:
+        # A run without the account tools must say so (`--no-tools`): an empty token would
+        # otherwise give a run without account facts that looks like a run with them.
+        raise EvalSetupError(
+            "MCP_SERVER_TOKEN is empty, so the run would have no account tools; set it (and "
+            "start the mcp service) or pass --no-tools (make eval NO_TOOLS=1)"
+        )
+    if client is not None and settings.core_anchor_date is None:
         raise EvalSetupError(
             "a run with account tools needs a fixed CORE_ANCHOR_DATE (eval plan §1, principle 6):"
             " set it in .env, e.g. CORE_ANCHOR_DATE=2026-11-12, and restart the mcp service"
@@ -953,9 +965,9 @@ def build_pipeline(
         confidence_rule=load_confidence(settings.confidence_config),
         # P7-06: the research loop and the profile in intake, against the same MCP server.
         research_prompt=active_prompt(settings.prompts_dir, gateway.models, "research")
-        if tools is not None
+        if client is not None
         else None,
-        tools=tools,
+        tools=client,
         context=LlmCallContext.EVAL,
         variant=variant,
         # The graph's checkpoints go to the evaluation database too (migration 0009 runs there).
@@ -1039,6 +1051,7 @@ def run_config(
             [p for p in options.kb_dir.rglob("*") if p.is_file()], options.kb_dir
         ),
         core_anchor_date=settings.core_anchor_date,
+        account_tools=pipeline.researches,
         tickets_file=_relative(options.tickets),
         tickets_sha256=file_sha256(options.tickets),
         limit=options.limit,
@@ -1083,6 +1096,7 @@ async def _run(
         variant=options.variant,
         cache_dir=options.cache_dir if options.cache else None,
         provider=provider,
+        tools=options.tools,
     )
     try:
         return await _run_with(settings, options, tickets, database, pipeline, limit, cache)
@@ -1273,6 +1287,11 @@ def parse_args(argv: Sequence[str]) -> Options:
     parser.add_argument("--run-dir", type=Path, default=None, help="resume this run directory")
     parser.add_argument("--no-judges", action="store_true", help="skip the LLM judges")
     parser.add_argument("--concurrency", type=int, default=CONCURRENCY)
+    parser.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="run without the account tools (no MCP server); the report says so",
+    )
     args = parser.parse_args(list(argv))
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be at least 1")
@@ -1285,6 +1304,7 @@ def parse_args(argv: Sequence[str]) -> Options:
         judges=not args.no_judges,
         run_dir=args.run_dir,
         concurrency=args.concurrency,
+        tools=not args.no_tools,
     )
 
 

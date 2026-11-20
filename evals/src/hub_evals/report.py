@@ -515,6 +515,7 @@ def render_report(config: RunConfig, data: dict[str, Any], *, run_name: str) -> 
         f"| Models | {_pairs({k: ' / '.join(v) for k, v in config.models.items()})} |",
         f"| Git | `{config.git_sha}`{' (uncommitted changes)' if config.git_dirty else ''} |",
         f"| Anchor date | {config.core_anchor_date or 'not set (real date)'} |",
+        f"| Account tools | {'yes' if config.account_tools else '**no** (run without tools)'} |",
         f"| Tickets | `{config.tickets_file}` |",
         "",
         "## Metrics against targets",

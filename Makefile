@@ -142,7 +142,7 @@ eval:
 	uv run python -m hub_evals.runner $(if $(VARIANT),--variant $(VARIANT),) \
 		$(if $(LIMIT),--limit $(LIMIT),) $(if $(NO_CACHE),--no-cache,) \
 		$(if $(RESTART),--restart,) $(if $(RUN_DIR),--run-dir $(RUN_DIR),) \
-		$(if $(NO_JUDGES),--no-judges,)
+		$(if $(NO_JUDGES),--no-judges,) $(if $(NO_TOOLS),--no-tools,)
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"
