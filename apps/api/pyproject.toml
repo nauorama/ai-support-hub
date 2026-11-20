@@ -39,7 +39,7 @@ dependencies = [
     # Native code of fastembed. Held at 2.5.4 (2026-10-10) and 1.31.1 (2026-10-26): numpy 2.5.5
     # and onnxruntime 1.32.0 were under a week old at P5-01.
     "numpy==2.5.4",
-    "onnxruntime==1.31.1",
+    "onnxruntime==1.32.0",
     "psycopg[binary]==3.3.9",
     "pydantic==2.14.3",
     "pydantic-settings==2.16.3",
