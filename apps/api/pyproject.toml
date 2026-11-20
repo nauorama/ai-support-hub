@@ -40,7 +40,7 @@ dependencies = [
     # and onnxruntime 1.32.0 were under a week old at P5-01.
     "numpy==2.5.4",
     "onnxruntime==1.31.1",
-    "psycopg[binary]==3.3.7",
+    "psycopg[binary]==3.3.9",
     "pydantic==2.14.3",
     "pydantic-settings==2.16.3",
     # Knowledge-base front matter (P2-08) and config/models.yaml, config/pricing.yaml (P3-01),
