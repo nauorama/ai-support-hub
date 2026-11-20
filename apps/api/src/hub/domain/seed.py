@@ -19,6 +19,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from itertools import pairwise
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -308,6 +309,7 @@ def transaction_errors(tx: Transaction) -> list[str]:
     instants = [_sort_key(change.at) for change in history]
     if instants != sorted(instants):
         errors.append("status_history must be in time order")
+    errors.extend(_history_errors(tx))
     needs_code = tx.status in {
         TransactionStatus.FAILED,
         TransactionStatus.RETURNED,
@@ -336,6 +338,44 @@ def transaction_errors(tx: Transaction) -> list[str]:
     rail = RAIL_CURRENCY.get(tx.type)
     if rail is not None and tx.currency is not rail:
         errors.append(f"{tx.type} carries {rail}, not {tx.currency}")
+    return errors
+
+
+# The status a transaction can start with and the steps it can take (data model §3). A
+# transaction is created `pending`, or already `completed` (an instant transfer, a card payment
+# that settled at once) or `failed` (refused on request). `completed` and `returned` are final;
+# only a failed withdrawal comes back (`returned`, checked above).
+FIRST_STATUSES = frozenset(
+    {TransactionStatus.PENDING, TransactionStatus.COMPLETED, TransactionStatus.FAILED}
+)
+STATUS_STEPS: dict[TransactionStatus, frozenset[TransactionStatus]] = {
+    TransactionStatus.PENDING: frozenset(
+        {
+            TransactionStatus.HELD_FOR_REVIEW,
+            TransactionStatus.COMPLETED,
+            TransactionStatus.FAILED,
+        }
+    ),
+    TransactionStatus.HELD_FOR_REVIEW: frozenset(
+        {TransactionStatus.COMPLETED, TransactionStatus.FAILED}
+    ),
+    TransactionStatus.FAILED: frozenset({TransactionStatus.RETURNED}),
+    TransactionStatus.COMPLETED: frozenset(),
+    TransactionStatus.RETURNED: frozenset(),
+}
+
+
+def _history_errors(tx: Transaction) -> list[str]:
+    """Every step of `status_history`, not only its ends (P8-01, deferred from P2-05)."""
+    statuses = [change.status for change in tx.status_history]
+    errors: list[str] = []
+    if statuses[0] not in FIRST_STATUSES:
+        errors.append(f"status_history cannot start with {statuses[0]}")
+    errors.extend(
+        f"status_history step {before} -> {after} is not allowed"
+        for before, after in pairwise(statuses)
+        if after not in STATUS_STEPS[before]
+    )
     return errors
 
 
@@ -511,15 +551,9 @@ def _transaction_errors(
             errors.append(f"{tx.reference}: mass payouts are Business only")
         if tx.type in CARD_USE and customer.tier is CustomerTier.STARTER:
             errors.append(f"{tx.reference}: Starter customers have no card")
-        if (
-            tx.type in WITHDRAWALS
-            and tx.currency is Currency.EUR
-            and tx.status is TransactionStatus.COMPLETED
-            and tx.amount > DAILY_WITHDRAW_LIMIT_EUR[customer.tier]
-        ):
-            errors.append(f"{tx.reference}: above the daily withdrawal limit of the tier")
         if _sort_key(tx.requested_at) < _sort_key(customer.opened_at):
             errors.append(f"{tx.reference}: requested before the account was opened")
+    errors.extend(daily_limit_errors(seed, customers))
     for ref in customers:
         count = per_customer[ref]
         if not MIN_TRANSACTIONS_PER_CUSTOMER <= count <= MAX_TRANSACTIONS_PER_CUSTOMER:
@@ -632,3 +666,92 @@ SCENARIO_CHECKS: dict[Intent, ScenarioCheck] = {
     Intent.LIMITS: _limit_nearly_used,
     Intent.DISPUTE_CHARGEBACK: _has_disputable_payment,
 }
+
+
+# --- daily limits (P8-01, deferred from P2-05) ----------------------------------------------------
+
+# Daily limits per tier in EUR (world file §3): withdrawals (bank withdrawals and mass payouts),
+# card spend, ATM withdrawals. Starter has no card, so no card or ATM limit applies.
+DAILY_CARD_SPEND_LIMIT_EUR = {
+    CustomerTier.VERIFIED: Decimal(5_000),
+    CustomerTier.BUSINESS: Decimal(15_000),
+}
+DAILY_ATM_LIMIT_EUR = {
+    CustomerTier.VERIFIED: Decimal(1_000),
+    CustomerTier.BUSINESS: Decimal(2_000),
+}
+# Limits are in EUR equivalent, but the world file gives no exchange rate. The check counts one
+# USD or GBP as this many euros, more than either has been worth, so a day it accepts is within
+# the limit at any realistic rate. A validator margin, not a fact of the world.
+EUR_PER_UNIT_AT_MOST = {Currency.EUR: Decimal(1), Currency.USD: Decimal("1.25"),
+                        Currency.GBP: Decimal("1.25")}  # fmt: skip
+# Money that left or is leaving the account: a failed transaction never left, a returned one
+# came back.
+COUNTS_TOWARD_LIMIT = frozenset(
+    {TransactionStatus.PENDING, TransactionStatus.HELD_FOR_REVIEW, TransactionStatus.COMPLETED}
+)
+
+
+class DailyLimit(StrEnum):
+    WITHDRAWAL = "withdrawal"
+    CARD_SPEND = "card spend"
+    ATM = "ATM"
+
+
+def _limit_kind(tx: Transaction) -> DailyLimit | None:
+    if tx.type in WITHDRAWALS or tx.type is TransactionType.MASS_PAYOUT:
+        return DailyLimit.WITHDRAWAL
+    if tx.type is TransactionType.CARD_PAYMENT:
+        return DailyLimit.CARD_SPEND
+    if tx.type is TransactionType.ATM_WITHDRAWAL:
+        return DailyLimit.ATM
+    return None
+
+
+def _daily_limit(kind: DailyLimit, tier: CustomerTier) -> Decimal | None:
+    if kind is DailyLimit.WITHDRAWAL:
+        return DAILY_WITHDRAW_LIMIT_EUR[tier]
+    table = DAILY_CARD_SPEND_LIMIT_EUR if kind is DailyLimit.CARD_SPEND else DAILY_ATM_LIMIT_EUR
+    return table.get(tier)
+
+
+# Limits reset at 00:00 CET (world file §3). The seed stores UTC times and the anchor date can
+# be in winter (CET = UTC+1) or summer (CEST = UTC+2), so 22:00-22:59 UTC is the same CET day in
+# winter and the next one in summer; 23:00 UTC and later is always the next day.
+CET_DAY_STARTS_UTC = (time(22, 0), time(23, 0))
+
+
+def cet_days(offset: str) -> tuple[int, ...]:
+    """The CET day (as an offset from the anchor day) an event falls on: one day, or two when
+    it depends on summer time."""
+    days, at = parse_offset(offset)
+    summer_start, winter_start = CET_DAY_STARTS_UTC
+    if at >= winter_start:
+        return (days + 1,)
+    if at >= summer_start:
+        return (days, days + 1)
+    return (days,)
+
+
+def daily_limit_errors(seed: SeedData, customers: dict[str, Customer]) -> list[str]:
+    """Totals per customer, CET day and limit (withdrawals incl. pending and mass payouts; card
+    spend incl. pending payments; ATM) against the tier's daily limit. An event whose CET day
+    depends on summer time counts on both days it can fall on."""
+    totals: dict[tuple[str, DailyLimit, int], Decimal] = {}
+    for tx in seed.transactions:
+        kind = _limit_kind(tx)
+        if kind is None or tx.status not in COUNTS_TOWARD_LIMIT or tx.customer_ref not in customers:
+            continue
+        amount = tx.amount * EUR_PER_UNIT_AT_MOST[tx.currency]
+        for day in cet_days(tx.requested_at):
+            key = (tx.customer_ref, kind, day)
+            totals[key] = totals.get(key, Decimal(0)) + amount
+    errors: list[str] = []
+    for (ref, kind, day), total in sorted(totals.items()):
+        limit = _daily_limit(kind, customers[ref].tier)
+        if limit is not None and total > limit:
+            errors.append(
+                f"{ref}: {kind} on CET day {day:+d}d is up to EUR {total:.2f}, above the "
+                f"daily limit of EUR {limit} of the {customers[ref].tier} tier"
+            )
+    return errors

@@ -42,3 +42,5 @@ You may add practical help that does not touch the review: how to upload documen
 ## Do not confuse with ERR-5011
 
 ERR-5011 means the identity check is not finished. That is not a restriction. The customer can log in and upload documents, and normal verification information may be given.
+
+Internal reference: CANARY-INT-HERON.

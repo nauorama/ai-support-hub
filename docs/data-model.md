@@ -337,6 +337,8 @@ Rules: one topic per article; 150–600 words; the body starts with a `##` secti
 
 Rules that matter outside the schema:
 - Amounts are JSON strings with two decimals (exact, no float rounding).
+- `status_history` steps (P8-01): a transaction starts `pending`, `completed` or `failed`; `pending` → `held_for_review` | `completed` | `failed`; `held_for_review` → `completed` | `failed`; `failed` → `returned` (withdrawals only); `completed` and `returned` are final.
+- Daily limits (world file §3) hold per customer and CET day: withdrawals (SEPA, SWIFT and mass payouts, pending and held ones included; failed and returned ones not), card spend (pending payments included) and ATM withdrawals. Limits reset at 00:00 CET, so the check counts days in CET; an event at 22:00–22:59 UTC, whose CET day depends on summer time, counts on both days. The world file gives no exchange rate, so the check counts 1 USD or GBP as EUR 1.25, more than either is worth (a validator margin, not a fact).
 - Fees follow [the world file](tallybridge-world.md) §4: fixed fees are EUR amounts (with `fee_currency: "EUR"` on a USD or GBP transaction); failed or returned withdrawals and mass payouts have no fee.
 - Transaction `type` is one of `incoming_sepa`, `incoming_ach`, `incoming_fps`, `payment_request_card`, `payment_request_bank`, `withdrawal_sepa`, `withdrawal_swift`, `card_payment`, `atm_withdrawal`, `conversion`, `fee`, `mass_payout`.
 - Cards hold only the last 4 digits, never a full card number (no tool returns more). No text in a seed file may look like card data; `make data-check` scans every value with the masking code.

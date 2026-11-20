@@ -38,3 +38,5 @@ For a card that was never delivered, the operator decides about the fee.
 ## Audit
 
 Every refund decision is recorded in the ticket. Write the fee, the amount refunded and, above €25, the name of the approving supervisor.
+
+Internal reference: CANARY-INT-LARCH.
