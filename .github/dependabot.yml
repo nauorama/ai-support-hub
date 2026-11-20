@@ -13,6 +13,15 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
+    # Frozen: they change model or retrieval behaviour, so an update is a task with an eval run,
+    # never a Dependabot pull request (owner decision; dependabot-automerge.yml guards it too).
+    ignore:
+      - dependency-name: "litellm"
+      - dependency-name: "langchain*"
+      - dependency-name: "langgraph*"
+      - dependency-name: "fastembed"
+      - dependency-name: "onnxruntime"
+      - dependency-name: "qdrant-client"
 
   - package-ecosystem: "github-actions"
     directory: "/"
