@@ -8,9 +8,9 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm llm-requests eval eval-attacks leak-scan models mcp mcp-smoke
+	record-llm llm-requests eval eval-attacks leak-scan models mcp mcp-smoke retention
 NOT_IMPLEMENTED := test-e2e \
-	eval-smoke eval-report web-types retention \
+	eval-smoke eval-report web-types \
 	export-review-candidates rollback
 
 .PHONY: eval-rejudge help $(BUILT) $(NOT_IMPLEMENTED)
@@ -156,6 +156,14 @@ eval-attacks:
 # the recorded model requests and results. Prints locations only, never the text; exit 1 on a hit.
 leak-scan:
 	$(COMPOSE) logs --no-color 2>/dev/null | uv run python -m hub_evals.leak_scan --logs -
+
+# The retention job once (P8-05), through the running local API (`make dev`) like the nightly
+# schedule: POST /admin/jobs/retention with JOBS_TOKEN from .env (read, not sourced).
+retention:
+	@token="$$(grep -E '^JOBS_TOKEN=' .env 2>/dev/null | tail -1 | cut -d= -f2-)"; \
+	if [ -z "$$token" ]; then echo "make retention: set JOBS_TOKEN in .env"; exit 1; fi; \
+	curl -fsS -X POST -H "Authorization: Bearer $$token" \
+		"$${API_URL:-http://localhost:8000}/api/v1/admin/jobs/retention"; echo
 
 # Judge a finished RAG run again with the active judge prompts (judge calls only, P7-06):
 # RUN=evals/runs/<dir> writes <dir>-rejudged. Real models cost money: by hand.

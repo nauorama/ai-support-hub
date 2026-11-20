@@ -47,6 +47,11 @@ class Settings(BaseSettings):
 
     core_anchor_date: date | None = None
     jobs_token: SecretStr = SecretStr("")
+    # Storage limitation (security §6, NFR-13; P8-05): the `retention` job deletes tickets with
+    # their messages, drafts and runs after this many days without activity, and the checkpoints
+    # of a closed ticket this many days after the close.
+    retention_ticket_days: int = Field(default=730, ge=1)
+    retention_checkpoint_days: int = Field(default=7, ge=0)
 
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: SecretStr = SecretStr("")

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from hub.api.admin_jobs import router as admin_jobs_router
 from hub.api.admin_runs import router as admin_runs_router
 from hub.api.auth import router as auth_router
 from hub.api.console import router as console_router
@@ -18,6 +19,8 @@ from hub.api.kb import console_router as kb_console_router
 from hub.api.kb import help_router
 from hub.api.limits import BodySizeLimitMiddleware
 from hub.api.middleware import RequestContextMiddleware
+from hub.api.privacy import admin_router as privacy_admin_router
+from hub.api.privacy import public_router as privacy_router
 from hub.api.tickets import router as tickets_router
 from hub.config import load_settings
 from hub.deps import Container, build_container
@@ -73,4 +76,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(kb_console_router)
     app.include_router(kb_admin_router)
     app.include_router(admin_runs_router)
+    app.include_router(admin_jobs_router)
+    app.include_router(privacy_router)
+    app.include_router(privacy_admin_router)
     return app

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import RouteContext, iter_route_contexts
 
+from hub.api.admin_jobs import RequireJobToken
 from hub.api.dependencies import RequireRole
 from hub.auth.roles import OPERATOR, RoleRequirement
 from hub.config import Settings
@@ -22,9 +23,12 @@ from hub.main import create_app
 PROTECTED_PREFIXES = ("/api/v1/console", "/api/v1/admin")
 
 
-def _requirements(dependant: Dependant) -> Iterator[RoleRequirement]:
+def _requirements(dependant: Dependant) -> Iterator[RoleRequirement | RequireJobToken]:
+    """A role, or the job token (`/admin/jobs/*` only: GitHub Actions has no session, P8-05)."""
     if isinstance(dependant.call, RequireRole):
         yield dependant.call.requirement
+    if isinstance(dependant.call, RequireJobToken):
+        yield dependant.call
     for child in dependant.dependencies:
         yield from _requirements(child)
 
@@ -53,6 +57,22 @@ def test_every_console_and_admin_route_has_a_role() -> None:
     app = _app()
     assert _protected_routes(app), "no console routes found: the walk would pass vacuously"
     assert routes_without_role(app) == []
+
+
+def test_only_the_job_routes_use_the_job_token() -> None:
+    """security §4: the token gives no access to any other endpoint."""
+    with_token = {
+        route.path
+        for route in _protected_routes(_app())
+        if any(isinstance(found, RequireJobToken) for found in _requirements(route.dependant))
+    }
+    assert with_token == {"/api/v1/admin/jobs/{name}"}
+    for route in _protected_routes(_app()):
+        found = list(_requirements(route.dependant))
+        assert not (
+            any(isinstance(item, RequireJobToken) for item in found)
+            and any(isinstance(item, RoleRequirement) for item in found)
+        ), route.path
 
 
 def test_the_walk_finds_a_route_without_a_role() -> None:
