@@ -8,7 +8,9 @@ test fails when a file is missing or out of date, e.g. after a prompt change; th
 `make llm-requests` and `make record-llm` (real calls, by hand, only when the owner agrees).
 
 Only the role's own model is recorded: fake mode never falls back. The evidence of a case names
-knowledge-base documents; their text comes from `data/kb/` as the runner renders it. A
+knowledge-base documents; their text comes from `data/kb/` as the runner renders it. From P7-06 a
+faithfulness case may add `evidence_facts` and a citation case may cite `source_fact` instead of
+a document (`{"fact_id", "text"}`, rendered as the runner renders account facts). A
 faithfulness or citation case has the customer's `ticket` (and optionally `history`, a list of
 `[role, text]`), prepared by `ticket_text` as the runner prepares it.
 """
@@ -20,11 +22,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from hub.domain.account import AccountFact
 from hub.kb.full_text import KbSource, render_kb, sources_from_files
 from hub.kb.loader import read_kb
 from hub.llm.config import load_models
 from hub.llm.prompts import Prompt
 from hub.llm.schemas import Message
+from hub.tools.facts import render_facts
 from hub_evals.judges import (
     Judges,
     TicketText,
@@ -78,6 +82,30 @@ def evidence(doc_ids: list[str]) -> str:
     return render_kb([sources[doc_id] for doc_id in doc_ids])
 
 
+def facts(items: list[dict[str, str]]) -> list[AccountFact]:
+    """Account facts of a case (P7-06), as the research loop stores them."""
+    return [
+        AccountFact(fact_id=item["fact_id"], source_tool="core_get_transaction", text=item["text"])
+        for item in items
+    ]
+
+
+def case_evidence(data: dict[str, Any]) -> str:
+    """A faithfulness case's evidence as the runner renders it: sections, then account facts."""
+    sections = evidence(data.get("evidence_doc_ids", []))
+    parts = [sections, render_facts(facts(data.get("evidence_facts", [])))]
+    return "\n\n".join(part for part in parts if part)
+
+
+def case_source(data: dict[str, Any]) -> tuple[str, str]:
+    """A citation case's cited source: a document (`source_doc_id`) or an account fact
+    (`source_fact`)."""
+    if "source_fact" in data:
+        [fact] = facts([data["source_fact"]])
+        return fact.fact_id, render_facts([fact])
+    return data["source_doc_id"], evidence([data["source_doc_id"]])
+
+
 def case_ticket(case: Case) -> TicketText:
     history = [(role, text) for role, text in case.input.get("history", [])]
     return ticket_text(case.input["ticket"], history)
@@ -103,15 +131,16 @@ def case_messages(judge_set: Judges, case: Case) -> list[Message]:
             return faithfulness_messages(
                 prompt,
                 draft=data["draft"],
-                evidence=evidence(data["evidence_doc_ids"]),
+                evidence=case_evidence(data),
                 ticket=case_ticket(case),
             )
         case "citation":
             return citation_messages(
                 prompt,
                 sentence=data["sentence"],
-                source=evidence([data["source_doc_id"]]),
+                source=case_source(data)[1],
                 ticket=case_ticket(case),
+                marker=data["marker"],
             )
         case "attack":
             return attack_messages(

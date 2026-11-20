@@ -89,10 +89,9 @@ SEPA, NO_ANSWER = TICKETS["run_01"], TICKETS["run_02"]
 NOT_RECORDED = "This exact text has no recorded model answer, so the run must fail."
 EVIDENCE = json.loads((ROOT / "apps/api/tests/fixtures/run/evidence.json").read_text())
 SEPA_SECTION = "/help/withdrawal-times#sepa-withdrawals"
-# P6-04: run_01's recorded verify answer finds an unsupported claim, so the run searches once
-# more and writes again with the merged hits; the second verdict passes every claim.
-RETRY_NEW = [c for c in EVIDENCE["run_01_retry"] if c not in EVIDENCE["run_01"]][:SEARCH_TOP_K]
-SEPA_EVIDENCE = EVIDENCE["run_01"] + RETRY_NEW
+# P7-06: with the write/v4 recordings run_01's verify answer passes every claim, so the run makes
+# no retry (the retry is covered with a verifier that never passes, P6-04).
+SEPA_EVIDENCE = EVIDENCE["run_01"]
 
 
 @pytest.fixture(scope="module")
@@ -213,7 +212,7 @@ def test_an_operator_approves_the_sepa_draft_and_the_customer_sees_it(
     detail = operator.get(f"/api/v1/console/tickets/{ticket_id}").json()
     assert detail["latest_run"]["prompt_versions"] == {
         "triage": "v1",
-        "write": "v3",
+        "write": "v4",
         "verify": "v1",
     }
     draft = detail["draft"]
@@ -248,16 +247,18 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
 
     assert [name for name, _ in events] == [
         "ticket.created",
-        *["run.status"] * 7,
+        *["run.status"] * 4,
         "message",
         "ticket.status",
         "done",
     ]
     assert [data["step"] for name, data in events if name == "run.status"] == [
         "understanding",
-        *["searching", "writing", "checking"] * 2,  # the retry (P6-04)
+        "searching",
+        "writing",
+        "checking",
     ]
-    assert events[9][1] == {"status": "pending_approval"}
+    assert events[6][1] == {"status": "pending_approval"}
 
     status, intent, urgency, summary, route, reasons = _one(
         run_db,
@@ -265,13 +266,13 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
         " WHERE id = %s",
         ticket_id,
     )
-    # P6-04: one retry; with the write/v3 recordings (P7-04) the second check still finds an
-    # unsupported claim, so the draft waits for approval (row 4).
+    # write/v4 (P7-06): the check passes; auto-reply is off by default (ADR-0018), so the draft
+    # waits for approval (row 7).
     assert (status, intent, route, reasons) == (
         "pending_approval",
         "withdrawal_issue",
         "approval",
-        ["unsupported_claims"],
+        ["auto_reply_off"],
     )
     assert urgency in {"low", "normal"}
     assert summary
@@ -293,11 +294,11 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     assert confidence is not None
     assert 0 < confidence <= 1
     assert features["top_score"] > 0
-    assert features["retry_used"] == 1.0
+    assert features["retry_used"] == 0.0
     assert features["n_citations"] >= 1
     # P6-03: the run waits for the operator with its outcome so far, not finished.
     assert (run_status, run_route, graph) == ("interrupted", "approval", GRAPH_VERSION)
-    assert versions == {"triage": "v1", "write": "v3", "verify": "v1"}
+    assert versions == {"triage": "v1", "write": "v4", "verify": "v1"}
     assert models == {
         "triage": "anthropic/claude-haiku-5-5",
         "write": "anthropic/claude-haiku-5-5",
@@ -313,9 +314,7 @@ def test_a_sepa_ticket_gets_a_cited_draft_and_waits_for_approval(
     )
     assert [(node, version, call) for node, version, call, _, _ in calls] == [
         ("triage", "triage/v1", "ok"),
-        ("write", "write/v3", "ok"),
-        ("verify", "verify/v1", "ok"),
-        ("write", "write/v3", "ok"),
+        ("write", "write/v4", "ok"),
         ("verify", "verify/v1", "ok"),
     ]
     assert cost == sum((row[3] for row in calls), Decimal(0))
@@ -383,7 +382,6 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
         "ticket.created",
         "intake.done",
         "triage.done",
-        "research.retry",
         "draft.created",
         "verify.done",
         "route.decided",
@@ -397,17 +395,16 @@ def test_the_run_writes_its_audit_records_without_ticket_text(app: FastAPI, run_
     triage = rows["triage.done"]
     assert (triage["intent"], triage["prompt_version"]) == ("withdrawal_issue", "triage/v1")
     assert "summary" not in triage
-    assert rows["draft.created"]["prompt_version"] == "write/v3"
+    assert rows["draft.created"]["prompt_version"] == "write/v4"
     assert rows["draft.created"]["variant"] == VARIANT
     assert [c["chunk_id"] for c in rows["draft.created"]["chunks"]] == SEPA_EVIDENCE
-    assert rows["research.retry"]["chunks_added"] == len(RETRY_NEW)
-    assert rows["route.decided"]["reasons"] == ["unsupported_claims"]
+    assert rows["route.decided"]["reasons"] == ["auto_reply_off"]
     assert rows["route.decided"]["confidence"] is not None
     assert "groundedness" in rows["route.decided"]["features"]
     assert (rows["intake.done"]["language"], rows["intake.done"]["pan_found"]) == ("en", False)
     assert rows["route.decided"]["prompt_versions"] == {
         "triage": "v1",
-        "write": "v3",
+        "write": "v4",
         "verify": "v1",
     }
     verified = rows["verify.done"]

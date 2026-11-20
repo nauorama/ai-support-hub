@@ -464,7 +464,7 @@ async def test_without_a_tool_client_research_is_step0_only() -> None:
 
 
 def test_a_pipeline_with_tools_records_the_research_prompt_version() -> None:
-    assert _setup([]).pipeline.prompt_versions["research"] == "v1"
+    assert _setup([]).pipeline.prompt_versions["research"] == "v2"
 
 
 async def test_a_tool_name_the_model_made_up_is_not_echoed_in_the_result_tag() -> None:

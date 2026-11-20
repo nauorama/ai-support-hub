@@ -549,6 +549,10 @@ class Draft(Base):
         CheckConstraint("jsonb_typeof(citations) = 'array'", name="citations"),
         CheckConstraint("jsonb_typeof(evidence) = 'object'", name="evidence"),
         CheckConstraint("jsonb_typeof(proposed_actions) = 'array'", name="proposed_actions"),
+        CheckConstraint(
+            "approved_actions IS NULL OR jsonb_typeof(approved_actions) = 'array'",
+            name="approved_actions",
+        ),
         CheckConstraint("jsonb_typeof(unsupported_claims) = 'array'", name="unsupported_claims"),
         Index("ix_drafts_ticket_id", "ticket_id"),
     )
@@ -581,6 +585,14 @@ class Draft(Base):
     edit_ratio: Mapped[Decimal | None] = mapped_column(Numeric(4, 3))
     reject_reason: Mapped[RejectReason | None] = mapped_column(TextEnum(RejectReason))
     reject_note: Mapped[str | None]
+    # The ids of the proposed actions the operator ticked (P7-05); `act` runs them. Null for a
+    # draft written before migration 0013 (compared as "no actions").
+    approved_actions: Mapped[list[Any] | None] = mapped_column(
+        default=list, server_default=text("'[]'::jsonb")
+    )
+    # The operator-scoped `Idempotency-Key` of the review, also of a reject without a reply
+    # (P7-05): a repeated request is compared with what the draft stored.
+    review_key: Mapped[str | None] = mapped_column(unique=True)
     created_at: Mapped[datetime] = _created_at_column()
 
 

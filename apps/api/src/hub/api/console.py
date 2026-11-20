@@ -1,6 +1,6 @@
 """Operator console endpoints (docs/api.md §3): queue, ticket, claim, release, reply, close (phase
-2). The draft review (approve, edit, reject; P3-05b) is in `console_drafts`; actions and the
-knowledge base come in later phases.
+2). The draft review (approve, edit, reject; P3-05b) is in `console_drafts`, the actions an
+operator runs by hand (P7-05) in `console_actions`.
 
 Every route declares its role with `RequireRole` (a test walks all `/console` and `/admin`
 routes); state-changing routes also need the CSRF token, which `RequireRole` checks. Every
@@ -40,6 +40,7 @@ from hub.api.console_schemas import (
     ReplyIn,
     RunOut,
     TicketVersionIn,
+    ToolCallOut,
 )
 from hub.api.dependencies import ContainerDep, RequireRole, SessionDep
 from hub.api.errors import ProblemError
@@ -65,6 +66,7 @@ from hub.db.repositories import (
     QueueRow,
     RunRepository,
     TicketRepository,
+    ToolCallRepository,
 )
 from hub.domain.enums import (
     ActorType,
@@ -283,6 +285,7 @@ async def get_ticket(
     messages = await MessageRepository(session).list_for_ticket(ticket.id)
     run = await RunRepository(session).latest_for_ticket(ticket.id)
     draft = None if run is None else await DraftRepository(session).for_run(run.id)
+    tool_calls = await ToolCallRepository(session).for_ticket(ticket.id)
     memory = await MemoryRepository(session).active_for_customer(
         ticket.customer_id, limit=MEMORY_ITEMS, exclude_ticket=ticket.id
     )
@@ -307,6 +310,7 @@ async def get_ticket(
             )
             for item, intent in memory
         ],
+        tool_calls=[ToolCallOut.model_validate(call) for call in tool_calls],
     )
 
 

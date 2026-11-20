@@ -206,6 +206,7 @@ async def test_resume_cache_and_results(eval_db: Urls, tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     # Judges off: this test counts the calls of the answers (judges: the test below).
     options = Options(
+        tools=False,
         tickets=tickets,
         variant=B0_VARIANT,
         limit=2,
@@ -312,7 +313,11 @@ async def test_a_ticket_failed_by_an_outage_runs_again_on_resume(
 ) -> None:
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
     options = Options(
-        tickets=tickets, variant=B0_VARIANT, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"
+        tools=False,
+        tickets=tickets,
+        variant=B0_VARIANT,
+        run_dir=tmp_path / "run",
+        cache_dir=tmp_path / "cache",
     )
     down = DownProvider()
     report = await run(_settings(eval_db), options, provider=down)
@@ -331,6 +336,7 @@ async def test_the_estimate_above_the_limit_stops_before_any_call(
     report = await run(
         _settings(eval_db, eval_max_cost_usd=0.0001),
         Options(
+            tools=False,
             tickets=tickets,
             variant=B0_VARIANT,
             run_dir=tmp_path / "run",
@@ -350,6 +356,7 @@ async def test_fake_mode_pays_nothing_and_ignores_the_limit(eval_db: Urls, tmp_p
     report = await run(
         _settings(eval_db, llm_mode="fake", eval_max_cost_usd=0),
         Options(
+            tools=False,
             tickets=tickets,
             variant=B0_VARIANT,
             run_dir=tmp_path / "run",
@@ -399,7 +406,11 @@ async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
     provider = JudgingProvider()
     run_dir = tmp_path / "run"
     options = Options(
-        tickets=tickets, variant=B0_VARIANT, run_dir=run_dir, cache_dir=tmp_path / "cache"
+        tools=False,
+        tickets=tickets,
+        variant=B0_VARIANT,
+        run_dir=run_dir,
+        cache_dir=tmp_path / "cache",
     )
     report = await run(_settings(eval_db), options, provider=provider)
     assert report.ran == 1
@@ -433,8 +444,8 @@ async def test_judges_flags_and_metrics(eval_db: Urls, tmp_path: Path) -> None:
         " WHERE node = 'judge' ORDER BY prompt_version",
     )
     assert [row[3] for row in rows] == [
-        "judge_citation/v2",
-        "judge_faithfulness/v2",
+        "judge_citation/v3",
+        "judge_faithfulness/v3",
         "judge_key_facts/v1",
     ]
     assert {row[:3] for row in rows} == {("eval", "judge", True)}
@@ -484,7 +495,11 @@ async def test_a_judge_outage_is_not_written_and_its_paid_calls_count(
 ) -> None:
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
     options = Options(
-        tickets=tickets, variant=B0_VARIANT, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"
+        tools=False,
+        tickets=tickets,
+        variant=B0_VARIANT,
+        run_dir=tmp_path / "run",
+        cache_dir=tmp_path / "cache",
     )
     before = _paid(eval_db)
     down = JudgeDownProvider()
@@ -521,7 +536,11 @@ async def test_the_limit_reached_before_the_judges_writes_nothing(
 ) -> None:
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
     options = Options(
-        tickets=tickets, variant=B0_VARIANT, run_dir=tmp_path / "run", cache_dir=tmp_path / "cache"
+        tools=False,
+        tickets=tickets,
+        variant=B0_VARIANT,
+        run_dir=tmp_path / "run",
+        cache_dir=tmp_path / "cache",
     )
     provider = CostlyProvider()
     settings = _settings(eval_db, eval_max_cost_usd=1.0)
@@ -599,7 +618,7 @@ async def test_a_rag_ticket_runs_through_the_runner(
 
     tickets = _tickets_file(tmp_path / "tickets.jsonl", [RUN_TICKETS["run_01"]])
     run_dir = tmp_path / "run"
-    options = Options(tickets=tickets, run_dir=run_dir, cache_dir=tmp_path / "cache")
+    options = Options(tools=False, tickets=tickets, run_dir=run_dir, cache_dir=tmp_path / "cache")
     assert options.variant == "rag_hybrid"  # the default
     settings = _settings(eval_db, qdrant_url=qdrant_url, embedding_cache_dir=MODEL_DIR)
     app_aliases = {k: v for k, v in (await _aliases(qdrant_url)).items() if k != EVAL_KB_ALIAS}
@@ -617,7 +636,7 @@ async def test_a_rag_ticket_runs_through_the_runner(
     assert {k: v for k, v in aliases.items() if k != EVAL_KB_ALIAS} == app_aliases
 
     (result,) = files.read_results(run_dir / files.RESULTS_FILE)
-    assert result.prompt_versions == {"triage": "v1", "write": "v3", "verify": "v1"}
+    assert result.prompt_versions == {"triage": "v1", "write": "v4", "verify": "v1"}
     assert result.draft is not None
     assert result.draft.evidence["variant"] == "rag_hybrid"
     ranked = result.draft.ranked_chunk_ids

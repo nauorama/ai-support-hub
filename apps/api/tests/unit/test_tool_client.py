@@ -410,3 +410,25 @@ async def test_an_approval_by_an_unknown_operator_is_denied(
     )
     assert outcome.error == "unknown_operator"
     assert core.calls == []
+
+
+async def test_a_shorter_timeout_of_one_call_is_an_error_row(recorder: MemoryRecorder) -> None:
+    """P7-05 review finding 5: the urgent alert has a limit of its own, shorter than the client's;
+    the cut call is recorded as an `error`, so the handoff still completes."""
+
+    class Hung:
+        async def call(
+            self, name: str, arguments: dict[str, Any], timeout_s: float
+        ) -> TransportResult:
+            await asyncio.sleep(60)
+            raise AssertionError("never reached")  # pragma: no cover
+
+    client = ToolClient(Hung(), recorder, timeout_s=30.0)
+    started = asyncio.get_running_loop().time()
+    outcome = await client.session(scope(ToolNode.RESEARCH)).call(
+        "get_cards", {}, caller=Caller.MODEL, timeout_s=0.05
+    )
+    assert asyncio.get_running_loop().time() - started < 5
+    assert outcome.status is ToolCallStatus.ERROR
+    [row] = recorder.rows
+    assert row.status is ToolCallStatus.ERROR

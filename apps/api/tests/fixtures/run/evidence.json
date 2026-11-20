@@ -14,13 +14,5 @@
     "inactivity-fee#2",
     "multi-currency-account#4",
     "withdrawal-own-name#0"
-  ],
-  "run_01_retry": [
-    "withdrawal-failed-or-returned#4",
-    "withdrawal-times#3",
-    "physical-card-delivery#3",
-    "incoming-payment-not-arrived#0",
-    "payment-request-card-availability#3",
-    "withdrawal-times#4"
   ]
 }

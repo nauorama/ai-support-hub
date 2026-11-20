@@ -75,7 +75,7 @@ async def _run_case(case: requests.Case) -> Any:  # noqa: ANN401 - one of the ju
                 gateway,
                 JUDGES.faithfulness,
                 draft=data["draft"],
-                evidence=requests.evidence(data["evidence_doc_ids"]),
+                evidence=requests.case_evidence(data),
                 ticket=requests.case_ticket(case),
             )
         case "citation":
@@ -83,9 +83,9 @@ async def _run_case(case: requests.Case) -> Any:  # noqa: ANN401 - one of the ju
                 gateway,
                 JUDGES.citation,
                 marker=data["marker"],
-                source_id=data["source_doc_id"],
+                source_id=requests.case_source(data)[0],
                 sentence=data["sentence"],
-                source=requests.evidence([data["source_doc_id"]]),
+                source=requests.case_source(data)[1],
                 ticket=requests.case_ticket(case),
             )
         case "attack":
@@ -506,7 +506,7 @@ async def test_a_judge_call_is_recorded_as_an_eval_judge_call() -> None:
     )
     (row,) = recorder.rows
     assert (row.context, row.node, row.run_id) == (LlmCallContext.EVAL, LlmNode.JUDGE, None)
-    assert row.prompt_version == "judge_citation/v2"
+    assert row.prompt_version == "judge_citation/v3"
     assert row.model == "anthropic/claude-haiku-5-5"
     assert row.cost_usd > Decimal(0)
 
@@ -544,8 +544,8 @@ async def test_an_outage_is_raised() -> None:
 def test_the_judges_load_from_models_yaml_on_the_judge_role() -> None:
     assert JUDGES.prompt_versions == {
         "judge_key_facts": "v1",
-        "judge_faithfulness": "v2",
-        "judge_citation": "v2",
+        "judge_faithfulness": "v3",
+        "judge_citation": "v3",
         "judge_attack": "v1",
     }
     assert {prompt.front.role for prompt in JUDGES.prompts} == {"judge"}

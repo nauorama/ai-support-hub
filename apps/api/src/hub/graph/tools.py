@@ -29,13 +29,19 @@ async def customer_ref(pipeline: Pipeline, ticket_id: uuid.UUID) -> str:
     return found
 
 
-async def tool_scope(pipeline: Pipeline, state: TicketState, node: ToolNode) -> ToolScope:
+async def tool_scope(
+    pipeline: Pipeline, state: TicketState, node: ToolNode, *, urgent: bool = False
+) -> ToolScope:
+    """`urgent`: the policy marked the handoff urgent (`hub.guardrails.policy.is_urgent`, from
+    the state, P7-05), so the scope's urgency is `high` whatever triage said; the urgent Slack
+    alert needs it (G6). Never set from model arguments."""
     ticket_id = uuid.UUID(state["ticket_id"])
     triage = state.get("triage")
+    urgency = Urgency(triage.urgency) if triage is not None else None
     return ToolScope(
         run_id=uuid.UUID(state["run_id"]),
         ticket_id=ticket_id,
         customer_ref=await customer_ref(pipeline, ticket_id),
         node=node,
-        urgency=Urgency(triage.urgency) if triage is not None else None,
+        urgency=Urgency.HIGH if urgent else urgency,
     )

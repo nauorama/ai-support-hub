@@ -235,6 +235,27 @@ def _routing(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, m.Rate]:
     )
 
 
+def account_facts_used(result: TicketResult) -> bool:
+    """The writer read account facts from the research loop (P7-06, `drafts.evidence`)."""
+    return result.draft is not None and bool(result.draft.evidence.get("account_facts"))
+
+
+def _account_data(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, Any]:
+    """Tickets labelled `needs_account_data` whose writer read account facts. Only tickets with
+    a draft count: a row-1 handoff or a failed run never reaches research. Reported, no target
+    (eval plan §2 has none)."""
+    needing = [r for t, r in pairs if t.needs_account_data]
+    drafted = [r for r in needing if r.draft is not None]
+    return {
+        "used": m.rate(account_facts_used(r) for r in drafted),
+        "needs_account_data": len(needing),
+        "excluded_no_draft": len(needing) - len(drafted),
+        "facts_without_label": sum(
+            account_facts_used(r) for t, r in pairs if not t.needs_account_data
+        ),
+    }
+
+
 def ranked_ids(result: TicketResult) -> list[str] | None:
     """The ranked chunk ids of the run's first search (P5-05), from the draft's evidence; None
     when no search ran (B0) or there is no draft (a failed run, a row-1 handoff)."""
@@ -253,6 +274,7 @@ def _details(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, Any]:
     answers = _answers(pairs)
     auto = [r.latency_ms for _, r in pairs if r.route == m.AUTO_REPLY]
     cost = m.cost_per_ticket([r.cost_usd for _, r in pairs])
+    account = _account_data(pairs)
     return {
         "triage": {
             "accuracy": m.triage_accuracy(intents).to_json(),
@@ -278,6 +300,7 @@ def _details(pairs: Sequence[tuple[Ticket, TicketResult]]) -> dict[str, Any]:
                 "invalid": answers["citation_validity"]["invalid"].to_json(),
             },
         },
+        "account_data": {**account, "used": account["used"].to_json()},
         "cost": {"per_ticket_usd": str(cost) if cost is not None else None},
         "latency": {
             "auto_reply": m.latency(auto).to_json(),
@@ -298,6 +321,7 @@ def _rows(pairs: Sequence[tuple[Ticket, TicketResult]]) -> list[Row]:
     invalid: m.Rate = answers["citation_validity"]["invalid"]
     escalation = routes["escalation_recall"]
     auto_latency = m.latency([r.latency_ms for _, r in pairs if r.route == m.AUTO_REPLY])
+    account = _account_data(pairs)
     cost = m.cost_per_ticket([r.cost_usd for _, r in pairs])
     rows = [
         Row(
@@ -406,6 +430,13 @@ def _rows(pairs: Sequence[tuple[Ticket, TicketResult]]) -> list[Row]:
             "—",
         ),
         Row(
+            m.Check("account facts used", account["used"].value, None, None, True),
+            f"{account['used']} of tickets needing account data with a draft"
+            f" ({account['excluded_no_draft']} without a draft)",
+            "reported",
+            "—",
+        ),
+        Row(
             m.Check(
                 "cost per ticket (USD)",
                 float(cost) if cost is not None else None,
@@ -484,6 +515,7 @@ def render_report(config: RunConfig, data: dict[str, Any], *, run_name: str) -> 
         f"| Models | {_pairs({k: ' / '.join(v) for k, v in config.models.items()})} |",
         f"| Git | `{config.git_sha}`{' (uncommitted changes)' if config.git_dirty else ''} |",
         f"| Anchor date | {config.core_anchor_date or 'not set (real date)'} |",
+        f"| Account tools | {'yes' if config.account_tools else '**no** (run without tools)'} |",
         f"| Tickets | `{config.tickets_file}` |",
         "",
         "## Metrics against targets",

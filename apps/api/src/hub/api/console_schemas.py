@@ -7,11 +7,12 @@ ids). It is never returned by a customer endpoint.
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
 from hub.api.schemas import MessageText
+from hub.domain.draft import IssueType
 from hub.domain.enums import (
     CustomerTier,
     DraftStatus,
@@ -22,6 +23,8 @@ from hub.domain.enums import (
     Route,
     RunStatus,
     TicketStatus,
+    ToolCallStatus,
+    ToolNode,
     Urgency,
 )
 
@@ -72,13 +75,30 @@ class ReplyIn(_Strict):
     body: MessageText
 
 
-# Ids of the draft's proposed actions the operator ticked ("a1", ...). Phase 7 runs them; until
-# then they are checked against the draft and recorded in the audit log.
+# Ids of the draft's proposed actions the operator ticked ("a1", ...): checked against the draft,
+# stored with the review and run by `act` after it (P7-05).
 ActionIds = Annotated[
     list[Annotated[str, StringConstraints(pattern=r"^a[0-9]{1,3}$")]], Field(max_length=20)
 ]
 # Same limit as a customer comment on feedback; masked (G1) before it is stored.
 RejectNote = Annotated[str, StringConstraints(max_length=1000, pattern=r"^[^\x00]*$")]
+
+
+class IssueParams(_Strict):
+    """A Jira issue an operator creates by hand (P7-05). Lengths as on the MCP server; the texts
+    are masked (G1) before they are sent. The customer and the ticket come from the ticket row,
+    never from the request."""
+
+    issue_type: IssueType
+    summary: Annotated[str, StringConstraints(min_length=1, max_length=255)]
+    description: Annotated[str, StringConstraints(min_length=1, max_length=5000)]
+
+
+class ActionIn(_Strict):
+    """`POST /console/tickets/{id}/actions`: one tool action run by an operator (api.md §3)."""
+
+    type: Literal["jira_create_issue"]
+    params: IssueParams
 
 
 class ApproveIn(_Strict):
@@ -190,6 +210,9 @@ class DraftOut(BaseModel):
     edit_ratio: Decimal | None
     reject_reason: RejectReason | None
     reject_note: str | None
+    # The proposed actions the operator ticked (P7-05); `act` runs them after the review. A
+    # draft from before migration 0013 has none stored (null), shown as an empty list.
+    approved_actions: Annotated[list[str], BeforeValidator(lambda value: value or [])]
     created_at: datetime
 
 
@@ -212,10 +235,30 @@ class MemoryOut(BaseModel):
     expires_at: datetime
 
 
+class ToolCallOut(BaseModel):
+    """One tool call of the ticket's runs (data model, `tool_calls`; P7-05): arguments and
+    summary are stored masked; `external_ref` is the Jira key or the Slack message `ts`."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    node: ToolNode
+    tool: str
+    status: ToolCallStatus
+    side_effect: bool
+    arguments: dict[str, Any]
+    result_summary: str | None
+    approved_by: uuid.UUID | None
+    external_ref: str | None
+    latency_ms: int
+    created_at: datetime
+
+
 class ConsoleTicketOut(QueueTicketOut):
     """`GET /console/tickets/{id}`. Fields of later phases are present and empty until then:
-    evidence chunks (phase 5; the B0 cited documents are in `draft.evidence`), tool calls
-    (phase 7), trace URL (phase 9). `memory` (P6-05): the customer's memory items that have not
+    evidence chunks (phase 5; the B0 cited documents are in `draft.evidence`), trace URL
+    (phase 9, removed by ADR-0019). `memory` (P6-05): the customer's memory items that have not
     expired, newest first, at most 5, without this ticket's own."""
 
     language: str | None
@@ -230,5 +273,6 @@ class ConsoleTicketOut(QueueTicketOut):
     draft: DraftOut | None
     evidence: list[Any] = Field(default_factory=list)
     memory: list[MemoryOut] = Field(default_factory=list)
-    tool_calls: list[Any] = Field(default_factory=list)
+    # Every tool call of the ticket's runs, oldest first (P7-05).
+    tool_calls: list[ToolCallOut] = Field(default_factory=list)
     trace_url: None = None
