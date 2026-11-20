@@ -510,3 +510,12 @@ def test_a_lost_resume_without_its_checkpoint_fails_the_run_and_keeps_the_answer
     _, status, _, _, error = _run_row(fresh, ticket_id)
     assert (status, error) == ("failed", "RunIncompleteError")
     assert _one(fresh, "SELECT status FROM tickets WHERE id = %s", ticket_id) == ("answered",)
+
+
+def test_a_failed_job_run_is_audited_with_its_error_class(fresh: Urls, qdrant_url: str) -> None:
+    container = dataclasses.replace(_jobs_container(fresh, qdrant_url), pipeline=None)
+    with TestClient(create_app(container), base_url="https://testserver") as web:
+        response = web.post("/api/v1/admin/jobs/recover-runs", headers=BEARER)
+    assert (response.status_code, response.json()["code"]) == (503, "workflow_unavailable")
+    [(actor_type, _, entity_id, details)] = _audit(fresh, "job.ran")
+    assert (actor_type, entity_id, details) == ("system", "recover-runs", {"error": "ProblemError"})

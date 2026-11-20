@@ -243,7 +243,13 @@ async def _from_handoff(
         return None
     if row.action == "ticket.closed":
         return ReviewDecision(kind="close", operator_id=row.actor_id), row.ts
-    message = await session.get(Message, uuid.UUID(str(row.details.get("message_id"))))
+    try:
+        message_id = uuid.UUID(str(row.details.get("message_id")))
+    except ValueError:
+        # One bad audit row must not stop the recovery of every other run.
+        logger.warning("lost resume not rebuilt", extra={"ticket_id": str(ticket_id)})
+        return None
+    message = await session.get(Message, message_id)
     if message is None:  # erased meanwhile
         return None
     decision = ReviewDecision(

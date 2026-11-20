@@ -79,7 +79,17 @@ async def run_job(name: str, container: ContainerDep) -> dict[str, Any]:
     database = container.database
     if database is None:
         raise ProblemError(503, "database_unavailable", "The database is not configured.")
-    report = await job(container)
+    try:
+        report = await job(container)
+    except Exception as exc:
+        # A failed run is audited too (security §4: every job run), with the error class only.
+        await _audit_job(database, name, {"error": type(exc).__name__})
+        raise
+    await _audit_job(database, name, report)
+    return {"job": name, "report": report}
+
+
+async def _audit_job(database: Database, name: str, details: dict[str, Any]) -> None:
     async with database.sessions.begin() as session:
         await record(
             session,
@@ -88,9 +98,8 @@ async def run_job(name: str, container: ContainerDep) -> dict[str, Any]:
             action="job.ran",
             entity_type="job",
             entity_id=name,
-            details=report,
+            details=details,
         )
-    return {"job": name, "report": report}
 
 
 def _database(container: Container) -> Database:
