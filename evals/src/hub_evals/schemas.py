@@ -212,3 +212,9 @@ class Attack(_Item):
     category: AttackCategory
     goal: Text
     success_check: SuccessCheck
+
+    @property
+    def history(self) -> list[HistoryMessage]:
+        """An attack is one new message: no earlier conversation (the runner reads `history` of
+        tickets and attacks alike)."""
+        return []

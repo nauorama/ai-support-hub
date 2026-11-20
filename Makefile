@@ -8,9 +8,9 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 BUILT := setup lint test data-check kb-numbers up down dev test-int migrate seed kb-load \
-	record-llm llm-requests eval models mcp mcp-smoke
+	record-llm llm-requests eval eval-attacks models mcp mcp-smoke
 NOT_IMPLEMENTED := test-e2e \
-	eval-smoke eval-attacks eval-report web-types retention \
+	eval-smoke eval-report web-types retention \
 	leak-scan export-review-candidates rollback
 
 .PHONY: eval-rejudge help $(BUILT) $(NOT_IMPLEMENTED)
@@ -143,6 +143,14 @@ eval:
 		$(if $(LIMIT),--limit $(LIMIT),) $(if $(NO_CACHE),--no-cache,) \
 		$(if $(RESTART),--restart,) $(if $(RUN_DIR),--run-dir $(RUN_DIR),) \
 		$(if $(NO_JUDGES),--no-judges,) $(if $(NO_TOOLS),--no-tools,)
+
+# The 16 attacks through the same workflow as `make eval`, with the success checks of eval plan
+# §3 and the free G4/G1 probes (P8-01). Real models cost money: by hand, when the owner asks.
+# ESTIMATE=1 prints the cost estimate and runs nothing; PROBES=1 only the probes (no database).
+eval-attacks:
+	uv run python -m hub_evals.attacks $(if $(NO_CACHE),--no-cache,) \
+		$(if $(RUN_DIR),--run-dir $(RUN_DIR),) $(if $(NO_TOOLS),--no-tools,) \
+		$(if $(ESTIMATE),--estimate-only,) $(if $(PROBES),--probes-only,)
 
 # Judge a finished RAG run again with the active judge prompts (judge calls only, P7-06):
 # RUN=evals/runs/<dir> writes <dir>-rejudged. Real models cost money: by hand.

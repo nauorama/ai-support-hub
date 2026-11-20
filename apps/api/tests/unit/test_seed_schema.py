@@ -20,6 +20,7 @@ from hub.domain.seed import (
     SeedData,
     Transaction,
     Upgrade,
+    cet_days,
     parse_offset,
     parse_seed,
     resolve_offset,
@@ -481,10 +482,143 @@ def test_tier_rules_for_transactions() -> None:
     )  # fmt: skip
     errors = validate_seed(broken)
     assert "TX-900001: mass payouts are Business only" in errors
-    assert "TX-900002: above the daily withdrawal limit of the tier" in errors
+    # 600 withdrawn plus the 100 mass payout on the same day.
+    assert (
+        "CUS-0005: withdrawal on CET day -2d is up to EUR 700.00, above the daily limit of "
+        "EUR 500 of the starter tier" in errors
+    )
     assert "TX-900003: Starter customers have no card" in errors
     assert "TX-900004: ERR-5010 on a customer who is not restricted" in errors
     assert "TX-900005: requested before the account was opened" in errors
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        ["pending", "completed"],
+        ["pending", "held_for_review", "completed"],
+        ["pending", "held_for_review", "failed"],
+        ["pending", "failed", "returned"],
+        ["failed", "returned"],
+        ["completed"],
+    ],
+)
+def test_allowed_status_histories(statuses: list[str]) -> None:
+    _withdrawal_with_history(statuses)
+
+
+@pytest.mark.parametrize(
+    ("statuses", "message"),
+    [
+        (["held_for_review", "completed"], "cannot start with held_for_review"),
+        (["returned"], "cannot start with returned"),
+        (["pending", "completed", "failed"], "step completed -> failed"),
+        (["pending", "returned"], "step pending -> returned"),
+        (["pending", "pending", "completed"], "step pending -> pending"),
+        (["pending", "failed", "completed"], "step failed -> completed"),
+        (["pending", "held_for_review", "pending", "completed"], "step held_for_review -> pending"),
+    ],
+)
+def test_every_status_history_step_is_checked(statuses: list[str], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        _withdrawal_with_history(statuses)
+
+
+def _withdrawal_with_history(statuses: list[str]) -> Transaction:
+    final = statuses[-1]
+    code = "ERR-2003" if final in {"failed", "returned"} else None
+    return _tx(
+        1,
+        1,
+        type="withdrawal_sepa",
+        status=final,
+        error_code=code,
+        requested_at="-9d 10:00",
+        status_history=[
+            {"status": status, "at": f"-{9 - step}d 10:00"} for step, status in enumerate(statuses)
+        ],
+    )
+
+
+def _with_extra(seed: SeedData, *extra: Transaction) -> SeedData:
+    return _replace(seed, transactions=[*seed.transactions, *extra])
+
+
+def test_withdrawals_of_one_day_are_added_up() -> None:
+    # CUS-0001 is Verified (EUR 10,000 a day). Two withdrawals of 6,000 on one day: each is
+    # within the limit, together they are not; pending counts, failed and returned do not.
+    seed = _with_extra(
+        _valid_seed(),
+        _tx(900_001, 1, type="withdrawal_sepa", amount="6000.00", requested_at="-20d 09:00"),
+        _tx(900_002, 1, type="withdrawal_swift", amount="6000.00", status="pending",
+            requested_at="-20d 11:00", status_history=[{"status": "pending", "at": "-20d 11:00"}]),
+    )  # fmt: skip
+    assert (
+        "CUS-0001: withdrawal on CET day -20d is up to EUR 12000.00, above the daily limit of "
+        "EUR 10000 of the verified tier" in validate_seed(seed)
+    )
+    failed = _with_extra(
+        _valid_seed(),
+        _tx(900_001, 1, type="withdrawal_sepa", amount="6000.00", requested_at="-20d 09:00"),
+        _tx(900_002, 1, type="withdrawal_sepa", amount="6000.00", status="failed",
+            error_code="ERR-2003", requested_at="-20d 11:00"),
+    )  # fmt: skip
+    assert validate_seed(failed) == []
+
+
+def test_mass_payouts_and_other_currencies_count_toward_the_withdrawal_limit() -> None:
+    business = _customer(1, tier="business", upgrade=None)
+    seed = _valid_seed()
+    seed = _replace(seed, customers=[business, *seed.customers[1:]])
+    seed = _with_extra(
+        seed,
+        _tx(900_001, 1, type="mass_payout", amount="30000.00", requested_at="-20d 09:00"),
+        _tx(900_002, 1, type="withdrawal_swift", currency="GBP", amount="17000.00",
+            requested_at="-20d 10:00"),
+    )  # fmt: skip
+    # 30,000 + 17,000 GBP counted at 1.25 = 51,250 > 50,000.
+    assert any(
+        e.startswith("CUS-0001: withdrawal on CET day -20d is up to EUR 51250.00")
+        for e in validate_seed(seed)
+    )
+
+
+def test_card_spend_and_atm_limits_per_day() -> None:
+    seed = _with_extra(
+        _valid_seed(),
+        _tx(900_001, 1, type="card_payment", card_ref="CRD-0001", merchant_category="travel",
+            amount="3000.00", requested_at="-20d 09:00"),
+        _tx(900_002, 1, type="card_payment", card_ref="CRD-0001", merchant_category="travel",
+            amount="2500.00", status="pending", requested_at="-20d 10:00",
+            status_history=[{"status": "pending", "at": "-20d 10:00"}]),
+        _tx(900_003, 1, type="atm_withdrawal", card_ref="CRD-0001", amount="600.00",
+            requested_at="-21d 09:00"),
+        _tx(900_004, 1, type="atm_withdrawal", card_ref="CRD-0001", amount="600.00",
+            requested_at="-21d 18:00"),
+    )  # fmt: skip
+    errors = validate_seed(seed)
+    assert any(
+        e.startswith("CUS-0001: card spend on CET day -20d is up to EUR 5500.00") for e in errors
+    )
+    assert any(e.startswith("CUS-0001: ATM on CET day -21d is up to EUR 1200.00") for e in errors)
+
+
+@pytest.mark.parametrize(
+    ("offset", "days"),
+    [("-5d 21:59", (-5,)), ("-5d 22:00", (-5, -4)), ("-5d 22:59", (-5, -4)), ("-5d 23:00", (-4,))],
+)
+def test_cet_days(offset: str, days: tuple[int, ...]) -> None:
+    assert cet_days(offset) == days
+
+
+def test_a_late_utc_event_counts_on_the_next_cet_day() -> None:
+    # 23:30 UTC is already the next day in CET: with a withdrawal there, that day is over.
+    seed = _with_extra(
+        _valid_seed(),
+        _tx(900_001, 1, type="withdrawal_sepa", amount="6000.00", requested_at="-21d 23:30"),
+        _tx(900_002, 1, type="withdrawal_sepa", amount="6000.00", requested_at="-20d 09:00"),
+    )
+    assert any(e.startswith("CUS-0001: withdrawal on CET day -20d") for e in validate_seed(seed))
 
 
 def test_transaction_count_per_customer() -> None:

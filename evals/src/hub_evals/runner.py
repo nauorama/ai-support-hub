@@ -139,9 +139,12 @@ from hub_evals import judges as judging
 from hub_evals import report as reporting
 from hub_evals import results as files
 from hub_evals.data_check import TEST_SET_FILE
-from hub_evals.schemas import Ticket
+from hub_evals.schemas import Attack, Ticket
 
 logger = logging.getLogger(__name__)
+
+# What goes through the workflow: an evaluation ticket, or an attack (`make eval-attacks`, P8-01).
+type EvalItem = Ticket | Attack
 
 ROOT = Path(__file__).resolve().parents[3]
 # The variants an evaluation can run (ai-pipeline §10): the workflow's, RAG by default.
@@ -258,7 +261,7 @@ def masked_counts(masked: MaskResult) -> dict[str, int]:
     return {str(kind): count for kind, count in masked.counts.items()}
 
 
-def history_turns(ticket: Ticket) -> list[ChatTurn]:
+def history_turns(ticket: EvalItem) -> list[ChatTurn]:
     """The earlier messages as the workflow will read them back from the database (masked)."""
     return [ChatTurn(role=item.role, text=mask(item.text).text) for item in ticket.history]
 
@@ -333,13 +336,13 @@ def judge_requests(
     return [gateway.chat_requests(role, messages, schema)[0] for messages, schema in calls]
 
 
-def ticket_query(ticket: Ticket) -> str:
+def ticket_query(ticket: EvalItem) -> str:
     """The masked message after intake: the writer's ticket text and the search query."""
     return intake(mask(ticket.message).text, history_turns(ticket)).message_for_llm
 
 
 async def estimate_evidence(
-    pipeline: Pipeline, tickets: Sequence[Ticket]
+    pipeline: Pipeline, tickets: Sequence[EvalItem]
 ) -> dict[str, EstimateEvidence]:
     """Ticket id -> what its requests will hold. B0: the whole KB for every ticket. RAG: the
     ticket's own search, run now with the same function as the run (local models, free)."""
@@ -356,7 +359,7 @@ async def estimate_evidence(
 
 def estimate_cost(
     pipeline: Pipeline,
-    tickets: Sequence[Ticket],
+    tickets: Sequence[EvalItem],
     evidence: Mapping[str, EstimateEvidence],
     cache: CachingProvider | None,
     judge_set: judging.Judges | None = None,
@@ -427,7 +430,7 @@ def estimate_cost(
                     ClaimsAnswer,
                 )[0]
             )
-        if judge_set is not None:
+        if judge_set is not None and isinstance(ticket, Ticket):
             uncached += judge_requests(gateway, judge_set, ticket, found, draft_chars)
         for index, request in enumerate(requests):
             calls += 1
@@ -436,17 +439,17 @@ def estimate_cost(
             if cache is not None and not extra and cache.contains(request):
                 cached += 1
                 continue
-            total += _price(gateway, request, extra)
+            total += price_request(gateway, request, extra)
         for request in uncached:
             calls += 1
-            total += _price(gateway, request, facts)
+            total += price_request(gateway, request, facts)
         for request, extra in researched:
             calls += 1
-            total += _price(gateway, request, extra)
+            total += price_request(gateway, request, extra)
     return Estimate(calls=calls, cached_calls=cached, cost_usd=total)
 
 
-def _price(gateway: Gateway, request: ProviderRequest, extra_tokens: int = 0) -> Decimal:
+def price_request(gateway: Gateway, request: ProviderRequest, extra_tokens: int = 0) -> Decimal:
     usage = Usage(
         input_tokens=estimate_tokens(request) + extra_tokens,
         output_tokens=request.max_tokens or DEFAULT_OUTPUT_TOKENS,
@@ -524,7 +527,7 @@ async def prepare_database(database: Database, seed_dir: Path, kb_dir: Path) -> 
         ) from None
 
 
-async def create_ticket(database: Database, ticket: Ticket) -> tuple[Any, Any, bool]:
+async def create_ticket(database: Database, ticket: EvalItem) -> tuple[Any, Any, bool]:
     """The ticket, its history and the new customer message in the evaluation database, masked
     as the API masks them (G1). Returns the ticket id, the message id and whether masking of the
     new message failed (then the API hands the ticket off without a run, and so does this)."""
@@ -594,7 +597,7 @@ async def triage_flags(
 
 async def collect_result(
     database: Database,
-    ticket: Ticket,
+    ticket: EvalItem,
     ticket_id: Any,  # noqa: ANN401 - uuid.UUID from the database
     run_id: Any,  # noqa: ANN401
     *,
@@ -663,7 +666,7 @@ async def collect_result(
     )
 
 
-async def run_eval_ticket(pipeline: Pipeline, ticket: Ticket) -> files.TicketResult:
+async def run_eval_ticket(pipeline: Pipeline, ticket: EvalItem) -> files.TicketResult:
     """One evaluation ticket through the production `run_ticket`."""
     ticket_id, message_id, mask_failed = await create_ticket(pipeline.database, ticket)
     events: list[str] = []
