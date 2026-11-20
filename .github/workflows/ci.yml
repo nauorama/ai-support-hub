@@ -1,5 +1,5 @@
-# CI from docs/operations.md §5. Jobs added later: web (P10), e2e (P10),
-# pnpm audit and Dependabot (P8-06). Every check runs a make target where one exists, so CI and
+# CI from docs/operations.md §5. Jobs added later: web (P10), e2e (P10). Dependency updates come
+# from .github/dependabot.yml (P8-06). Every check runs a make target where one exists, so CI and
 # a laptop run the same commands. Actions are pinned by commit SHA; the comment names the release.
 name: ci
 
@@ -135,6 +135,14 @@ jobs:
             --format requirements-txt -o "$RUNNER_TEMP/requirements.txt"
           uv run pip-audit -r "$RUNNER_TEMP/requirements.txt" \
             --require-hashes --disable-pip --strict --progress-spinner off
+
+      # Skipped until the web app exists (P10-01 adds apps/web/package.json and pnpm-lock.yaml);
+      # then it fails the job on a high or critical advisory. pnpm 12.18.0 (2026-11-05): keep it
+      # equal to the `packageManager` field P10-01 writes into apps/web/package.json.
+      - name: pnpm audit (web app, once it exists)
+        if: hashFiles('apps/web/package.json') != ''
+        working-directory: apps/web
+        run: npx --yes pnpm@12.18.0 audit --audit-level high
 
   # Informational, NOT a required check: it downloads Go from go.dev, so an outage there must not
   # block a merge. Shows that the gitleaks pre-commit hook (language: golang) installs on a
