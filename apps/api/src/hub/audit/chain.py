@@ -86,7 +86,7 @@ def mask_id(value: Id) -> str:
 
 
 def mask_field(text: str) -> str:
-    """One text field of the row, masked (G1). Every string is masked, UUID-shaped or not."""
+    """One text field of the row, masked (G1; a canonical UUID stays as it is, P8-03)."""
     if "\x00" in text:
         raise AuditValueError("audit strings must not contain NUL (Postgres rejects it)")
     try:

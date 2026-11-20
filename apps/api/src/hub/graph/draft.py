@@ -41,7 +41,7 @@ from hub.graph.pipeline import (
     Pipeline,
 )
 from hub.guardrails.masking import mask
-from hub.guardrails.output_checks import DraftToCheck, InternalText
+from hub.guardrails.output_checks import DraftToCheck, InternalText, prompt_text
 from hub.kb.chunk_text import render_chunks
 from hub.kb.full_text import KbSource, load_external_sources, render_kb
 from hub.kb.retriever import KbChunk
@@ -330,6 +330,20 @@ async def writer_evidence(pipeline: Pipeline, query: str) -> WriterEvidence:
     if pipeline.variant == B0_VARIANT:
         return await evidence_for_writer(pipeline, ())
     return await evidence_for_writer(pipeline, await search(pipeline, query))
+
+
+def prompt_fragments(pipeline: Pipeline) -> InternalText:
+    """The prompt-fragment check of the code checks (G7, P8-02): the instructions of every
+    prompt the run's models get."""
+    prompts = (
+        pipeline.triage_prompt,
+        pipeline.write_prompt,
+        pipeline.verify_prompt,
+        pipeline.research_prompt,
+        pipeline.handoff_prompt,
+        pipeline.memory_prompt,
+    )
+    return prompt_text(prompt.system for prompt in prompts if prompt is not None)
 
 
 async def internal_text(pipeline: Pipeline) -> InternalText:

@@ -26,7 +26,12 @@ from collections.abc import Collection
 from hub.domain.enums import LlmCallContext, LlmNode
 from hub.domain.verification import ClaimCheck, ClaimsAnswer, Verification
 from hub.graph.context import GraphContext, ids
-from hub.graph.draft import draft_to_check, evidence_for_writer, internal_text
+from hub.graph.draft import (
+    draft_to_check,
+    evidence_for_writer,
+    internal_text,
+    prompt_fragments,
+)
 from hub.graph.nodes.intake import intake_result
 from hub.graph.state import TicketState
 from hub.guardrails.output_checks import check_draft
@@ -115,6 +120,7 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
         draft_to_check(answer, evidence, intake),
         promises=pipeline.policy.promises,
         internal=await internal_text(pipeline),
+        prompts=prompt_fragments(pipeline),
     )
     if violations:
         return TicketState(verification=failed_checks(violations))

@@ -23,17 +23,21 @@ text of the draft, so they can go to the audit log.
    letters cannot hide one. A first filter: the LLM verifier checks the rest, because a promise
    no source makes is an unsupported claim. The patterns are `forbidden_promises` in
    `config/policy.yaml` (moved there in P6-02); every check takes them as an argument.
-6. Length at most 1,200 characters (`too_long`); language English (`not_english`).
+6. No canary string (`canary`, security T4, T5): `CANARY-<WORD>-<WORD>`, planted in internal
+   articles and in other customers' seed data (eval plan §2), matched on the folded view of G4.
+   No prompt fragment (`prompt_fragment`, T6): an 8-word window of a prompt's instructions (its
+   system part, examples in quotes or backticks left out, `prompt_text`). Both are code
+   controls (P8-02): the internal-text check finds a copied sentence, not a quoted reference.
+7. Length at most 1,200 characters (`too_long`); language English (`not_english`).
 
 The other model-written strings of a draft (`missing_information`, each proposed action) get
-the checks of groups 4 and 5, with codes `<field>:<code>` (e.g.
+the checks of groups 4 to 6, with codes `<field>:<code>` (e.g.
 `proposed_action:forbidden_promise:refund`), also when the draft cannot answer.
 
 The checks run on the model's answer as it wrote it, with the run's placeholders restored and
 **before** the card mask and before markers without a citation are removed
 (`hub.graph.nodes.verify`): a check must see what the model did, not what the floor repaired.
 
-Canary strings and prompt fragments (security T5, T6) come with the attack suite (P8-02).
 Pure functions; no imports from the rest of the project except the other guardrails.
 """
 
@@ -68,6 +72,8 @@ class Violation(StrEnum):
     PLACEHOLDER = "placeholder"
     INTERNAL_TEXT = "internal_text"
     FORBIDDEN_PROMISE = "forbidden_promise"
+    CANARY = "canary"
+    PROMPT_FRAGMENT = "prompt_fragment"
     TOO_LONG = "too_long"
     NOT_ENGLISH = "not_english"
 
@@ -86,6 +92,12 @@ _PLACEHOLDERS = re.compile(
     re.IGNORECASE,
 )
 _WORD = re.compile(r"[^\W_]+")
+# Canary strings (eval plan §2), on the folded text: letters only, any case, any dash or an
+# underscore between the parts. Not spaces: "Canary Supplies got a payment" is a name.
+_CANARY = re.compile(r"\bcanary[-_\u2010-\u2015\u2212]+[a-z]+[-_\u2010-\u2015\u2212]+[a-z]+\b")
+# Examples inside a prompt's instructions: quoted text and code spans. An answer may say what an
+# example says ("This error means the IBAN is not valid"), so examples are not prompt fragments.
+_PROMPT_EXAMPLE = re.compile(r'"[^"\n]*"|\u201c[^\u201d\n]*\u201d|`[^`\n]*`|\bExample:[^\n]*')
 
 
 def _word_set(text: str) -> frozenset[str]:
@@ -137,7 +149,8 @@ class DraftToCheck:
 
 @dataclass(frozen=True)
 class InternalText:
-    """Hashes of the 8-word windows of the internal chunks that no external chunk has."""
+    """Hashes of the 8-word windows of protected text that no external chunk has: the internal
+    chunks (`internal_text`), or the instructions of the prompts (`prompt_fragment`)."""
 
     hashes: frozenset[str] = field(default_factory=frozenset)
 
@@ -219,6 +232,16 @@ def promise_text(text: str) -> str:
     return " ".join(folded.split())
 
 
+def has_canary(text: str) -> bool:
+    return bool(_CANARY.search(promise_text(text)))
+
+
+def prompt_text(system_parts: Iterable[str], external: Iterable[str] = ()) -> InternalText:
+    """The prompt-fragment check: the windows of the prompts' system parts, examples in quotes
+    or backticks left out, and windows an external chunk has too."""
+    return InternalText.build((_PROMPT_EXAMPLE.sub(" ", part) for part in system_parts), external)
+
+
 def forbidden_promises(text: str, patterns: Promises) -> list[str]:
     """Names of the forbidden promises the text makes, in the order of `patterns`."""
     folded = promise_text(text)
@@ -233,12 +256,14 @@ def check_draft(
     *,
     promises: Promises,
     internal: InternalText | None = None,
+    prompts: InternalText | None = None,
 ) -> list[str]:
     """Violation codes in check order; an empty list when every code check passes. The checks
     of the answer come first, then those of the other model-written strings."""
-    found = _answer_violations(draft, internal, promises)
+    found = _answer_violations(draft, internal, promises, prompts)
     for name, text in draft.other_texts:
-        found += [f"{name}:{code}" for code in content_violations(text, promises, internal)]
+        codes = content_violations(text, promises, internal, prompts)
+        found += [f"{name}:{code}" for code in codes]
     return found
 
 
@@ -246,8 +271,9 @@ def content_violations(
     text: str,
     promises: Promises,
     internal: InternalText | None = None,
+    prompts: InternalText | None = None,
 ) -> list[str]:
-    """The checks of check group 4 and 5 that apply to any model-written text."""
+    """The checks of check groups 4 to 6 that apply to any model-written text."""
     found: list[str] = []
     if has_card_data(text):
         found.append(Violation.CARD_DATA)
@@ -256,6 +282,10 @@ def content_violations(
     if internal is not None and internal.found_in(text):
         found.append(Violation.INTERNAL_TEXT)
     found += [f"{Violation.FORBIDDEN_PROMISE}:{n}" for n in forbidden_promises(text, promises)]
+    if has_canary(text):
+        found.append(Violation.CANARY)
+    if prompts is not None and prompts.found_in(text):
+        found.append(Violation.PROMPT_FRAGMENT)
     return found
 
 
@@ -263,6 +293,7 @@ def _answer_violations(
     draft: DraftToCheck,
     internal: InternalText | None,
     promises: Promises,
+    prompts: InternalText | None,
 ) -> list[str]:
     if not draft.can_answer:
         return [Violation.CANNOT_ANSWER]
@@ -279,7 +310,7 @@ def _answer_violations(
         found.append(Violation.NO_CITATION)
     if any(_FACT.search(_MARKER.sub("", part)) and not markers(part) for part in paragraphs(text)):
         found.append(Violation.UNMARKED_FACT)
-    found += content_violations(text, promises, internal)
+    found += content_violations(text, promises, internal, prompts)
     if len(text) > MAX_LENGTH:
         found.append(Violation.TOO_LONG)
     if not looks_english(text):
