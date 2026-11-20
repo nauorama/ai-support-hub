@@ -819,6 +819,47 @@ def test_a_key_used_for_a_free_reply_is_409_on_a_review(
     assert _one(urls, "SELECT status FROM drafts WHERE id = %s", draft_id) == ("pending",)
 
 
+def test_a_review_without_stored_actions_compares_as_no_actions(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """Migration 0013 has no backfill (owner decision, PR #42 review): a draft from before it has
+    `approved_actions` null, which a replay compares as "no actions"."""
+    ticket_id, draft_id = _with_draft(urls, customer, actions=ACTIONS)
+    headers, version = key(), _version(staff["operator"], ticket_id)
+    first = _review(staff["operator"], ticket_id, draft_id, "approve", headers, version)
+    assert first.status_code == 200, first.text
+    run_sql(urls, "UPDATE drafts SET approved_actions = NULL WHERE id = %s", draft_id)
+
+    same = _review(staff["operator"], ticket_id, draft_id, "approve", headers, version)
+    assert same.status_code == 200, same.text
+    assert same.json()["draft"]["approved_actions"] == []
+    other = _review(
+        staff["operator"], ticket_id, draft_id, "approve", headers, version, approved_actions=["a1"]
+    )
+    assert other.status_code == 409
+    assert other.json()["code"] == "idempotency_key_reused"
+
+
+def test_the_key_of_a_review_before_migration_0013_is_not_recognised(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """No `review_key` for older reviews: their repeat answers 409 (documented in api.md §3)."""
+    ticket_id, draft_id = _with_draft(urls, customer)
+    headers, version = key(), _version(staff["operator"], ticket_id)
+    assert (
+        _review(staff["operator"], ticket_id, draft_id, "approve", headers, version).status_code
+        == 200
+    )
+    run_sql(
+        urls, "UPDATE drafts SET review_key = NULL, approved_actions = NULL WHERE id = %s", draft_id
+    )
+
+    again = _review(staff["operator"], ticket_id, draft_id, "approve", headers, version)
+
+    assert again.status_code == 409
+    assert again.json()["code"] == "idempotency_key_reused"
+
+
 # --- roles, CSRF, unknown draft, ticket detail ------------------------------------------------
 
 

@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,7 +49,7 @@ from hub.api.errors import ProblemError
 from hub.api.message_helpers import audit_masking, masked_entities
 from hub.api.resume import paused_run, resume_after_commit
 from hub.audit import record
-from hub.db.models import Draft, Message, Operator, Ticket
+from hub.db.models import Draft, Message, Operator, Run, Ticket, ToolCall
 from hub.db.repositories import DraftRepository, MessageRepository, TicketRepository
 from hub.deps import Container
 from hub.domain.enums import (
@@ -58,6 +59,7 @@ from hub.domain.enums import (
     RejectReason,
     Resolution,
     TicketStatus,
+    ToolCallStatus,
 )
 from hub.domain.review import (
     ReviewDecision,
@@ -67,8 +69,11 @@ from hub.domain.review import (
     unknown_markers,
 )
 from hub.guardrails.masking import MaskResult, mask
+from hub.tools.permissions import MAX_SIDE_EFFECTS_PER_TICKET
 
 router = APIRouter(prefix="/api/v1/console", tags=["console"])
+
+JIRA_TOOL = "jira_create_issue"
 
 
 @dataclass(frozen=True)
@@ -243,6 +248,46 @@ def _check_actions(draft: Draft, approved_actions: list[str]) -> None:
         )
 
 
+async def _check_action_limit(
+    session: AsyncSession, ticket_id: uuid.UUID, approved_actions: list[str]
+) -> None:
+    """Never a silent denial in `act` (review finding 2, P7-05): a ticket gets at most one Jira
+    issue (security T8), so more ticked actions than it may still create are refused here."""
+    if not approved_actions:
+        return
+    if len(approved_actions) > MAX_SIDE_EFFECTS_PER_TICKET:
+        raise ProblemError(
+            422,
+            "validation_error",
+            "The request is not valid.",
+            extensions={
+                "errors": [
+                    {
+                        "loc": ["body", "approved_actions"],
+                        "type": "too_many_actions",
+                        "msg": "A ticket can have one Jira issue: tick at most one action.",
+                    }
+                ]
+            },
+        )
+    done = await session.scalar(
+        select(func.count())
+        .select_from(ToolCall)
+        .join(Run, Run.id == ToolCall.run_id)
+        .where(
+            Run.ticket_id == ticket_id,
+            ToolCall.tool == JIRA_TOOL,
+            ToolCall.status == ToolCallStatus.OK,
+        )
+    )
+    if (done or 0) + len(approved_actions) > MAX_SIDE_EFFECTS_PER_TICKET:
+        raise ProblemError(
+            409,
+            "action_limit_reached",
+            "This ticket already has its Jira issue. Untick the action and send again.",
+        )
+
+
 async def _apply(
     session: AsyncSession,
     container: Container,
@@ -277,6 +322,7 @@ async def _apply(
         raise _no_longer_waits()
     _check_not_claimed_by_other(ticket, operator)
     _check_actions(draft, review.approved_actions)
+    await _check_action_limit(session, ticket.id, review.approved_actions)
 
     ticket_id, draft_id = ticket.id, draft.id
     try:
@@ -426,7 +472,8 @@ def _same_review(reviewed: Draft, draft: Draft, review: _Review) -> bool:
         reviewed.id == draft.id
         and reviewed.status == review.status
         and reviewed.final_body == (None if outgoing is None else outgoing.body)
-        and list(reviewed.approved_actions) == list(review.approved_actions)
+        # Null for a review before migration 0013: compared as "no actions".
+        and list(reviewed.approved_actions or []) == list(review.approved_actions)
         and reviewed.reject_reason == review.reject_reason
         and reviewed.reject_note == note
     )

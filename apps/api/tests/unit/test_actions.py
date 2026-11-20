@@ -96,3 +96,14 @@ async def test_no_tool_client_sends_no_alert() -> None:
 async def test_a_failed_alert_never_fails_the_handoff() -> None:
     ctx = _ctx(tools=object(), database=SimpleNamespace(sessions=_Broken()))
     assert await handoff_prep.urgent_alert(_state(None), ctx, ["fraud_report"]) is False
+
+
+def test_the_alert_fits_in_the_handoff_budget() -> None:
+    """P7-05 review finding 5: the summary and the alert together end well before the node's
+    timeout, so a hung Slack call never fails the handoff."""
+    from hub.graph.build import NODE_TIMEOUTS_S
+    from hub.tools.mcp_client import DEFAULT_TIMEOUT_S
+
+    budget = NODE_TIMEOUTS_S["handoff_prep"]
+    assert handoff_prep.ALERT_TIMEOUT_S < DEFAULT_TIMEOUT_S
+    assert budget > handoff_prep.SUMMARY_TIMEOUT_S + handoff_prep.ALERT_TIMEOUT_S + 10

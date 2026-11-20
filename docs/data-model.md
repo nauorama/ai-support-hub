@@ -160,8 +160,8 @@ One execution of the workflow for one customer message.
 | edit_ratio | numeric(4,3) null | how much the operator changed: `1 - difflib.SequenceMatcher(None, body, final_body, autojunk=False).ratio()`, rounded to 3 decimals (an approximation of a normalised edit distance, not Levenshtein; no extra dependency). `0` for an approved draft; null for a rejected one (a reply is not an edit of the draft) |
 | reject_reason | text null | `wrong_facts` \| `wrong_tone` \| `missing_info` \| `policy` \| `other` |
 | reject_note | text null | the operator's note, at most 1,000 characters; card data masked (G1) |
-| approved_actions | jsonb | ids of the proposed actions the operator ticked (`["a1"]`), stored with the review; `act` runs them (P7-05, migration 0013) |
-| review_key | text null unique | the operator-scoped `Idempotency-Key` of the review (`operator:<id>:<key>`), for every review including a reject without a reply; a repeat is compared with the stored review (P7-05; reviews before migration 0013 got the key of their message) |
+| approved_actions | jsonb null | ids of the proposed actions the operator ticked (`["a1"]`), stored with the review; `act` runs them (P7-05, migration 0013); `[]` for new rows, null for rows from before 0013 (no backfill; compared as "no actions") |
+| review_key | text null unique | the operator-scoped `Idempotency-Key` of the review (`operator:<id>:<key>`), for every review including a reject without a reply; a repeat is compared with the stored review (P7-05); null for reviews before migration 0013 (no backfill), whose repeat answers `409 idempotency_key_reused` |
 
 ### llm_calls
 Own record of every model call. Source of truth for cost.

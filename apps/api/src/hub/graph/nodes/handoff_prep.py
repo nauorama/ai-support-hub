@@ -53,6 +53,10 @@ logger = logging.getLogger(__name__)
 SUMMARY_TIMEOUT_S = 20.0
 NO_RESEARCH = "(the assistant did not search)"
 SLACK_TOOL = "slack_post_escalation"
+# The alert's own limit: the summary (`SUMMARY_TIMEOUT_S`) and the alert together stay well
+# inside the node's timeout (graph/build.py, a test checks it), so a hung Slack call is an
+# `error` row, never a failed handoff (review finding 5, P7-05).
+ALERT_TIMEOUT_S = 8.0
 
 
 def reasons(state: TicketState) -> list[str]:
@@ -191,6 +195,7 @@ async def urgent_alert(state: TicketState, ctx: GraphContext, why: list[str]) ->
         outcome = await tools.session(scope).call(
             SLACK_TOOL,
             {"text": text},
+            timeout_s=ALERT_TIMEOUT_S,
             approval=Approval(
                 tool=SLACK_TOOL,
                 ticket_id=ticket_id,

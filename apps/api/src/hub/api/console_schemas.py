@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints
 
 from hub.api.schemas import MessageText
 from hub.domain.draft import IssueType
@@ -210,8 +210,9 @@ class DraftOut(BaseModel):
     edit_ratio: Decimal | None
     reject_reason: RejectReason | None
     reject_note: str | None
-    # The proposed actions the operator ticked (P7-05); `act` runs them after the review.
-    approved_actions: list[str]
+    # The proposed actions the operator ticked (P7-05); `act` runs them after the review. A
+    # draft from before migration 0013 has none stored (null), shown as an empty list.
+    approved_actions: Annotated[list[str], BeforeValidator(lambda value: value or [])]
     created_at: datetime
 
 

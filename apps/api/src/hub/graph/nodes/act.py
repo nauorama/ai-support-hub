@@ -8,10 +8,17 @@ stored, G1-masked action parameters) for `jira_create_issue` through `hub.tools`
 tool client records every call in `tool_calls` (the issue key in `external_ref`) with its audit
 record. A model never reaches this node: the arguments are the stored draft's, not the state's.
 
-Nothing to run (no review, no approved action, no tool client): the node does nothing. A failure
-is recorded and the run continues (ai-pipeline §3, "records the error, continues"): the answer
-was already sent, and the operator can still create the issue by hand
-(`POST /console/tickets/{id}/actions`).
+Nothing to run (no review, no approved action, no tool client): the node does nothing.
+
+Failures (ai-pipeline §3, "records the error, continues"; owner decision after the PR #42
+review): a Jira call that is refused or fails is recorded by the tool client (`tool_calls` row
+with status `denied` or `error`, audited as `tool.denied` or `tool.called`) and shown on the
+ticket in the console; the run goes on and ends `completed`, because the answer was already sent,
+and the operator can create the issue by hand (`POST /console/tickets/{id}/actions`). Only an
+unexpected failure of the node itself (the database, a timeout) is `act:<error class>` in
+`errors`, and the run ends `failed`; the ticket is never handed off from here. The console
+refuses more ticked actions than the ticket may still create (API §3), so a limit denial here
+means a race, not a silent drop.
 """
 
 import logging
@@ -47,8 +54,8 @@ def approved(proposed: list[Any], review: ReviewDecision) -> list[dict[str, Any]
 
 
 def failed_with(state: TicketState, error: str) -> TicketState:
-    """The run ends `failed` (ai-pipeline §1: a step after the resume failed); the answer is
-    sent either way, and the ticket stays as the operator left it."""
+    """An unexpected failure of the node: the run ends `failed` (ai-pipeline §1: a step after the
+    resume failed); the answer is sent either way, and the ticket stays as the operator left it."""
     return TicketState(errors=[*state.get("errors", []), f"act:{error}"])
 
 
@@ -88,10 +95,16 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                     approval=approval(ticket_id, review.operator_id, action["params"]),
                 )
             )
-    except Exception as exc:  # recorded, the run goes on: the answer is already sent
+    except Exception as exc:  # the node itself failed: recorded, the answer is already sent
         logger.warning("act failed", extra={"run_id": str(run_id), "error": type(exc).__name__})
         return failed_with(state, type(exc).__name__)
-    failed = [outcome.tool for outcome in outcomes if outcome.status is not ToolCallStatus.OK]
+    # A refused or failed call is already a `tool_calls` row with its audit record, shown in the
+    # console; the run goes on.
+    failed = [
+        outcome.status.value for outcome in outcomes if outcome.status is not ToolCallStatus.OK
+    ]
     if failed:
-        logger.warning("approved action not done", extra={"run_id": str(run_id), "tools": failed})
+        logger.warning(
+            "approved action not done", extra={"run_id": str(run_id), "statuses": failed}
+        )
     return TicketState()

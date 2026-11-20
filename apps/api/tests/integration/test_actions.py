@@ -7,6 +7,7 @@ The model is scripted (no recording, no key): each test lists the answers of its
 another model call fails loudly. The search returns nothing; the writer cites an account fact.
 """
 
+import asyncio
 import dataclasses
 import json
 import uuid
@@ -27,6 +28,7 @@ from hub.llm.recorder import DbCallRecorder
 from hub.llm.schemas import ProviderResponse, Usage
 from hub.llm.schemas import ToolCall as ModelToolCall
 from hub.main import create_app
+from hub.tools.mcp_client import McpTransport, TransportResult
 
 from ._api import (
     ACCESS_CODE,
@@ -82,9 +84,9 @@ def _tool_turn(name: str, arguments: dict[str, Any]) -> ProviderResponse:
     )
 
 
-def _dispute_run() -> list[ProviderResponse]:
-    """Triage, research (one core call, then done), a draft with a prepared Jira issue that
-    cites the account fact, a verification that passes."""
+def _dispute_run(actions: int = 1) -> list[ProviderResponse]:
+    """Triage, research (one core call, then done), a draft with `actions` prepared Jira issues
+    that cites the account fact, a verification that passes."""
     answer = "We found payment TX-000001 on your account [1]. Our team will review your dispute."
     return [
         _json(_triage()),
@@ -96,7 +98,7 @@ def _dispute_run() -> list[ProviderResponse]:
                 "missing_information": None,
                 "answer": answer,
                 "citations": [{"marker": 1, "source_id": "A1"}],
-                "proposed_actions": [ACTION],
+                "proposed_actions": [ACTION] * actions,
             }
         ),
         _json(
@@ -395,3 +397,105 @@ def test_the_operator_action_checks_the_ticket_and_the_request(stack: Stack) -> 
     unknown = operator.post(f"/api/v1/console/tickets/{uuid.uuid4()}/actions", json=body)
     assert unknown.status_code == 404
     assert _side_effects(stack.urls) == []
+
+
+# --- failures and limits (PR #42 review) --------------------------------------------------------
+
+
+def _failing(monkeypatch: pytest.MonkeyPatch, tool: str, *, hang: bool = False) -> None:
+    """The MCP server fails (or hangs on) one tool; every other call goes through."""
+    real = McpTransport.call
+
+    async def call(
+        self: McpTransport, name: str, arguments: dict[str, Any], timeout_s: float
+    ) -> TransportResult:
+        if name != tool:
+            return await real(self, name, arguments, timeout_s)
+        if hang:
+            await asyncio.sleep(120)
+        return TransportResult(True, None, "jira is down")
+
+    monkeypatch.setattr(McpTransport, "call", call)
+
+
+def test_a_failed_jira_call_is_recorded_shown_and_the_run_completes(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ai-pipeline §3, `act`: "records the error, continues" (owner decision)."""
+    ticket_id = _post(stack, DISPUTE, _dispute_run())
+    operator = _operator(stack)
+    _failing(monkeypatch, "jira_create_issue")
+
+    _approve(operator, ticket_id, ["a1"])
+
+    [(node, tool, status, ref, _)] = _side_effects(stack.urls)
+    assert (node, tool, status, ref) == ("act", "jira_create_issue", "error", None)
+    detail = _detail(operator, ticket_id)
+    [shown] = [call for call in detail["tool_calls"] if call["tool"] == "jira_create_issue"]
+    assert (shown["status"], shown["result_summary"]) == ("error", "jira is down")
+    assert detail["latest_run"]["status"] == "completed"
+    assert detail["latest_run"]["error"] is None
+    audit = run_sql(
+        stack.urls,
+        "SELECT details ->> 'status' FROM audit_log WHERE action = 'tool.called'"
+        " AND details ->> 'tool' = 'jira_create_issue'",
+    )
+    assert audit == [("error",)]
+
+
+def test_more_ticked_actions_than_the_ticket_may_create_are_refused(stack: Stack) -> None:
+    """PR #42 review finding 2: never a silent denial in `act`."""
+    ticket_id = _post(stack, DISPUTE, _dispute_run(actions=2))
+    operator = _operator(stack)
+    detail = _detail(operator, ticket_id)
+    url = f"/api/v1/console/drafts/{detail['draft']['id']}/approve"
+
+    both = operator.post(
+        url,
+        json={"ticket_version": detail["version"], "approved_actions": ["a1", "a2"]},
+        headers=key(),
+    )
+    assert both.status_code == 422
+    assert both.json()["errors"][0]["type"] == "too_many_actions"
+
+    # The ticket already has its issue (e.g. created by hand on an earlier run).
+    run_sql(
+        stack.urls,
+        "INSERT INTO tool_calls (id, run_id, node, tool, arguments, status, side_effect,"
+        " latency_ms) VALUES (%s, %s, 'act', 'jira_create_issue', '{}', 'ok', true, 1)",
+        uuid.uuid4(),
+        uuid.UUID(detail["latest_run"]["id"]),
+    )
+    one = operator.post(
+        url,
+        json={"ticket_version": detail["version"], "approved_actions": ["a1"]},
+        headers=key(),
+    )
+    assert one.status_code == 409
+    assert one.json()["code"] == "action_limit_reached"
+    assert _detail(operator, ticket_id)["draft"]["status"] == "pending"
+
+
+def test_a_hung_slack_alert_is_an_error_row_and_the_handoff_completes(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PR #42 review finding 5: the alert's own limit cuts a hung call before the node's."""
+    from hub.graph.nodes import handoff_prep
+
+    monkeypatch.setattr(handoff_prep, "ALERT_TIMEOUT_S", 0.2)
+    _failing(monkeypatch, "slack_post_escalation", hang=True)
+
+    ticket_id = _post(
+        stack,
+        "Someone used my card, please help.",
+        _handoff_run(
+            intent="card_declined", asks_for_action="none", reports_unauthorised_activity=True
+        ),
+    )
+
+    [(node, tool, status, ref, _)] = _side_effects(stack.urls)
+    assert (node, tool, status, ref) == ("handoff_prep", "slack_post_escalation", "error", None)
+    detail = _detail(_operator(stack), ticket_id)
+    assert detail["status"] == "handed_off"
+    assert detail["latest_run"]["status"] == "interrupted"
+    assert any(message["role"] == "system" for message in detail["messages"])

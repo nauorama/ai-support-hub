@@ -81,17 +81,20 @@ async def run_action(
     scope = ToolScope(
         run_id=run.id, ticket_id=ticket.id, customer_ref=customer_ref, node=ToolNode.ACT
     )
-    outcome = await tools.session(scope).call(
-        body.type,
-        arguments,
-        approval=Approval(
-            tool=body.type,
-            ticket_id=ticket.id,
-            basis=ApprovalBasis.OPERATOR_REVIEW,
-            operator_id=operator.id,
-            arguments=arguments,
-        ),
+    approval = Approval(
+        tool=body.type,
+        ticket_id=ticket.id,
+        basis=ApprovalBasis.OPERATOR_REVIEW,
+        operator_id=operator.id,
+        arguments=arguments,
     )
+    try:
+        outcome = await tools.session(scope).call(body.type, arguments, approval=approval)
+    except Exception:
+        # The client turns tool failures into outcomes; this is its own failure (e.g. recording
+        # the row). End the transaction that holds the ticket lock before answering.
+        await session.rollback()
+        raise ProblemError(502, "tool_error", "The tool did not complete the action.") from None
     # Ends the transaction that holds the ticket lock; the call is recorded in its own.
     await session.commit()
     if outcome.status is ToolCallStatus.DENIED:

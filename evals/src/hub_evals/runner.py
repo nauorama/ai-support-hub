@@ -41,11 +41,11 @@ run's own cost limit in place of the daily budget, and the disk cache.
 - **Account tools** (P7-06): a RAG variant needs `MCP_SERVER_TOKEN` (the runner stops without
   it, unless the run is marked `--no-tools`, which `config.json` and the report state) and runs
   the research tool loop against the `support-tools` server like the app
-  (`hub.deps.tool_client`, `research/v1`); intake loads the customer profile. The answers then
-  depend on "today" of the core mock, so such a run needs a fixed `CORE_ANCHOR_DATE` (eval plan
-  §1 principle 6, operations §2; the `mcp` service reads the same `.env`): without it the
-  runner stops before any call. The date is part of `config.json`, so a resume with another
-  date is refused.
+  (`hub.deps.tool_client`, the active research prompt); intake loads the customer profile. The
+  answers then depend on "today" of the core mock, so such a run needs a fixed
+  `CORE_ANCHOR_DATE` (eval plan §1 principle 6, operations §2; the `mcp` service reads the same
+  `.env`): without it the runner stops before any call. The date is part of `config.json`, so a
+  resume with another date is refused.
 - **Metrics and report** (P4-04): `metrics.json` and `report.md` from `hub_evals.report`.
 
 The output names counts only, never ticket text. The test set is never read (AGENTS.md rule 7).

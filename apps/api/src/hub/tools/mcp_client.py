@@ -302,7 +302,11 @@ class ToolClient:
         scope: ToolScope,
         approval: Approval | None,
         local: Mapping[str, LocalTool] | None = None,
+        timeout_s: float | None = None,
     ) -> ToolOutcome:
+        """`timeout_s`: a shorter limit for this call (never longer than the client's), for a
+        caller with a tight budget of its own (the urgent alert, P7-05). A call cut by it is an
+        `error` outcome, recorded like any other."""
         decision = await self._decide(request, scope, approval)
         if isinstance(decision, Denied):
             if decision.reason is DenyReason.INVALID_IDENTITY:
@@ -332,7 +336,8 @@ class ToolClient:
                 )
             )
             return ToolOutcome(decision.tool, ToolCallStatus.DENIED, error=decision.reason.value)
-        return await self._execute(decision, request.caller, scope, local or {})
+        limit = self._timeout_s if timeout_s is None else min(timeout_s, self._timeout_s)
+        return await self._execute(decision, request.caller, scope, local or {}, limit)
 
     async def _decide(
         self, request: ToolRequest, scope: ToolScope, approval: Approval | None
@@ -358,29 +363,34 @@ class ToolClient:
         )
 
     async def _call(
-        self, allowed: Allowed, local: Mapping[str, LocalTool]
+        self, allowed: Allowed, local: Mapping[str, LocalTool], timeout_s: float
     ) -> tuple[TransportResult, str | None]:
         """The answer, and for a local tool its summary to store."""
         name = allowed.spec.name
         if not allowed.spec.local:
             # The transport has its own timeouts; this one holds whatever it does.
-            async with asyncio.timeout(self._timeout_s):
-                return await self._transport.call(name, allowed.arguments, self._timeout_s), None
+            async with asyncio.timeout(timeout_s):
+                return await self._transport.call(name, allowed.arguments, timeout_s), None
         handler = local.get(name)
         if handler is None:
             return TransportResult(True, None, "local tool not available"), None
-        async with asyncio.timeout(self._timeout_s):
+        async with asyncio.timeout(timeout_s):
             done = await handler(allowed.arguments)
         return TransportResult(False, done.result), done.summary
 
     async def _execute(
-        self, allowed: Allowed, caller: Caller, scope: ToolScope, local: Mapping[str, LocalTool]
+        self,
+        allowed: Allowed,
+        caller: Caller,
+        scope: ToolScope,
+        local: Mapping[str, LocalTool],
+        timeout_s: float,
     ) -> ToolOutcome:
         name = allowed.spec.name
         started = time.monotonic()
         summary: str | None = None
         try:
-            answer, summary = await self._call(allowed, local)
+            answer, summary = await self._call(allowed, local, timeout_s)
         except Exception as failure:  # any failure is an `error` outcome; only its class is kept
             answer = TransportResult(True, None, type(failure).__name__)
         latency_ms = max(0, round((time.monotonic() - started) * 1000))
@@ -427,9 +437,10 @@ class ToolSession:
         *,
         caller: Caller = Caller.CODE,
         approval: Approval | None = None,
+        timeout_s: float | None = None,
     ) -> ToolOutcome:
         request = ToolRequest(name=name, arguments=arguments or {}, caller=caller)
-        return await self._client.run(request, self.scope, approval, self._local)
+        return await self._client.run(request, self.scope, approval, self._local, timeout_s)
 
     def local(self, name: str, handler: LocalTool) -> None:
         """Give the session the handler of a local tool."""
