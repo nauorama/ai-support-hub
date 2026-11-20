@@ -10,7 +10,7 @@ dependencies = ["support-hub-api", "support-tools", "hub-evals"]
 
 [dependency-groups]
 dev = [
-    "hypothesis==6.170.14",
+    "hypothesis==6.170.15",
     "import-linter==2.15",
     "mypy==2.4.1",
     "pip-audit==2.10.1",
