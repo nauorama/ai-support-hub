@@ -1,0 +1,40 @@
+# Dependabot (P8-06, security T11). Ecosystem keys and options checked against the GitHub
+# "Dependabot options reference" (2026-11): `uv` reads uv.lock of the workspace root, `npm`
+# covers pnpm. Weekly, with a 7-day cooldown on version updates so a release is at least a week
+# old before a pull request proposes it (AGENTS.md: pin versions that are not brand new).
+# Security updates ignore the cooldown. Every update is an ordinary pull request: CI must be
+# green and the owner merges (docs/operations.md §5).
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  # The web app arrives in P10-01; until apps/web/package.json exists, Dependabot reports that
+  # no manifest was found for this entry, which is expected.
+  - package-ecosystem: "npm"
+    directory: "/apps/web"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+
+  # Base images of infra/Dockerfile.api and infra/Dockerfile.mcp.
+  - package-ecosystem: "docker"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

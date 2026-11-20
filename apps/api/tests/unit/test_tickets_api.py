@@ -159,6 +159,44 @@ def test_citations_drop_internal_ids() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/help/withdrawal-times",
+        "/help/withdrawal-times#sepa-withdrawals",
+        "/help/error-codes#err-2003",
+        "/help/fees#fees-1",
+        "/help/cards#überweisung",  # anchors keep word characters of any script (kb/sections)
+        "",  # an account fact: no help-centre page
+    ],
+)
+def test_server_built_help_links_reach_the_customer(url: str) -> None:
+    stored = [{"marker": 1, "title": "T", "url": url}]
+    assert citations_for_customer(stored)[0].url == url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "https://evil.example/help/a",
+        "//evil.example/help/a",
+        "/help/../admin",
+        "/help/a?next=https://evil.example",
+        "/help/a#x y",
+        "/help/A",
+        "/help/a\n",
+        "/console/tickets",
+        None,
+        42,
+    ],
+)
+def test_any_other_citation_url_reaches_the_customer_as_no_link(url: object) -> None:
+    # T13 (P8-04): links only from citations the server built; anything else shows no link.
+    stored = [{"marker": 1, "title": "T", "url": url}]
+    assert citations_for_customer(stored)[0].url == ""
+
+
 @pytest.mark.parametrize("message", ["a\x00b", "\x00"])
 def test_nul_in_a_message_is_refused(make_client: MakeClient, message: str) -> None:
     # Postgres text cannot hold NUL; without this the INSERT fails with a 500.

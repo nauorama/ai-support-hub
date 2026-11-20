@@ -4,6 +4,7 @@ Customer responses carry only what the chat shows. Internal fields (chunk ids, s
 confidence, route reasons, intent) never appear here.
 """
 
+import re
 import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -104,10 +105,22 @@ class TicketCreatedEvent(BaseModel):
     message: MessageOut
 
 
+# A help-centre link the server builds: `/help/<doc_id>` or `/help/<doc_id>#<anchor>` (data
+# model §2; anchors from `hub/kb/sections.py`). Nothing else is ever a link for the chat (T13).
+_HELP_URL = re.compile(r"/help/[a-z0-9][a-z0-9-]*(#[\w-]+)?")
+
+
+def safe_citation_url(url: object) -> str:
+    """The url when it is a relative help-centre link, else "" (the chat shows no link). The
+    urls are built by the server from search hits, so this is a second line (P8-04): a stored
+    absolute, `javascript:` or protocol-relative url never reaches the customer."""
+    return url if isinstance(url, str) and _HELP_URL.fullmatch(url) else ""
+
+
 def citations_for_customer(stored: list[Any]) -> list[CitationOut]:
     """Only marker, title and url: chunk and document ids are internal."""
     return [
-        CitationOut(marker=item["marker"], title=item["title"], url=item["url"])
+        CitationOut(marker=item["marker"], title=item["title"], url=safe_citation_url(item["url"]))
         for item in stored
         if isinstance(item, dict)
     ]

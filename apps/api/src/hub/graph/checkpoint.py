@@ -15,7 +15,7 @@ checkpoint tables by someone with write access is returned as plain data, never 
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +44,7 @@ class CheckpointStore:
     url: str | None = None
     _pool: AsyncConnectionPool[Any] | None = field(default=None, init=False, repr=False)
     _graph: Any = field(default=None, init=False, repr=False)
+    _checkpointer: BaseCheckpointSaver[Any] | None = field(default=None, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     @classmethod
@@ -58,9 +59,27 @@ class CheckpointStore:
         """The compiled graph of this store, compiled on the first call."""
         async with self._lock:
             if self._graph is None:
-                self._graph = compile_graph(await self._saver())
+                self._graph = compile_graph(await self._saved())
             graph: T = self._graph
             return graph
+
+    async def delete_threads(self, thread_ids: Iterable[str]) -> int:
+        """Delete every checkpoint of these threads (ticket ids) through the library
+        (`adelete_thread`), never by hand (data model). For erasure and retention (P8-05).
+        Returns how many threads were asked for; a thread without checkpoints is no error."""
+        async with self._lock:
+            saver = await self._saved()
+        count = 0
+        for thread_id in thread_ids:
+            await saver.adelete_thread(thread_id)
+            count += 1
+        return count
+
+    async def _saved(self) -> BaseCheckpointSaver[Any]:
+        """One saver per store: the graph and `delete_threads` share it. Under `_lock`."""
+        if self._checkpointer is None:
+            self._checkpointer = await self._saver()
+        return self._checkpointer
 
     async def _saver(self) -> BaseCheckpointSaver[Any]:
         if self.url is None:
@@ -83,3 +102,4 @@ class CheckpointStore:
             await self._pool.close()
             self._pool = None
         self._graph = None
+        self._checkpointer = None

@@ -134,7 +134,7 @@ One execution of the workflow for one customer message.
 | total_cost_usd | numeric(10,6) | sum of `llm_calls` |
 | input_tokens, output_tokens | int | |
 | latency_ms | int null | until the customer got a message |
-| error | text null | |
+| error | text null | an error class; `CustomerErased` for a run that waited for an operator when its customer was erased (P8-05) |
 | trace_id | text null | Langfuse trace |
 | started_at, finished_at | timestamptz | |
 
@@ -191,7 +191,7 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 | run_id | uuid FK | |
 | node | text | `intake` \| `research` \| `handoff_prep` \| `act` (P7-04, migration 0012): the node that made the call; the per-run limits count a node's rows |
 | tool | text | e.g. `core_get_transaction`; `search_kb` for the research loop's knowledge-base search (a Hub tool, not on the MCP server) |
-| arguments | jsonb | masked (a `search_kb` query too); for a `denied` call only the argument names (`{"names": [...]}`), so a forged `customer_ref` is never stored; also only the names when the masked values are too long or cannot be stored |
+| arguments | jsonb | masked (a `search_kb` query too); for a `denied` call only the argument names (`{"names": [...]}`), so a forged `customer_ref` is never stored; also only the names when the masked values are too long or cannot be stored, and after the customer's erasure (P8-05, which also empties `result_summary`) |
 | result_summary | text | short (300 characters), masked; the safe error text for `error`; for `search_kb` only the hit chunk ids, never chunk text |
 | status | text | `ok` \| `error` \| `denied` |
 | side_effect | bool | true for Jira and Slack |
@@ -288,7 +288,7 @@ Two rules that keep the log usable. (1) Inserts are serialised (a Postgres advis
 **Hash details** (`hub/audit/chain.py`). `canonical_json(row)` covers every column except `id`, `prev_hash` and `hash`: JSON with sorted keys, no spaces, ASCII only, `ts` in UTC with microseconds. `id` is assigned by the database on insert, so it is not known when the hash is computed; the order of rows is protected by `prev_hash`. The first row has `prev_hash` = 64 zeros. Before hashing and storing, every text field (`actor_id`, `action`, `entity_type`, `entity_id`) and every string and number in `details`, keys included, is masked (G1); a number is checked as the decimal text `jsonb` stores for it, so `4111111111111111.0` is masked too. Only `uuid.UUID` objects are kept unmasked (as their text), because masking changes about 1 in 100 UUIDs; callers pass ids as UUID objects. A string is masked by G1, which since P8-03 keeps a token that is exactly a canonical UUID (owner decision, security §3; a card written in that shape, `41111111-1111-1111-1111-…`, is an accepted limitation). Two `details` keys that are the same after masking are refused. `jsonb` stores the decimal text that is written for a number and prints it without exponent notation: the float `1e23` is written as `1e+23` and comes back as `100000000000000000000000`, which differs from the float's exact binary value. A decimal number with a whole value is therefore hashed as the integer of its decimal text; otherwise `verify_chain()` would report rows nobody changed. Only JSON types are accepted; NaN, infinity, NUL characters and invalid Unicode (lone surrogates) are refused with `AuditValueError`, because Postgres refuses them.
 
 ### LangGraph checkpoint tables
-Created by `langgraph-checkpoint-postgres`: migration 0009 runs the library's migration steps the way its `setup()` does, as the migrator, so the app role has DML rights only (P6-01). A library upgrade with new steps needs a new migration. Thread id = ticket id. The state holds G1-masked texts and the run's placeholder mapping (e-mail, phone, partly masked IBAN; [AI pipeline](ai-pipeline.md) §2), never card data. Only the state's own classes are rebuilt when a checkpoint is read (`hub/graph/checkpoint.py`, deserialisation allowlist). Not in the SQLAlchemy models; `alembic check` leaves them out. Do not edit by hand. Checkpoints of closed tickets are deleted by the retention job.
+Created by `langgraph-checkpoint-postgres`: migration 0009 runs the library's migration steps the way its `setup()` does, as the migrator, so the app role has DML rights only (P6-01). A library upgrade with new steps needs a new migration. Thread id = ticket id. The state holds G1-masked texts and the run's placeholder mapping (e-mail, phone, partly masked IBAN; [AI pipeline](ai-pipeline.md) §2), never card data. Only the state's own classes are rebuilt when a checkpoint is read (`hub/graph/checkpoint.py`, deserialisation allowlist). Not in the SQLAlchemy models; `alembic check` leaves them out. Do not edit by hand. Checkpoints of closed tickets are deleted by the retention job, and those of an erased customer's tickets by the erasure (P8-05), both through the library's `adelete_thread` (`CheckpointStore.delete_threads`); the retention job only reads `checkpoints.thread_id` to find them.
 
 ## 2. Qdrant
 

@@ -9,3 +9,10 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+        # The hook is `language: golang`. Without a pin pre-commit uses a local `go`, or, on a
+        # machine without Go, downloads whatever go.dev lists as newest at that moment (P8-06).
+        # With a pin it always downloads exactly this toolchain (also where Go is installed) and
+        # builds with GOTOOLCHAIN=local, so every machine builds gitleaks with the same Go.
+        # Must be >= the `go` line of gitleaks' go.mod at the rev above (v8.30.1: go 1.24.11).
+        # 1.27.3: released 2026-10-19, the newest patch release that was two weeks old at P8-06.
+        language_version: 1.27.3

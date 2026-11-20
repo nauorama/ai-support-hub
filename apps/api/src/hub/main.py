@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from hub.api.admin_jobs import router as admin_jobs_router
 from hub.api.admin_runs import router as admin_runs_router
 from hub.api.auth import router as auth_router
 from hub.api.console import router as console_router
@@ -18,6 +19,9 @@ from hub.api.kb import console_router as kb_console_router
 from hub.api.kb import help_router
 from hub.api.limits import BodySizeLimitMiddleware
 from hub.api.middleware import RequestContextMiddleware
+from hub.api.privacy import admin_router as privacy_admin_router
+from hub.api.privacy import public_router as privacy_router
+from hub.api.security_headers import SecurityHeadersMiddleware
 from hub.api.tickets import router as tickets_router
 from hub.config import load_settings
 from hub.deps import Container, build_container
@@ -54,14 +58,24 @@ def create_app(container: Container | None = None) -> FastAPI:
             await container.database.dispose()
 
     # debug stays off: Starlette's debug pages would show tracebacks with request data.
+    # The public demo serves no Swagger UI or ReDoc pages (they need a CDN and inline scripts,
+    # `hub.api.security_headers`); the OpenAPI JSON stays for `make web-types`.
+    public = container.settings.app_env == "demo"
     app = FastAPI(
-        title="Enterprise AI Support Hub", version="0.1.0", debug=False, lifespan=lifespan
+        title="Enterprise AI Support Hub",
+        version="0.1.0",
+        debug=False,
+        lifespan=lifespan,
+        docs_url=None if public else "/docs",
+        redoc_url=None if public else "/redoc",
     )
     app.state.container = container
     install_error_handlers(app)
-    # The last one added runs first: the request id exists before the body cap can answer 413.
+    # The last one added runs first: the request id exists before the body cap can answer 413,
+    # and the security headers reach every answer, a 413 or a 500 of the middlewares included.
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(health_router)
     app.include_router(demo_router)
     app.include_router(tickets_router)
@@ -73,4 +87,7 @@ def create_app(container: Container | None = None) -> FastAPI:
     app.include_router(kb_console_router)
     app.include_router(kb_admin_router)
     app.include_router(admin_runs_router)
+    app.include_router(admin_jobs_router)
+    app.include_router(privacy_router)
+    app.include_router(privacy_admin_router)
     return app

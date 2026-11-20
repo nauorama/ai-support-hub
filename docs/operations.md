@@ -27,7 +27,7 @@ Build state: the services arrive with their phases. Phase 2 has `postgres`, `qdr
 | `make kb-numbers` | report every number in `data/kb/` that is not in the world file (a report, not a gate) |
 | `make eval`, `make eval-smoke`, `make eval-attacks` | see [eval plan](eval-plan.md); real model calls, run by hand only when the owner asks (ADR-0018). `LLM_MODE=fake make eval LIMIT=10` checks the runner for free (the eval tickets have no recordings, so each is handed off with `system_error`, and judges have no recordings either; `NO_JUDGES=1` skips them) |
 | `make web-types` | generate TypeScript types from OpenAPI |
-| `make retention` | run the retention job once |
+| `make retention` | run the retention job once through the running local API (`POST /admin/jobs/retention` with `JOBS_TOKEN` from `.env`; `API_URL` overrides `http://localhost:8000`) |
 | `make record-llm` | refresh recorded model responses for tests (real calls): the app's in `apps/api/tests/fixtures/llm/` (`hub.llm.record`), then the judges' in `evals/tests/fixtures/llm/` (`hub_evals.record`); skips models that already have a real recording, `FORCE=1` records them again |
 | `make llm-requests` | rewrite the recording requests (no model call): triage from the example tickets, the run tickets (`tests/fixtures/run/tickets.jsonl`) for triage and write: their search hits are found again with the real local models in Qdrant's in-memory mode (needs `make models`) and kept in `tests/fixtures/run/evidence.json`, and the write request is built from those chunks (an integration test checks the real server finds the same hits), and the judge test cases (`evals/tests/fixtures/judges/cases.jsonl`); run before `make record-llm` after a prompt or KB change (a KB change changes every write request) |
 | `make eval-report RUN=<id> BASE=<id>` | compare two evaluation runs; see [eval plan](eval-plan.md) |
@@ -49,7 +49,9 @@ All settings are environment variables read by one Pydantic `Settings` class (`h
 | `EVAL_DATABASE_URL` | | separate database for evaluation runs, as the app role |
 | `EVAL_DATABASE_URL_DIRECT` | | migrator of the evaluation database (`make migrate`); empty = `DATABASE_URL_DIRECT` (or `DATABASE_URL`) with the database name of `EVAL_DATABASE_URL` |
 | `CORE_ANCHOR_DATE` | empty \| `2026-11-12` | "today" for the core mock and the workflow; empty = real date; fixed in tests and evaluation |
-| `JOBS_TOKEN` | random | bearer token for `POST /admin/jobs/*` |
+| `JOBS_TOKEN` | random | bearer token for `POST /admin/jobs/*`; empty turns the jobs off (`503`) |
+| `RETENTION_TICKET_DAYS` | `730` | retention job: delete tickets after this many days without activity (security §6) |
+| `RETENTION_CHECKPOINT_DAYS` | `7` | retention job: delete a closed ticket's checkpoints this many days after the close |
 | `QDRANT_URL`, `QDRANT_API_KEY` | | key empty locally |
 | `EMBEDDING_CACHE_DIR` | `.cache/models` | folder of the local embedding model (`BAAI/bge-small-en-v1.5`) and the BM25 files; `make models` downloads them, the app only reads them (`local_files_only`, ADR-0018). The compose `api` service mounts it read-only |
 | `ANTHROPIC_API_KEY` | | read by LiteLLM; the only provider key (ADR-0018) |
@@ -108,8 +110,10 @@ Trace attributes on every run: `ticket_id`, `intent`, `route`, `route_reasons`, 
 
 | Workflow | Trigger | Jobs |
 |---|---|---|
-| `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit tests, coverage gate for safety modules) · `test-int` (integration with testcontainers; builds the api dev image) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks, pip-audit, pnpm audit) · `data-check` |
+| `ci.yml` | pull request, push to main | `lint` (ruff, mypy, import-linter, eslint, tsc) · `test` (unit tests, coverage gate for safety modules) · `test-int` (integration with testcontainers; builds the api dev image) · `web` (vitest, build) · `e2e` (compose + Playwright, fake models) · `security` (gitleaks over the whole history, pip-audit over the locked and hashed requirements, pnpm audit at level `high` once `apps/web/package.json` exists) · `data-check` · `hook-bootstrap` (informational, not required: the gitleaks pre-commit hook installs on a machine without Go) |
 | `deploy.yml` | push to main after `ci` is green; manual | build images → push → migrate → deploy → smoke check |
+
+**Dependency updates (P8-06, security T11).** Dependabot (`.github/dependabot.yml`) checks weekly for the uv workspace (`uv.lock`), GitHub Actions, the web app (`npm`, which covers pnpm) and the dev images' base images (`infra/`), with a 7-day cooldown on version updates (security updates come at once). Each update is a normal pull request: CI green, the owner merges. The gitleaks pre-commit hook builds with a pinned Go (`language_version` in `.pre-commit-config.yaml`, at least the `go` line of gitleaks' `go.mod`); pre-commit downloads exactly that toolchain, also on machines that have Go, and updates it only when someone changes the pin.
 
 No workflow runs an evaluation or any other real model call, except the post-deploy canary ticket (§6, under one cent). `make eval-smoke` runs by hand, only when the owner asks ([ADR-0018](adr/0018-budget-mode.md)).
 
