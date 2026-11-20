@@ -373,3 +373,29 @@ def test_older_results_without_verification_still_read() -> None:
     old = draft()
     assert old.groundedness is None
     assert old.unsupported_claims == []
+
+
+# --- account data (P7-06) -----------------------------------------------------------------------
+
+FACTS = {"account_facts": [{"fact_id": "A1", "source_tool": "core_get_transaction", "text": "t"}]}
+
+
+def test_account_facts_are_counted_for_tickets_that_need_account_data() -> None:
+    with_facts = draft(evidence={"variant": "rag_hybrid", "chunks": [], **FACTS})
+    pairs = [
+        (ticket("T-0001", needs_account_data=True), result("T-0001", draft=with_facts)),
+        (ticket("T-0002", needs_account_data=True), result("T-0002")),
+        (ticket("T-0003", needs_account_data=True), result("T-0003", draft=None)),
+        (ticket("T-0004"), result("T-0004", draft=with_facts)),
+    ]
+    account = r._account_data(pairs)
+    assert (account["used"].count, account["used"].total) == (1, 2)
+    assert account["needs_account_data"] == 3
+    assert account["excluded_no_draft"] == 1
+    assert account["facts_without_label"] == 1
+    assert r.account_facts_used(result("T-0001", draft=with_facts))
+    assert not r.account_facts_used(result("T-0003", draft=None))
+    rows = {row.check.name: row for row in r._rows(pairs)}
+    row = rows["account facts used"]
+    assert row.target == "reported"
+    assert "(1 without a draft)" in row.shown

@@ -11,11 +11,18 @@
    the safe first steps of every matching hard rule, the expected response time from the support
    hours), with `message.sent`. When an operator already has the ticket (claimed while the run
    worked), nothing changes and no notice is sent.
-3. After the commit the notice goes to the stream (`message` event with its id), before the run
-   waits for the operator (ai-pipeline §1).
+3. After the commit, when the notice is urgent (`is_urgent`: triage urgency `high`, an urgent
+   reason or intent; it promises a reply within 30 or 60 minutes), one Slack alert to
+   `#support-escalations` through `hub.tools` (P7-05): called by code, before the pause, with the
+   approval basis `urgent_handoff` and the scope's urgency `high` from the policy (never from
+   arguments), so every urgent notice is backed by an alert. Its text holds the ticket id, the
+   intent and the reasons, never customer text. A failed alert is recorded in `tool_calls` (shown
+   in the console) and never fails the handoff.
+4. The notice goes to the stream (`message` event with its id), before the run waits for the
+   operator (ai-pipeline §1).
 
-The urgent Slack alert comes with P7-05. A failure in steps 2 and 3 is not caught: the run's last
-resort (`hub.graph.run`) records it and hands the ticket off.
+A failure in steps 2 and 4 is not caught: the run's last resort (`hub.graph.run`) records it and
+hands the ticket off.
 """
 
 import asyncio
@@ -25,7 +32,7 @@ from datetime import UTC, datetime
 
 from hub.audit import record
 from hub.db.repositories import MessageRepository, TicketRepository
-from hub.domain.enums import ActorType, LlmNode, MessageRole, TicketStatus
+from hub.domain.enums import ActorType, LlmNode, MessageRole, TicketStatus, ToolCallStatus
 from hub.domain.handoff import HandoffSummary
 from hub.graph.context import GraphContext, failure_reasons, ids
 from hub.graph.draft import OutputMask
@@ -35,14 +42,17 @@ from hub.graph.pipeline import Pipeline
 from hub.graph.routing import gate_matches
 from hub.graph.state import TicketState
 from hub.graph.store import hand_off, ticket
+from hub.graph.tools import tool_scope
 from hub.guardrails.policy import handoff_notice, is_urgent, safe_first_steps
 from hub.llm.schemas import CallContext
+from hub.tools.permissions import Approval, ApprovalBasis, ToolNode
 
 logger = logging.getLogger(__name__)
 
 # Shorter than the node's own timeout, so a slow summary never fails the handoff.
 SUMMARY_TIMEOUT_S = 20.0
 NO_RESEARCH = "(the assistant did not search)"
+SLACK_TOOL = "slack_post_escalation"
 
 
 def reasons(state: TicketState) -> list[str]:
@@ -152,6 +162,50 @@ async def run(state: TicketState, ctx: GraphContext) -> TicketState:
                     "operator_summary": summary is not None,
                 },
             )
+    if message_id is not None and urgent:
+        await urgent_alert(state, ctx, why)
     if message_id is not None:
         await ctx.emit("message", {"message_id": str(message_id)})
     return TicketState(ticket_status=status.value)
+
+
+def alert_text(ticket_id: uuid.UUID, intent: str | None, why: list[str]) -> str:
+    """Fixed fields only: the alert goes to a Slack channel, never customer text."""
+    return (
+        f"Urgent handoff: ticket {ticket_id}, intent {intent or 'unknown'}, "
+        f"reasons {', '.join(why) or 'none'}. Reply due within the urgent response time."
+    )
+
+
+async def urgent_alert(state: TicketState, ctx: GraphContext, why: list[str]) -> bool:
+    """One Slack alert for an urgent handoff; True when it was posted. Never raises: the
+    notice is already sent, and the tool client records a failed or denied call."""
+    tools = ctx.pipeline.tools
+    if tools is None:
+        return False
+    ticket_id, run_id = ids(state)
+    triage = state.get("triage")
+    text = alert_text(ticket_id, triage.intent if triage else None, why)
+    try:
+        scope = await tool_scope(ctx.pipeline, state, ToolNode.HANDOFF_PREP, urgent=True)
+        outcome = await tools.session(scope).call(
+            SLACK_TOOL,
+            {"text": text},
+            approval=Approval(
+                tool=SLACK_TOOL,
+                ticket_id=ticket_id,
+                basis=ApprovalBasis.URGENT_HANDOFF,
+                arguments={"text": text},
+            ),
+        )
+    except Exception as exc:
+        logger.warning(
+            "urgent alert failed", extra={"run_id": str(run_id), "error": type(exc).__name__}
+        )
+        return False
+    if outcome.status is not ToolCallStatus.OK:
+        logger.warning(
+            "urgent alert not posted", extra={"run_id": str(run_id), "status": outcome.status}
+        )
+        return False
+    return True

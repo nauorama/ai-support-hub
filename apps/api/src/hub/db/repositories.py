@@ -30,6 +30,7 @@ from hub.db.models import (
     Run,
     Setting,
     Ticket,
+    ToolCall,
     approve_status_change,
 )
 from hub.domain.enums import (
@@ -438,6 +439,11 @@ class DraftRepository:
         result = await self._session.execute(select(Draft).where(Draft.run_id == run_id))
         return result.scalar_one_or_none()
 
+    async def by_review_key(self, review_key: str) -> Draft | None:
+        """The draft a review with this operator-scoped `Idempotency-Key` reviewed."""
+        result = await self._session.execute(select(Draft).where(Draft.review_key == review_key))
+        return result.scalar_one_or_none()
+
     async def latest_for_ticket(self, ticket_id: uuid.UUID) -> Draft | None:
         result = await self._session.execute(
             select(Draft)
@@ -446,6 +452,21 @@ class DraftRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+
+class ToolCallRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def for_ticket(self, ticket_id: uuid.UUID) -> Sequence[ToolCall]:
+        """Every tool call of the ticket's runs, oldest first (the console shows them, P7-05)."""
+        result = await self._session.execute(
+            select(ToolCall)
+            .join(Run, Run.id == ToolCall.run_id)
+            .where(Run.ticket_id == ticket_id)
+            .order_by(ToolCall.created_at, ToolCall.id)
+        )
+        return result.scalars().all()
 
 
 class SettingsRepository:

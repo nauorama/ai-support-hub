@@ -114,7 +114,10 @@ NODES = (
     # Longer than the operator summary call (`SUMMARY_TIMEOUT_S`), so the notice still goes out.
     NodeSpec("handoff_prep", handoff_prep.run, 45, catches=False, skipped_after_error=False),
     NodeSpec("human_review", human_review.run, 30, catches=False, skipped_after_error=False),
-    NodeSpec("act", act.run, 30, catches=False, skipped_after_error=False),
+    # A failure or timeout of `act` is recorded and the run ends; the answer is already sent.
+    NodeSpec(
+        "act", act.run, 30, catches=False, skipped_after_error=False, on_timeout=act.timed_out
+    ),
     NodeSpec("respond", respond.run, 30, catches=False, skipped_after_error=False),
 )
 NODE_TIMEOUTS_S = {spec.name: spec.timeout_s for spec in NODES}

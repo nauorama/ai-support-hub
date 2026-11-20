@@ -160,6 +160,8 @@ One execution of the workflow for one customer message.
 | edit_ratio | numeric(4,3) null | how much the operator changed: `1 - difflib.SequenceMatcher(None, body, final_body, autojunk=False).ratio()`, rounded to 3 decimals (an approximation of a normalised edit distance, not Levenshtein; no extra dependency). `0` for an approved draft; null for a rejected one (a reply is not an edit of the draft) |
 | reject_reason | text null | `wrong_facts` \| `wrong_tone` \| `missing_info` \| `policy` \| `other` |
 | reject_note | text null | the operator's note, at most 1,000 characters; card data masked (G1) |
+| approved_actions | jsonb | ids of the proposed actions the operator ticked (`["a1"]`), stored with the review; `act` runs them (P7-05, migration 0013) |
+| review_key | text null unique | the operator-scoped `Idempotency-Key` of the review (`operator:<id>:<key>`), for every review including a reject without a reply; a repeat is compared with the stored review (P7-05; reviews before migration 0013 got the key of their message) |
 
 ### llm_calls
 Own record of every model call. Source of truth for cost.
@@ -199,7 +201,7 @@ Request and response bodies are **not** stored here. They are in the trace (mask
 | latency_ms | int | |
 | created_at | timestamptz | |
 
-Written by `hub/tools/mcp_client.py` (P7-03, migration 0011), one row per call, allowed or denied by `tools/permissions.py` (G6), each with an audit record `tool.called` or `tool.denied` in the same transaction. Index on `(run_id, node)` (migration 0012): the per-run limit of a node (research 5, the others 1, denied calls included) is counted from these rows, so it holds across a resume or a second session of the run (P7-04). Migration 0012 filled `node` of older rows from their audit record.
+Written by `hub/tools/mcp_client.py` (P7-03, migration 0011; from P7-05 also for the `act` node, the urgent Slack alert of `handoff_prep` and `POST /console/tickets/{id}/actions`, which records under the ticket's latest run), one row per call, allowed or denied by `tools/permissions.py` (G6), each with an audit record `tool.called` or `tool.denied` in the same transaction. Index on `(run_id, node)` (migration 0012): the per-run limit of a node (research 5, the others 1, denied calls included) is counted from these rows, so it holds across a resume or a second session of the run (P7-04). Migration 0012 filled `node` of older rows from their audit record.
 
 ### customer_memory
 

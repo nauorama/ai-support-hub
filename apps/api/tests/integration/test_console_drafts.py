@@ -451,7 +451,10 @@ def test_reject_without_a_reply_hands_the_ticket_off(
     assert rejected["with_reply"] is False
     assert RAW_DIGITS not in json.dumps(run_sql(urls, "SELECT details FROM audit_log"))
 
-    # A repeat of the same request returns the first result; another reason is a conflict.
+    # A repeat of the same request returns the first result (its key is kept on the draft,
+    # P7-05). The same key with another reason or note is another request; a new key is a
+    # conflict (the draft no longer waits).
+    note = f"Customer wrote card {TEST_CARD} somewhere"
     again = _review(
         staff["operator"],
         ticket_id,
@@ -460,13 +463,23 @@ def test_reject_without_a_reply_hands_the_ticket_off(
         headers=headers,
         version=1,
         reason="wrong_facts",
+        note=note,
     )
     assert again.status_code == 200, again.text
     assert again.json()["draft"] == out["draft"]
+    for changed in ({"reason": "policy", "note": note}, {"reason": "wrong_facts"}):
+        reused = _review(
+            staff["operator"], ticket_id, draft_id, "reject", headers, version=1, **changed
+        )
+        assert reused.status_code == 409, changed
+        assert reused.json()["code"] == "idempotency_key_reused"
     other = _review(staff["operator"], ticket_id, draft_id, "reject", reason="policy")
     assert other.status_code == 409
     assert other.json()["code"] == "conflict"
     assert len(_audit(urls, "draft.rejected")) == 1
+    assert _one(urls, "SELECT review_key IS NOT NULL FROM drafts WHERE id = %s", draft_id) == (
+        True,
+    )
 
 
 def test_reject_with_a_reply_sends_the_operators_answer(
@@ -579,15 +592,21 @@ def test_the_second_of_two_operators_learns_the_draft_was_reviewed(
 
 def _late_key_lookup(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """The request looks up its key before the first request committed: it sees nothing then,
-    and finds the stored message only on the second lookup (under the ticket lock)."""
-    real_lookup = MessageRepository.get_by_idempotency_key
+    and finds the reviewed draft and its message only on the second lookup (under the ticket
+    lock). Both lookups are late together: the first request commits them in one transaction."""
+    real_draft = DraftRepository.by_review_key
+    real_message = MessageRepository.get_by_idempotency_key
     calls: list[int] = []
 
-    async def late_lookup(self: MessageRepository, scoped: str) -> Message | None:
+    async def late_draft(self: DraftRepository, scoped: str) -> Draft | None:
         calls.append(1)
-        return None if len(calls) == 1 else await real_lookup(self, scoped)
+        return None if len(calls) == 1 else await real_draft(self, scoped)
 
-    monkeypatch.setattr(MessageRepository, "get_by_idempotency_key", late_lookup)
+    async def late_message(self: MessageRepository, scoped: str) -> Message | None:
+        return None if len(calls) == 1 else await real_message(self, scoped)
+
+    monkeypatch.setattr(DraftRepository, "by_review_key", late_draft)
+    monkeypatch.setattr(MessageRepository, "get_by_idempotency_key", late_message)
     return calls
 
 
@@ -725,6 +744,79 @@ def test_the_same_key_returns_the_first_result_and_another_request_is_409(
         f"/api/v1/console/drafts/{draft_id}/approve", json={"ticket_version": version}
     )
     assert missing.status_code == 422
+
+
+def test_the_same_key_with_other_approved_actions_is_409(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    """P3-05b review note 1 (P7-05): the approved actions are part of the request. Before, the
+    replay compared only ticket, run, role and text, so a retry with other actions returned the
+    first result and its actions were silently dropped."""
+    ticket_id, draft_id = _with_draft(urls, customer, actions=ACTIONS)
+    headers, version = key(), _version(staff["operator"], ticket_id)
+
+    first = _review(
+        staff["operator"], ticket_id, draft_id, "approve", headers, version, approved_actions=[]
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["draft"]["approved_actions"] == []
+
+    reused = _review(
+        staff["operator"], ticket_id, draft_id, "approve", headers, version, approved_actions=["a1"]
+    )
+    assert reused.status_code == 409
+    assert reused.json()["code"] == "idempotency_key_reused"
+    same = _review(
+        staff["operator"], ticket_id, draft_id, "approve", headers, version, approved_actions=[]
+    )
+    assert same.status_code == 200, same.text
+    assert same.json()["message"]["id"] == first.json()["message"]["id"]
+
+
+def test_approved_actions_are_stored_with_the_review(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    ticket_id, draft_id = _with_draft(urls, customer, actions=ACTIONS)
+    headers = key()
+    response = _review(
+        staff["operator"],
+        ticket_id,
+        draft_id,
+        "edit",
+        headers,
+        body="Edited [1].",
+        approved_actions=["a1"],
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["draft"]["approved_actions"] == ["a1"]
+    assert _one(urls, "SELECT approved_actions FROM drafts WHERE id = %s", draft_id) == (["a1"],)
+    # The same key with the same text but no actions is another request.
+    reused = _review(
+        staff["operator"], ticket_id, draft_id, "edit", headers, version=1, body="Edited [1]."
+    )
+    assert reused.status_code == 409
+    assert reused.json()["code"] == "idempotency_key_reused"
+
+
+def test_a_key_used_for_a_free_reply_is_409_on_a_review(
+    staff: dict[str, TestClient], customer: TestClient, urls: Urls
+) -> None:
+    answered, _ = _with_draft(urls, customer)
+    run_sql(urls, "UPDATE tickets SET status = 'handed_off' WHERE id = %s", answered)
+    headers = key()
+    reply = staff["operator"].post(
+        f"/api/v1/console/tickets/{answered}/reply",
+        json={"ticket_version": _version(staff["operator"], answered), "body": "Hello."},
+        headers=headers,
+    )
+    assert reply.status_code == 200, reply.text
+    ticket_id, draft_id = _with_draft(urls, customer)
+
+    response = _review(staff["operator"], ticket_id, draft_id, "approve", headers)
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "idempotency_key_reused"
+    assert _one(urls, "SELECT status FROM drafts WHERE id = %s", draft_id) == ("pending",)
 
 
 # --- roles, CSRF, unknown draft, ticket detail ------------------------------------------------

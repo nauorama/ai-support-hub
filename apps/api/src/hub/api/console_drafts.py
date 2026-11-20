@@ -10,15 +10,15 @@ Who wrote the text decides the label (security §7, owner decision):
 
 Every request runs under the ticket row lock, checks `ticket_version`, the draft's status and
 another operator's claim, and writes the draft, the message, the ticket and the audit records in
-one transaction. `Idempotency-Key` works as for a free reply: the same key with the same request
-returns the first result; with another request `409 idempotency_key_reused`. A reject without a
-reply stores no message to find the key by, so its repeat is recognised by the draft's state
-(rejected by the same operator with the same reason and no reply).
+one transaction. `Idempotency-Key`: the draft stores the operator-scoped key of its review
+(`drafts.review_key`, every kind of review, a reject without a reply included) and the approved
+actions (P7-05). The same key with the same request (draft, outcome, final text, approved actions,
+reject reason and note) returns the first result; with anything else, or a key a free reply
+already used, `409 idempotency_key_reused`.
 
 After the commit the draft's run, paused in `human_review` (P6-03), is resumed with a
-`ReviewDecision` (`hub.api.resume`): the decision is already written, so the run only records it
-and ends. A replay does not resume again. Approved actions are checked against the draft and
-recorded; phase 7 runs them.
+`ReviewDecision` (`hub.api.resume`): the decision is already written, so the run records it, `act`
+runs the approved Jira actions (P7-05) and the run ends. A replay does not resume again.
 """
 
 import uuid
@@ -256,7 +256,7 @@ async def _apply(
     scoped_key = f"operator:{operator.id}:{idempotency_key}"
     messages = MessageRepository(session)
 
-    replay = await _replay(session, operator, draft, review, scoped_key)
+    replay = await _replay(session, draft, review, scoped_key)
     if replay is not None:
         return replay
 
@@ -264,7 +264,7 @@ async def _apply(
     # customer message that committed while this request waited is seen here.
     await TicketRepository(session).lock(ticket)
     await DraftRepository(session).get(draft.id, for_update=True)
-    replay = await _replay(session, operator, draft, review, scoped_key)
+    replay = await _replay(session, draft, review, scoped_key)
     if replay is not None:
         return replay
     _check_not_closed(ticket)
@@ -287,7 +287,8 @@ async def _apply(
     except IntegrityError:
         # The same key was used concurrently for a request on another ticket.
         await session.rollback()
-        if await messages.get_by_idempotency_key(scoped_key) is None:
+        used = await DraftRepository(session).by_review_key(scoped_key) is not None
+        if not used and await messages.get_by_idempotency_key(scoped_key) is None:
             raise
         raise _key_reused() from None
     await resume_after_commit(container, ticket_id, run_id, decision)
@@ -350,6 +351,8 @@ async def _write(
     )
     draft.reject_reason = review.reject_reason
     draft.reject_note = None if review.reject_note is None else review.reject_note.text
+    draft.approved_actions = list(review.approved_actions)
+    draft.review_key = scoped_key
 
     if message is not None:
         if ticket.first_response_at is None:
@@ -396,34 +399,37 @@ _RESOLUTION = {
 
 async def _replay(
     session: AsyncSession,
-    operator: Operator,
     draft: Draft,
     review: _Review,
     scoped_key: str,
 ) -> DraftReviewOut | None:
-    """The first answer for a repeated request, or None when this is the first one."""
+    """The first answer for a repeated request, or None when this is the first one. The key is
+    scoped to the operator, so `operator` is implied by a found draft."""
+    reviewed = await DraftRepository(session).by_review_key(scoped_key)
     stored = await MessageRepository(session).get_by_idempotency_key(scoped_key)
-    if stored is not None:
-        same = (
-            review.outgoing is not None
-            and stored.ticket_id == draft.ticket_id
-            and stored.run_id == draft.run_id
-            and stored.role == review.outgoing.role
-            and stored.body == review.outgoing.body
-        )
-        if not same:
+    if reviewed is None:
+        if stored is not None:
+            # The key sent a free reply (or a review on another ticket before P7-05).
             raise _key_reused()
-        return await _result(session, draft.ticket_id, draft.id, stored)
-    repeated_reject = (
-        review.outgoing is None
-        and draft.status == DraftStatus.REJECTED
-        and draft.reviewed_by == operator.id
-        and draft.final_body is None
-        and draft.reject_reason == review.reject_reason
+        return None
+    if not _same_review(reviewed, draft, review):
+        raise _key_reused()
+    return await _result(session, reviewed.ticket_id, reviewed.id, stored)
+
+
+def _same_review(reviewed: Draft, draft: Draft, review: _Review) -> bool:
+    """Whether the stored review is this request: the same draft, outcome, final text, approved
+    actions, reject reason and note (P3-05b review note 1, P7-05)."""
+    outgoing = review.outgoing
+    note = None if review.reject_note is None else review.reject_note.text
+    return (
+        reviewed.id == draft.id
+        and reviewed.status == review.status
+        and reviewed.final_body == (None if outgoing is None else outgoing.body)
+        and list(reviewed.approved_actions) == list(review.approved_actions)
+        and reviewed.reject_reason == review.reject_reason
+        and reviewed.reject_note == note
     )
-    if repeated_reject:
-        return await _result(session, draft.ticket_id, draft.id, None)
-    return None
 
 
 def _no_longer_waits() -> ProblemError:

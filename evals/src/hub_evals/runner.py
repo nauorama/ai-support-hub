@@ -38,6 +38,12 @@ run's own cost limit in place of the daily budget, and the disk cache.
   chunk for a citation; for B0 the cited documents. Judge calls use the same gateway, cache
   and cost limit; they are recorded with node `judge` and no `run_id`. A judge that fails for
   good is noted in the ticket's result; an outage is not written, so a resume judges again.
+- **Account tools** (P7-06): with `MCP_SERVER_TOKEN` set, a RAG variant runs the research tool
+  loop against the `support-tools` server like the app (`hub.deps.tool_client`, `research/v1`),
+  and intake loads the customer profile. The answers then depend on "today" of the core mock,
+  so such a run needs a fixed `CORE_ANCHOR_DATE` (eval plan §1 principle 6, operations §2; the
+  `mcp` service reads the same `.env`): without it the runner stops before any call. The date
+  is part of `config.json`, so a resume with another date is refused.
 - **Metrics and report** (P4-04): `metrics.json` and `report.md` from `hub_evals.report`.
 
 The output names counts only, never ticket text. The test set is never read (AGENTS.md rule 7).
@@ -70,6 +76,7 @@ from hub.db.models import AuditLog, Draft, LlmCall, Run
 from hub.db.models import Ticket as TicketRow
 from hub.db.repositories import CustomerRepository, MessageRepository, TicketRepository
 from hub.db.session import Database, connect
+from hub.deps import tool_client
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import (
     ActorType,
@@ -86,6 +93,8 @@ from hub.graph.checkpoint import CheckpointStore
 from hub.graph.confidence import load_confidence
 from hub.graph.draft import WriterEvidence, writer_evidence
 from hub.graph.nodes.intake import ChatTurn, intake
+from hub.graph.nodes.research import MAX_CALLS as RESEARCH_MAX_CALLS
+from hub.graph.nodes.research import research_messages, research_tools
 from hub.graph.nodes.triage import triage_messages
 from hub.graph.nodes.verify import verify_messages
 from hub.graph.nodes.write import write_messages
@@ -122,6 +131,7 @@ from hub.llm.schemas import (
     Usage,
 )
 from hub.seed import load_customers, read_seed
+from hub.tools.facts import MAX_ACCOUNT_FACTS
 from hub_evals import judges as judging
 from hub_evals import report as reporting
 from hub_evals import results as files
@@ -159,6 +169,12 @@ DEFAULT_OUTPUT_TOKENS = 1000
 # Citation judge calls per ticket in the estimate: the number of markers is known only after
 # the answer. A run with more is still held by the running cost limit.
 ESTIMATED_CITATIONS = 3
+# The research loop in the estimate (P7-06): at most `MAX_CALLS` tool calls and one last turn;
+# each turn adds the model's call and its result to the messages, and the writer and the
+# verifier get the account facts (at most `MAX_ACCOUNT_FACTS`).
+RESEARCH_TURNS = RESEARCH_MAX_CALLS + 1
+RESEARCH_TURN_TOKENS = 600
+ACCOUNT_FACT_TOKENS = 40 * MAX_ACCOUNT_FACTS
 
 EXIT_OK = 0
 EXIT_SETUP = 1
@@ -350,7 +366,9 @@ def estimate_cost(
     the ticket's chunks), counted for every ticket although the code checks skip it for a draft
     that fails them. With judges, each ticket adds its judge requests at their largest
     (`judge_requests`). Verify and judge requests depend on the answer, so they are never
-    counted as cached."""
+    counted as cached. With the research loop (P7-06) each ticket adds `RESEARCH_TURNS` research
+    requests, each turn `RESEARCH_TURN_TOKENS` longer than the one before, and the write and
+    verify requests hold `ACCOUNT_FACT_TOKENS` of account facts (never cached)."""
     gateway: Gateway = pipeline.gateway
     calls = cached = 0
     total = Decimal(0)
@@ -378,6 +396,20 @@ def estimate_cost(
             )[0],
         ]
         uncached: list[ProviderRequest] = []
+        facts = ACCOUNT_FACT_TOKENS if pipeline.researches else 0
+        researched: list[tuple[ProviderRequest, int]] = []
+        if pipeline.researches and pipeline.research_prompt is not None:
+            first = gateway.chat_requests(
+                pipeline.research_prompt.front.role,
+                research_messages(
+                    pipeline.research_prompt,
+                    kb=found.kb,
+                    ticket=result.message_for_llm,
+                    history=result.history_for_llm,
+                ),
+                tools=research_tools(),
+            )[0]
+            researched = [(first, turn * RESEARCH_TURN_TOKENS) for turn in range(RESEARCH_TURNS)]
         if pipeline.verifies and pipeline.verify_prompt is not None:
             uncached.append(
                 gateway.chat_requests(
@@ -394,21 +426,26 @@ def estimate_cost(
             )
         if judge_set is not None:
             uncached += judge_requests(gateway, judge_set, ticket, found, draft_chars)
-        for request in requests:
+        for index, request in enumerate(requests):
             calls += 1
-            if cache is not None and cache.contains(request):
+            # The write request holds the account facts: never cached when there are any.
+            extra = facts if index == 1 else 0
+            if cache is not None and not extra and cache.contains(request):
                 cached += 1
                 continue
-            total += _price(gateway, request)
+            total += _price(gateway, request, extra)
         for request in uncached:
             calls += 1
-            total += _price(gateway, request)
+            total += _price(gateway, request, facts)
+        for request, extra in researched:
+            calls += 1
+            total += _price(gateway, request, extra)
     return Estimate(calls=calls, cached_calls=cached, cost_usd=total)
 
 
-def _price(gateway: Gateway, request: ProviderRequest) -> Decimal:
+def _price(gateway: Gateway, request: ProviderRequest, extra_tokens: int = 0) -> Decimal:
     usage = Usage(
-        input_tokens=estimate_tokens(request),
+        input_tokens=estimate_tokens(request) + extra_tokens,
         output_tokens=request.max_tokens or DEFAULT_OUTPUT_TOKENS,
     )
     return gateway.pricing.cost(request.model, usage)
@@ -895,6 +932,12 @@ def build_pipeline(
     limit = CostLimit(
         limit=Decimal(str(settings.eval_max_cost_usd)), enforced=settings.llm_mode == "real"
     )
+    tools = tool_client(settings, database) if variant != B0_VARIANT else None
+    if tools is not None and settings.core_anchor_date is None:
+        raise EvalSetupError(
+            "a run with account tools needs a fixed CORE_ANCHOR_DATE (eval plan §1, principle 6):"
+            " set it in .env, e.g. CORE_ANCHOR_DATE=2026-11-12, and restart the mcp service"
+        )
     pipeline = Pipeline(
         database=database,
         gateway=gateway,
@@ -908,6 +951,11 @@ def build_pipeline(
         # summary would add a paid call per handoff (ADR-0018).
         policy=load_policy(settings.policy_config),
         confidence_rule=load_confidence(settings.confidence_config),
+        # P7-06: the research loop and the profile in intake, against the same MCP server.
+        research_prompt=active_prompt(settings.prompts_dir, gateway.models, "research")
+        if tools is not None
+        else None,
+        tools=tools,
         context=LlmCallContext.EVAL,
         variant=variant,
         # The graph's checkpoints go to the evaluation database too (migration 0009 runs there).
@@ -959,6 +1007,8 @@ def run_config(
     prompts = [pipeline.triage_prompt, pipeline.write_prompt]
     if pipeline.verifies and pipeline.verify_prompt is not None:
         prompts.append(pipeline.verify_prompt)
+    if pipeline.researches and pipeline.research_prompt is not None:
+        prompts.append(pipeline.research_prompt)
     if judge_set is not None:
         prompts += judge_set.prompts
     prompt_files = [
@@ -967,6 +1017,8 @@ def run_config(
     nodes = [("triage", pipeline.triage_prompt), ("write", pipeline.write_prompt)]
     if pipeline.verifies and pipeline.verify_prompt is not None:
         nodes.append(("verify", pipeline.verify_prompt))
+    if pipeline.researches and pipeline.research_prompt is not None:
+        nodes.append(("research", pipeline.research_prompt))
     if judge_set is not None:
         nodes.append(("judge", judge_set.key_facts))
     return files.RunConfig(
