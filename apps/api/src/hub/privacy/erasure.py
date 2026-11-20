@@ -5,7 +5,9 @@ the checkpoints of their tickets). The text of their tool calls is cut to the ar
 Anonymised, kept for statistics: the `customers` row (name and email replaced, `anonymised_at`
 set) and the ticket rows (the operator summary removed; status, intent, route and times stay).
 Runs and `llm_calls` stay: they hold codes, numbers and costs only. A run still waiting for an
-operator ends `failed`: its draft and its checkpoint are gone, so nothing can resume it.
+operator ends `failed`: its draft and its checkpoint are gone, so nothing can resume it. The
+ticket keeps its status (no status is changed outside the state diagram); a `pending_approval`
+ticket then shows no draft, and the operator answers or rejects it as for any handoff.
 
 The audit log is not changed: it refers to the customer only by the internal UUID, which after
 the erasure points to no person, so the hash chain still verifies (security §5).
