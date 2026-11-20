@@ -355,7 +355,7 @@ async def test_a_failure_after_the_resume_fails_the_run_and_keeps_the_answer(
     assert ended is False
     assert _one(
         fresh, "SELECT status, route, route_reasons, error FROM runs WHERE id = %s", outcome.run_id
-    ) == ("failed", "approval", ["unsupported_claims"], "ConnectionError")
+    ) == ("failed", "approval", ["auto_reply_off"], "ConnectionError")
     assert _one(fresh, "SELECT status FROM tickets WHERE id = %s", ticket_id) == ("answered",)
 
 
@@ -530,7 +530,8 @@ async def test_recover_continues_a_run_from_its_last_checkpoint(
             fresh, "SELECT node FROM llm_calls WHERE node <> 'embedding' ORDER BY created_at"
         )
     ]
-    assert nodes_called == ["triage", "write", "verify", "write", "verify"]  # with the retry
+    # The write/v4 recordings pass the check: no retry (P7-06).
+    assert nodes_called == ["triage", "write", "verify"]
     actor, details = _one(
         fresh, "SELECT actor_type, details FROM audit_log WHERE action = 'run.recovered'"
     )

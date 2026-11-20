@@ -193,8 +193,8 @@ def test_the_writer_reads_the_hits_in_rank_order_with_their_ids() -> None:
 def test_each_variant_runs_its_own_write_prompt() -> None:
     prompts, models = ROOT / "prompts", real_models()
     assert write_prompt_for(prompts, models, B0_VARIANT).version == "write/v1"
-    assert write_prompt_for(prompts, models, VARIANT).version == "write/v3"
-    assert write_prompt_for(prompts, models, "rag_dense").version == "write/v3"
+    assert write_prompt_for(prompts, models, VARIANT).version == "write/v4"
+    assert write_prompt_for(prompts, models, "rag_dense").version == "write/v4"
 
 
 @pytest.mark.parametrize(("variant", "version"), [(B0_VARIANT, "v2"), (VARIANT, "v1")])
@@ -408,7 +408,7 @@ def test_a_rag_pipeline_needs_a_verify_prompt_and_b0_has_no_verify_step() -> Non
         _pipeline(VARIANT, verify=False)
     rag = _pipeline(VARIANT, verify=True)
     assert rag.verifies
-    assert rag.prompt_versions == {"triage": "v1", "write": "v3", "verify": "v1"}
+    assert rag.prompt_versions == {"triage": "v1", "write": "v4", "verify": "v1"}
     b0 = _pipeline(B0_VARIANT, verify=True)
     assert not b0.verifies
     assert b0.prompt_versions == {"triage": "v1", "write": "v1"}

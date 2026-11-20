@@ -575,7 +575,7 @@ async def test_the_research_loop_finds_a_failed_withdrawal(
     ]
     async with database.sessions() as session:
         calls = (await session.scalars(select(LlmCall).where(LlmCall.run_id == run_id))).all()
-    assert [(c.node, c.prompt_version) for c in calls] == [("research", "research/v1")] * 3
+    assert [(c.node, c.prompt_version) for c in calls] == [("research", "research/v2")] * 3
 
 
 async def test_a_failed_profile_load_hands_the_ticket_off(

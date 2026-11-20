@@ -13,7 +13,7 @@ NOT_IMPLEMENTED := test-e2e \
 	eval-smoke eval-attacks eval-report web-types retention \
 	leak-scan export-review-candidates rollback
 
-.PHONY: help $(BUILT) $(NOT_IMPLEMENTED)
+.PHONY: eval-rejudge help $(BUILT) $(NOT_IMPLEMENTED)
 
 help:
 	@echo "Built:           $(BUILT)"
@@ -143,6 +143,11 @@ eval:
 		$(if $(LIMIT),--limit $(LIMIT),) $(if $(NO_CACHE),--no-cache,) \
 		$(if $(RESTART),--restart,) $(if $(RUN_DIR),--run-dir $(RUN_DIR),) \
 		$(if $(NO_JUDGES),--no-judges,) $(if $(NO_TOOLS),--no-tools,)
+
+# Judge a finished RAG run again with the active judge prompts (judge calls only, P7-06):
+# RUN=evals/runs/<dir> writes <dir>-rejudged. Real models cost money: by hand.
+eval-rejudge:
+	uv run python -m hub_evals.rejudge $(RUN)
 
 $(NOT_IMPLEMENTED):
 	@echo "make $@: not implemented"

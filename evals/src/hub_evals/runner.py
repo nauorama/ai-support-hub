@@ -79,6 +79,7 @@ from hub.db.models import Ticket as TicketRow
 from hub.db.repositories import CustomerRepository, MessageRepository, TicketRepository
 from hub.db.session import Database, connect
 from hub.deps import tool_client
+from hub.domain.account import AccountFact
 from hub.domain.draft import DraftAnswer
 from hub.domain.enums import (
     ActorType,
@@ -133,7 +134,7 @@ from hub.llm.schemas import (
     Usage,
 )
 from hub.seed import load_customers, read_seed
-from hub.tools.facts import MAX_ACCOUNT_FACTS
+from hub.tools.facts import MAX_ACCOUNT_FACTS, render_facts
 from hub_evals import judges as judging
 from hub_evals import report as reporting
 from hub_evals import results as files
@@ -762,8 +763,9 @@ class JudgeEvidence:
 
 
 def judge_evidence(draft: files.DraftOut, sources: Mapping[str, KbSource]) -> JudgeEvidence:
-    """RAG (P5-05): every chunk the writer read, and the cited chunk per marker. B0: the cited
-    documents, as the writer cited them."""
+    """RAG (P5-05): every chunk the writer read and its account facts (P7-06, rendered as the
+    writer read them), and per marker its own cited source, a chunk or an account fact. B0: the
+    cited documents, as the writer cited them."""
     chunks = read_chunks_of(draft)
     if chunks is None:
         documents = cited_sources(draft, sources)
@@ -772,13 +774,24 @@ def judge_evidence(draft: files.DraftOut, sources: Mapping[str, KbSource]) -> Ju
             text=render_kb(unique),
             cited={marker: (s.id, render_kb([s])) for marker, s in documents.items()},
         )
-    by_id = {chunk.chunk_id: chunk for chunk in chunks}
+    facts = account_facts_of(draft)
+    rendered: dict[str, str] = {chunk.chunk_id: render_chunks([chunk]) for chunk in chunks}
+    rendered.update({fact.fact_id: render_facts([fact]) for fact in facts})
     cited: dict[int, tuple[str, str]] = {}
     for citation in draft.citations:
-        chunk = by_id.get(str(citation.get("source_id")))
-        if chunk is not None and isinstance(citation.get("marker"), int):
-            cited.setdefault(citation["marker"], (chunk.chunk_id, render_chunks([chunk])))
-    return JudgeEvidence(text=render_chunks(chunks), cited=cited)
+        source_id = str(citation.get("source_id"))
+        if source_id in rendered and isinstance(citation.get("marker"), int):
+            cited.setdefault(citation["marker"], (source_id, rendered[source_id]))
+    text = "\n\n".join(part for part in (render_chunks(chunks), render_facts(facts)) if part)
+    return JudgeEvidence(text=text, cited=cited)
+
+
+def account_facts_of(draft: files.DraftOut) -> list[AccountFact]:
+    """The account facts the writer read (P7-04, `drafts.evidence.account_facts`), in order."""
+    stored = draft.evidence.get("account_facts")
+    if not isinstance(stored, list):
+        return []
+    return [AccountFact.model_validate(fact) for fact in stored]
 
 
 def _id(source: KbSource) -> str:

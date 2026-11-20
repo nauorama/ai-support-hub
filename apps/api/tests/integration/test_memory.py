@@ -192,14 +192,12 @@ def test_a_second_ticket_of_the_customer_has_the_first_ones_summary_in_context(
     # write/v3 (P7-04): the writer reads the memory item, as context, in every write call
     assert provider.memory_blocks
     assert all(f"(withdrawal_issue): {SUMMARY}" in block for block in provider.memory_blocks)
-    # the recorded SEPA run: triage withdrawal_issue, then a retry. The memory shows an open case
-    # on the intent (row 6, `policy_review`), but with the write/v3 recordings (P7-04) the second
-    # check still finds an unsupported claim, and row 4 comes first. Row 6 alone is covered by
-    # tests/unit/test_routing.py.
+    # the recorded SEPA run: triage withdrawal_issue; with the write/v4 recordings (P7-06) the
+    # check passes without a retry, so the memory's open case on the intent decides (row 6).
     assert values["triage"].intent == "withdrawal_issue"
-    assert values["retry_count"] == 1
+    assert values["retry_count"] == 0
     assert decide_node.open_case(values, datetime.now(UTC))
-    assert (values["route"], values["route_reasons"]) == ("approval", ["unsupported_claims"])
+    assert (values["route"], values["route_reasons"]) == ("approval", ["policy_review"])
 
     assert [item["summary"] for item in detail["memory"]] == [SUMMARY]
     assert detail["memory"][0]["ticket_id"] == str(first)

@@ -715,7 +715,7 @@ def test_a_run_with_account_tools_needs_a_fixed_anchor_date(tmp_path: Path) -> N
         cache_dir=None,
     )
     assert pipeline.researches
-    assert pipeline.prompt_versions["research"] == "v1"
+    assert pipeline.prompt_versions["research"] == "v2"
     # B0 runs no research, so it needs no tools and no date.
     b0, _, _ = build_pipeline(_tool_settings(), database, variant="b0_full_kb", cache_dir=None)
     assert b0.tools is None

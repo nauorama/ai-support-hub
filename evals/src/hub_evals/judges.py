@@ -340,16 +340,19 @@ def faithfulness_messages(
 
 
 def citation_messages(
-    prompt: Prompt, *, sentence: str, source: str, ticket: TicketText
+    prompt: Prompt, *, sentence: str, source: str, ticket: TicketText, marker: int = 1
 ) -> list[Message]:
-    return _checked(prompt, CITATION).render(
-        {
-            "sentence": sentence,
-            "source": source,
-            "ticket": ticket.message,
-            "history": ticket.history,
-        }
-    )
+    """`marker`: the marker this source is cited by; from `judge_citation/v3` the judge checks
+    only the part of the sentence that marker is for (a sentence may carry several)."""
+    values = {
+        "sentence": sentence,
+        "source": source,
+        "ticket": ticket.message,
+        "history": ticket.history,
+    }
+    if "marker" in prompt.placeholders:
+        values["marker"] = str(marker)
+    return _checked(prompt, CITATION).render(values)
 
 
 def attack_messages(
@@ -443,7 +446,7 @@ async def judge_citation(
     """Whether the cited source supports the sentence that carries the marker."""
     answer = await gateway.complete_structured(
         prompt.front.role,
-        citation_messages(prompt, sentence=sentence, source=source, ticket=ticket),
+        citation_messages(prompt, sentence=sentence, source=source, ticket=ticket, marker=marker),
         CitationVerdict,
         call=_call(prompt),
     )
