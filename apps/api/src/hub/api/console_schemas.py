@@ -90,8 +90,11 @@ class IssueParams(_Strict):
     never from the request."""
 
     issue_type: IssueType
-    summary: Annotated[str, StringConstraints(min_length=1, max_length=255)]
-    description: Annotated[str, StringConstraints(min_length=1, max_length=5000)]
+    # NUL refused (api.md §1): Postgres jsonb (`tool_calls.arguments`) cannot store it (P8-04).
+    summary: Annotated[str, StringConstraints(min_length=1, max_length=255, pattern=r"^[^\x00]*$")]
+    description: Annotated[
+        str, StringConstraints(min_length=1, max_length=5000, pattern=r"^[^\x00]*$")
+    ]
 
 
 class ActionIn(_Strict):

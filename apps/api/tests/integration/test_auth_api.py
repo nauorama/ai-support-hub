@@ -1,16 +1,20 @@
 """Operator login, logout, `me`, CSRF and roles against Postgres as the app role (P2-07)."""
 
 import asyncio
+import re
 import uuid
 from collections.abc import Iterator
 
 import pytest
 from argon2 import PasswordHasher
 from fastapi import FastAPI
+from fastapi.dependencies.models import Dependant
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from hub.api.dependencies import RequireRole
 from hub.api.limits import RateLimiter
 from hub.audit import ChainCheck, verify_chain
 from hub.auth.passwords import hash_password, needs_rehash
@@ -288,3 +292,68 @@ def test_login_rehashes_an_old_hash_without_ending_sessions(app: FastAPI, urls: 
     assert not needs_rehash(stored)
     assert version == 1
     assert client.get("/api/v1/auth/me").json()["operator"]["id"] == str(operator_id)
+
+
+# --- P8-04: CSRF on every state-changing operator route, cookie flags ------------------------
+
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _has_role_dependency(dependant: Dependant) -> bool:
+    return isinstance(dependant.call, RequireRole) or any(
+        _has_role_dependency(child) for child in dependant.dependencies
+    )
+
+
+def _state_changing_operator_routes(app: FastAPI) -> list[tuple[str, str]]:
+    """Every non-GET route behind `RequireRole`, with its path parameters filled in."""
+    routes: list[tuple[str, str]] = []
+    for route in iter_route_contexts(app.routes):
+        # Starlette's own routes (`/openapi.json`, the docs pages) have no dependency tree.
+        dependant = getattr(route, "dependant", None)
+        if route.path is None or dependant is None or not _has_role_dependency(dependant):
+            continue
+        path = re.sub(r"\{[^}]+\}", str(uuid.uuid4()), route.path)
+        routes.extend(
+            (method, path) for method in sorted(route.methods or ()) if method not in _SAFE_METHODS
+        )
+    return routes
+
+
+def test_every_state_changing_operator_route_needs_the_csrf_token(
+    app: FastAPI, operator_id: uuid.UUID
+) -> None:
+    routes = _state_changing_operator_routes(app)
+    # The walk must find the console's write routes, or it would pass vacuously.
+    assert ("POST", "/api/v1/admin/kb/reindex") in routes
+    assert len(routes) >= 10, routes
+    client = operator_client(app, EMAIL)
+    client.headers.pop("X-CSRF-Token")
+    for method, path in routes:
+        for headers in ({}, {"X-CSRF-Token": "0" * 64}, {"X-CSRF-Token": ""}):
+            response = client.request(
+                method, path, json={}, headers={"Idempotency-Key": str(uuid.uuid4()), **headers}
+            )
+            # Before the body is validated and before the role is checked (security §4).
+            assert response.status_code == 403, (method, path, response.text)
+            assert response.json()["code"] == "csrf_failed", (method, path)
+
+
+def test_a_csrf_token_of_another_operator_is_refused(app: FastAPI, urls: Urls) -> None:
+    add_operator(urls, EMAIL, "admin")
+    add_operator(urls, "other@tallybridge.test", "admin")
+    mine = operator_client(app, EMAIL)
+    theirs = operator_client(app, "other@tallybridge.test")
+    mine.headers["X-CSRF-Token"] = theirs.headers["X-CSRF-Token"]
+    response = mine.post("/api/v1/admin/kb/reindex")
+    assert response.status_code == 403
+    assert response.json()["code"] == "csrf_failed"
+
+
+def test_the_logout_cookie_deletion_keeps_the_cookie_flags(
+    app: FastAPI, operator_id: uuid.UUID
+) -> None:
+    cookie = operator_client(app, EMAIL).post("/api/v1/auth/logout").headers["set-cookie"]
+    assert cookie.startswith('hub_operator=""')
+    for flag in ("HttpOnly", "Secure", "SameSite=lax", "Max-Age=0", "Path=/"):
+        assert flag in cookie

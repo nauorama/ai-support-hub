@@ -35,6 +35,15 @@ Design rules: clean and calm, works at 360 px and up; keyboard reachable; visibl
 
 States to build: empty, sending, streaming progress, answered, waiting for a human (polling), error with retry, rate limited, budget stop ("Our assistant is not available now; a human will answer").
 
+**Safe rendering rule** (security T13, P8-04). Applies to every text the web app shows that a customer, an operator or a model wrote: messages, drafts, missing information, memory summaries, tool-call summaries, the operator summary, KB search hits.
+- Text is rendered as text (React text nodes). Never `dangerouslySetInnerHTML`, never `innerHTML`, never an HTML string from the API.
+- Markdown: only a small subset is turned into elements — paragraphs and line breaks, `**bold**`, `*italic*`, bulleted and numbered lists, `inline code`. Everything else (headings, tables, block quotes, raw HTML, HTML entities as markup) stays literal text. If a library parses it, raw HTML is turned off and the allowed node types are an explicit allow-list.
+- No links from text: a URL written in a message, also as Markdown `[text](url)` or an autolink, is shown as plain text, not clickable. The only links are the "Sources" of a message, built from its `citations` (`url` is a relative `/help/<doc_id>#<anchor>` link built by the server; the customer API drops any other value to `""`, `hub.api.schemas.safe_citation_url`). A citation with an empty `url` (an account fact) has no link. The console's evidence and KB search links follow the same rule (relative `/help/...` only).
+- No images, no iframes, no embedded media from any text.
+- A link that opens in a new tab has `rel="noopener noreferrer"`.
+- The Content-Security-Policy of the API (security §4: `script-src 'self'`, no inline script, no third-party origin) is the second line; the web app must work under it (no inline scripts or styles, no CDN).
+- Tests (P10-05): a message holding `<img src=x onerror=…>`, `<script>`, `[x](javascript:…)` and a bare URL renders as visible text with no element, link or request.
+
 ## 3. Operator console
 
 ### Queue (`/console`)

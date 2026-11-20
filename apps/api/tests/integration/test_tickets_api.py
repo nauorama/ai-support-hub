@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from uuid_utils.compat import uuid7
 
 from hub.api import tickets as tickets_module
+from hub.api.limits import RateLimiter
 from hub.audit import ChainCheck, verify_chain
 from hub.config import Settings
 from hub.db.models import Message
@@ -649,6 +650,26 @@ def test_more_than_10_messages_a_minute_get_429(
         .status_code
         == 200
     )
+
+
+def test_the_per_ip_message_limit_holds_across_sessions(
+    app_client: TestClient,
+    app_container: Container,
+    api_db: tuple[str, str],
+    customers: dict[str, uuid.UUID],
+) -> None:
+    # The numbers (60 per hour) are checked in tests/unit/test_limits.py; here the wiring: a new
+    # session from the same IP does not get a new IP budget (api.md §1, P8-04).
+    app_container.rate_limits.messages_per_ip = RateLimiter(3, 60 * 60)
+    _new_ticket(_login(app_client, "CUS-0001"), "one")
+    _new_ticket(_login(app_client, "CUS-0001"), "two")
+    second_customer = _login(app_client, "CUS-0002")
+    _new_ticket(second_customer, "three")
+    response = second_customer.post("/api/v1/tickets", json={"message": "four"}, headers=_key())
+    assert response.status_code == 429
+    assert response.json()["code"] == "too_many_requests"
+    assert 0 < int(response.headers["Retry-After"]) <= 60 * 60
+    assert _sql(api_db, "SELECT count(*) FROM tickets") == [(3,)]
 
 
 def test_placeholder_text_does_not_promise_an_ai_answer() -> None:
